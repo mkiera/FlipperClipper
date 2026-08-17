@@ -1,0 +1,681 @@
+/*
+ * Dark first, because the app spends its life next to a near-black video stage
+ * and a light chrome around it makes the picture look washed out. The light
+ * palette exists so the window does not fight a light desktop, and is nothing
+ * more than the same tokens with different values.
+ *
+ * Transitions are capped at 120ms on purpose: this is a utility someone opens
+ * to make one cut, and anything slower reads as the app thinking.
+ */
+
+:root {
+  --bg: #16181c;
+  --panel: #1b1e23;
+  --stage: #08090b;
+  --fg: #e7e9ee;
+  --fg-dim: #949bab;
+  --line: #2b303a;
+  /* The updater pill builds its own stylesheet in updater.ts and asks for
+     --border, so without this alias its edge falls back to a grey that belongs
+     to neither palette. */
+  --border: #2b303a;
+  --hover: #252a32;
+  --sunken: #101318;
+  --accent: #4c8dff;
+  --accent-fg: #ffffff;
+  --danger: #ff5f56;
+  --shade: rgba(8, 9, 11, 0.66);
+
+  --radius: 5px;
+  --row: 48px;
+  --strip: 64px;
+
+  color-scheme: dark;
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    --bg: #f2f3f5;
+    --panel: #fbfbfc;
+    --stage: #1a1c20;
+    --fg: #1a1d22;
+    --fg-dim: #626a76;
+    --line: #d8dbe1;
+    /* Same alias as the dark block: the updater pill is styled independently of
+       this file and only knows the name --border. */
+    --border: #d8dbe1;
+    --hover: #e9ebef;
+    --sunken: #e4e6ea;
+    --accent: #1f6feb;
+    --accent-fg: #ffffff;
+    --danger: #c62f2f;
+    --shade: rgba(10, 11, 13, 0.6);
+
+    color-scheme: light;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+}
+
+body {
+  background: var(--bg);
+  color: var(--fg);
+  font-family: -apple-system, "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+  font-size: 13px;
+  line-height: 1.35;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+#app {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+:focus:not(:focus-visible) {
+  outline: none;
+}
+
+/* ---------------------------------------------------------------- buttons */
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel);
+  color: var(--fg);
+  font: inherit;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease, color 120ms ease;
+}
+
+.btn:hover:not(:disabled) {
+  background: var(--hover);
+}
+
+.btn:active:not(:disabled) {
+  background: var(--sunken);
+}
+
+.btn.active {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.btn.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-fg);
+  font-weight: 600;
+  padding: 0 14px;
+}
+
+.btn.primary:hover:not(:disabled) {
+  filter: brightness(1.08);
+  background: var(--accent);
+}
+
+.btn:disabled,
+.icon-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.btn svg {
+  width: 13px;
+  height: 13px;
+  fill: currentColor;
+  flex: none;
+}
+
+.icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 28px;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel);
+  color: var(--fg);
+  font: inherit;
+  cursor: pointer;
+  transition: background 120ms ease;
+}
+
+.icon-btn:hover:not(:disabled) {
+  background: var(--hover);
+}
+
+.icon-btn svg {
+  width: 14px;
+  height: 14px;
+  fill: currentColor;
+}
+
+.icon-btn.small {
+  width: 22px;
+  height: 22px;
+  border-color: transparent;
+  background: transparent;
+  color: var(--fg-dim);
+}
+
+.icon-btn.small svg {
+  width: 11px;
+  height: 11px;
+}
+
+.chips {
+  display: flex;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--sunken);
+}
+
+.chip {
+  min-width: 30px;
+  height: 22px;
+  padding: 0 6px;
+  border: none;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--fg-dim);
+  font: inherit;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease;
+}
+
+.chip:hover:not(:disabled) {
+  color: var(--fg);
+  background: var(--hover);
+}
+
+.chip.active {
+  background: var(--accent);
+  color: var(--accent-fg);
+}
+
+.chip:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+select {
+  height: 28px;
+  padding: 0 6px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel);
+  color: var(--fg);
+  font: inherit;
+  cursor: pointer;
+}
+
+/* ---------------------------------------------------------------- banners */
+
+#banners:empty {
+  display: none;
+}
+
+.banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 10px;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel);
+}
+
+.banner-msg {
+  flex: 1;
+  min-width: 0;
+  color: var(--fg-dim);
+}
+
+/* ------------------------------------------------------------------ stage */
+
+#stage {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  background: var(--stage);
+  overflow: hidden;
+}
+
+#video {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  display: block;
+  background: var(--stage);
+  visibility: hidden;
+}
+
+#video.loaded {
+  visibility: visible;
+}
+
+#empty {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  color: #8f96a3;
+}
+
+.empty-title {
+  margin: 0;
+  font-size: 15px;
+}
+
+/* Pinned to the corner rather than left in the centred stack, because it is a
+   thing to look up on purpose and not part of the invitation to open a file.
+   Selectable so the commit can be pasted into a bug report. */
+.about {
+  position: absolute;
+  right: 12px;
+  bottom: 10px;
+  margin: 0;
+  font-size: 11px;
+  color: var(--fg-dim);
+  opacity: 0.7;
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+#drop-hint {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(76, 141, 255, 0.12);
+  border: 2px solid var(--accent);
+  color: var(--fg);
+  font-size: 15px;
+  pointer-events: none;
+  z-index: 40;
+}
+
+/* ------------------------------------------------------------------- crop */
+
+#crop-layer {
+  position: absolute;
+  inset: 0;
+}
+
+#crop-rect {
+  position: absolute;
+  border: 1px solid rgba(255, 255, 255, 0.9);
+  /* One huge shadow dims everything outside the rectangle without needing four
+     panels kept in sync with it. */
+  box-shadow: 0 0 0 9999px var(--shade);
+  cursor: move;
+  touch-action: none;
+}
+
+#crop-rect::before,
+#crop-rect::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  border-style: solid;
+  border-color: rgba(255, 255, 255, 0.25);
+}
+
+#crop-rect::before {
+  border-width: 0 1px;
+  margin: 0 33.33%;
+}
+
+#crop-rect::after {
+  border-width: 1px 0;
+  margin: 33.33% 0;
+}
+
+.ch {
+  position: absolute;
+  width: 14px;
+  height: 14px;
+  background: transparent;
+}
+
+.ch::after {
+  content: "";
+  position: absolute;
+  inset: 4px;
+  background: #fff;
+  border: 1px solid rgba(0, 0, 0, 0.45);
+  border-radius: 1px;
+}
+
+.ch-nw { top: -7px; left: -7px; cursor: nwse-resize; }
+.ch-n  { top: -7px; left: 50%; margin-left: -7px; cursor: ns-resize; }
+.ch-ne { top: -7px; right: -7px; cursor: nesw-resize; }
+.ch-e  { top: 50%; right: -7px; margin-top: -7px; cursor: ew-resize; }
+.ch-se { bottom: -7px; right: -7px; cursor: nwse-resize; }
+.ch-s  { bottom: -7px; left: 50%; margin-left: -7px; cursor: ns-resize; }
+.ch-sw { bottom: -7px; left: -7px; cursor: nesw-resize; }
+.ch-w  { top: 50%; left: -7px; margin-top: -7px; cursor: ew-resize; }
+
+#crop-bar {
+  position: absolute;
+  left: 50%;
+  bottom: 12px;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--panel);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.4);
+  /* Above the crop rectangle's dimming shadow, which covers the whole stage. */
+  z-index: 10;
+}
+
+.crop-size {
+  min-width: 78px;
+  text-align: center;
+  color: var(--fg-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+/* --------------------------------------------------------------- controls */
+
+#controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: var(--row);
+  flex: none;
+  padding: 0 10px;
+  border-top: 1px solid var(--line);
+  background: var(--bg);
+}
+
+.spacer {
+  flex: 1;
+  min-width: 4px;
+}
+
+.time {
+  min-width: 104px;
+  color: var(--fg-dim);
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+
+#play .i-pause,
+#play.is-playing .i-play {
+  display: none;
+}
+
+#play.is-playing .i-pause {
+  display: block;
+}
+
+#mute-btn .i-muted,
+#mute-btn.is-muted .i-sound {
+  display: none;
+}
+
+#mute-btn.is-muted .i-muted {
+  display: block;
+}
+
+/* The labels are the first thing to go when the window is near its 800px
+   minimum, because the icons stay unambiguous without them. */
+@media (max-width: 900px) {
+  .btn-label {
+    display: none;
+  }
+}
+
+#export-area {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+#export-running {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  min-width: 150px;
+  padding: 0 4px 0 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel);
+}
+
+.bar {
+  flex: 1;
+  height: 5px;
+  border-radius: 3px;
+  background: var(--sunken);
+  overflow: hidden;
+}
+
+.bar-fill {
+  height: 100%;
+  width: 0;
+  background: var(--accent);
+  transition: width 120ms linear;
+}
+
+.bar-text {
+  min-width: 34px;
+  color: var(--fg-dim);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+#export-popover {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 8px);
+  width: 268px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--panel);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+  z-index: 30;
+}
+
+.check {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  color: var(--fg-dim);
+  cursor: pointer;
+}
+
+.check input {
+  margin: 1px 0 0;
+  accent-color: var(--accent);
+}
+
+.popover-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+/* --------------------------------------------------------------- timeline */
+
+#timeline {
+  flex: none;
+  height: var(--strip);
+  padding: 6px 10px 8px;
+  border-top: 1px solid var(--line);
+  background: var(--bg);
+}
+
+#tl-track {
+  position: relative;
+  height: 100%;
+  border-radius: var(--radius);
+  background: var(--sunken);
+  overflow: hidden;
+  cursor: pointer;
+  touch-action: none;
+}
+
+#tl-track.empty {
+  cursor: default;
+}
+
+#tl-strip {
+  position: absolute;
+  inset: 0;
+  display: flex;
+}
+
+#tl-strip img {
+  flex: 1 1 0;
+  min-width: 0;
+  height: 100%;
+  object-fit: cover;
+  pointer-events: none;
+}
+
+.tl-shade {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  background: var(--shade);
+  pointer-events: none;
+}
+
+#tl-shade-left {
+  left: 0;
+}
+
+#tl-shade-right {
+  right: 0;
+}
+
+/* The bracket is drawn 3px wide but grabbed through a 20px box, because a 3px
+   target is a coin flip with a mouse and impossible with a trackpad. */
+.tl-handle {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 20px;
+  margin-left: -10px;
+  cursor: ew-resize;
+  z-index: 3;
+}
+
+#tl-track.empty .tl-handle {
+  display: none;
+}
+
+.tl-handle i {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  width: 3px;
+  margin-left: -1.5px;
+  background: var(--accent);
+  border-radius: 2px;
+  transition: box-shadow 120ms ease;
+}
+
+.tl-handle:hover i {
+  box-shadow: 0 0 0 1px var(--accent);
+}
+
+#tl-playhead {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  margin-left: -0.5px;
+  background: #fff;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.5);
+  pointer-events: none;
+  z-index: 4;
+}
+
+#tl-track.empty #tl-playhead {
+  display: none;
+}
+
+/* ------------------------------------------------------------------ toast */
+
+#toast {
+  position: fixed;
+  right: 14px;
+  bottom: calc(var(--row) + var(--strip) + 14px);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  max-width: min(460px, calc(100vw - 28px));
+  padding: 8px 8px 8px 12px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--panel);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+  z-index: 50;
+}
+
+#toast.error {
+  border-color: var(--danger);
+}
+
+#toast-msg {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+#toast-actions {
+  display: flex;
+  gap: 6px;
+}
+
+#toast-actions:empty {
+  display: none;
+}
+
+[hidden] {
+  display: none !important;
+}

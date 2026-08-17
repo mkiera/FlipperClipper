@@ -1,0 +1,185 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      # A cold Tauri build compiles several hundred crates and takes the better
+      # part of fifteen minutes on a runner. Almost none of that is our code, so
+      # almost all of it is cacheable, and a warm cache turns a release into a
+      # few minutes. Pointed at src-tauri because that is where the workspace
+      # and its target directory live.
+      - name: Cache the Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      # Before the version is rewritten below: npm ci wants package.json and
+      # package-lock.json to agree, and the rewrite touches both.
+      - name: Install npm dependencies
+        run: npm ci
+
+      - name: Get version info
+        id: version
+        shell: bash
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/v}
+          echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
+          echo "RELEASE_NAME=QuickClip v$VERSION" >> $GITHUB_OUTPUT
+          # Pre-release detection is just "does the tag have a hyphen in it".
+          # Tauri requires strict semver, and in semver everything after the
+          # first hyphen IS the pre-release identifier, so the version string
+          # already carries the answer. FinFetcher needed a regex here only
+          # because its own scheme (1.2.4f-media-options) predated that
+          # constraint.
+          if [[ "$VERSION" == *"-"* ]]; then
+            echo "IS_PRERELEASE=true" >> $GITHUB_OUTPUT
+          else
+            echo "IS_PRERELEASE=false" >> $GITHUB_OUTPUT
+          fi
+          # The tag is the authority for what this build IS. package.json's
+          # version feeds the exe's version resource (tauri.conf.json reads it),
+          # the installer's AppVersion, and what the app reports to the updater
+          # — so tagging v0.2.0 without having bumped the file would ship a build
+          # calling itself 0.1.0, which then keeps being offered its own release
+          # as an update forever. Write the tag in and be sure.
+          #
+          # `npm version` rather than editing the file, because it updates
+          # package-lock.json to match in the same step; --allow-same-version so
+          # the normal case, where the bump was already committed, is not an
+          # error.
+          npm version "$VERSION" --no-git-tag-version --allow-same-version
+          echo "package.json version is now: $(node scripts/vernum.mjs --raw)"
+
+      - name: Stamp the build with its commit and run
+        run: node scripts/build_info.mjs
+
+      # --no-bundle because installer.iss is what packages this project, not
+      # Tauri's own NSIS/WiX bundlers; see the header comment there for why.
+      # Leaves the exe at src-tauri\target\release\QuickClip.exe, which is where
+      # installer.iss looks for it.
+      #
+      # Nothing here corresponds to FinFetcher's --noupx and --onedir flags, and
+      # that is not an oversight. Both were answers to PyInstaller: a onefile
+      # build is a self-extracting archive that unpacks itself at run time, and
+      # UPX is a packer, and antivirus engines score both of those shapes
+      # regardless of what is inside them — six builds differing by one
+      # packaging choice each were measured on VirusTotal to establish it. Cargo
+      # emits an ordinary MSVC-linked native binary that neither unpacks nor is
+      # packed, so there is no equivalent flag to pass. The one lesson that does
+      # carry over is the version resource, and Tauri writes that itself from
+      # the bundle metadata in tauri.conf.json.
+      # npx rather than `npm run tauri build -- --no-bundle`: measured on this
+      # project, npm swallows the flag and Tauri bundles anyway, which quietly
+      # adds a WiX and an NSIS download to every run and produces an MSI and a
+      # setup exe that are not what this project ships. npx passes it straight
+      # through to the local CLI.
+      - name: Build the app
+        run: npx tauri build --no-bundle
+
+      # A Windows version resource needs four plain numbers, and a tag can be
+      # something like v0.2.0-beta. vernum.mjs owns that rule so installer.iss
+      # does not have to grow a second one.
+      - name: Derive numeric version for the installer
+        id: vernum
+        shell: bash
+        run: |
+          VERNUM=$(node scripts/vernum.mjs)
+          echo "VERNUM=$VERNUM" >> $GITHUB_OUTPUT
+          echo "numeric version: $VERNUM"
+
+      # windows-latest is expected to ship Inno Setup, but "expected to" is not a
+      # build guarantee — install it rather than fail. The resolved path is
+      # exported instead of relying on PATH, because a fresh choco shim is not
+      # visible to a step that already started.
+      - name: Ensure Inno Setup is available
+        shell: pwsh
+        run: |
+          function Find-Iscc {
+            $onPath = (Get-Command iscc.exe -ErrorAction SilentlyContinue).Source
+            if ($onPath) { return $onPath }
+            # Version-agnostic glob: choco installs into "Inno Setup 6" today and
+            # a later major would be "Inno Setup 7".
+            # winget installs Inno Setup per-user into %LOCALAPPDATA%\Programs,
+            # which is not Program Files - a dev machine hits that path.
+            $globs = @("${env:ProgramFiles(x86)}\Inno Setup *\ISCC.exe", "$env:ProgramFiles\Inno Setup *\ISCC.exe", "$env:LOCALAPPDATA\Programs\Inno Setup *\ISCC.exe")
+            return (Get-ChildItem -Path $globs -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName)
+          }
+          $iscc = Find-Iscc
+          if (-not $iscc) {
+            Write-Host "Inno Setup not found on this runner - installing it."
+            choco install innosetup -y --no-progress
+            $iscc = Find-Iscc
+          }
+          if (-not $iscc) { throw "ISCC.exe still not found after installing Inno Setup" }
+          Write-Host "Using $iscc"
+          Add-Content -Path $env:GITHUB_ENV -Value "ISCC=$iscc"
+
+      # Wraps the one release exe into dist_installer\QuickClip-Setup.exe. Both
+      # version forms are passed in because the Inno Setup preprocessor cannot
+      # read package.json itself.
+      - name: Build installer
+        shell: pwsh
+        run: |
+          & "$env:ISCC" "/DAppVersion=${{ steps.version.outputs.VERSION }}" "/DVersionNumeric=${{ steps.vernum.outputs.VERNUM }}" installer.iss
+
+      # One asset, so none of FinFetcher's asset-ordering care is needed here:
+      # that existed to keep clients on v1.2.4 and earlier, whose updater took
+      # the first .exe the API returned, from swapping an installer over their
+      # own executable. QuickClip has no such clients and its updater picks the
+      # asset ending in -Setup.exe by name.
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ steps.version.outputs.RELEASE_NAME }}
+          body: |
+            ## ${{ steps.version.outputs.RELEASE_NAME }}
+
+            Trim, crop, speed up and mute a video, then export an MP4 — for when
+            a clip needs one quick edit before it goes to someone.
+
+            ### Installation
+            **`QuickClip-Setup.exe`** is the one you want. It installs for you
+            alone, asks for no admin rights, and starts the app when it's done.
+
+            QuickClip uses **FFmpeg** to export. If it isn't on your PATH the app
+            offers a one-click install on first launch
+            (`winget install -e --id Gyan.FFmpeg`).
+
+            ### Already have QuickClip?
+            Run `QuickClip-Setup.exe` over the top — it keeps your install
+            location and shortcut choice. Or just let the app update itself:
+            it checks for new releases on launch.
+          files: dist_installer/QuickClip-Setup.exe
+          # The action defaults this to false, which would publish a green,
+          # assetless release if the installer ever failed to land where the
+          # glob looks. That is the one failure nobody would notice: the updater
+          # skips a release with no -Setup.exe asset, so every client would
+          # quietly never be offered the version, and the Actions page would say
+          # the release succeeded. Fail the run instead.
+          fail_on_unmatched_files: true
+          draft: false
+          prerelease: ${{ steps.version.outputs.IS_PRERELEASE == 'true' }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

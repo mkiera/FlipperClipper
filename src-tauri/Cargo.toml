@@ -1,0 +1,40 @@
+[package]
+name = "quickclip"
+version = "0.1.0"
+description = "Quick trim, crop and speed edits for video clips"
+authors = ["mkiera"]
+license = "MIT"
+edition = "2021"
+
+[lib]
+# The `_lib` suffix may seem redundant but it is necessary
+# to make the lib name unique and wouldn't conflict with the bin name.
+# This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
+name = "quickclip_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["protocol-asset"] }
+tauri-plugin-opener = "2"
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Updater only. default-features off keeps rustls and its ring build out of the
+# tree: native-tls is schannel on Windows, which is already in the OS.
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "native-tls"] }
+futures-util = "0.3"
+semver = "1"
+
+[profile.release]
+# A quick-edit tool is judged on how fast it starts and how small the download
+# is. opt-level "s" plus LTO and a single codegen unit trade compile time we
+# only spend in CI for both. panic=abort drops the unwinding tables; a panic in
+# here has nothing to recover to anyway.
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
