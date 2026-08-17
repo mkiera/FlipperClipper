@@ -1333,6 +1333,10 @@ fn search_for_tool(name: &str) -> Option<(PathBuf, String)> {
         .map(move |dir| dir.join(&file_name))
         .filter(|candidate| candidate_exists(candidate))
         .chain(bare)
+        .flat_map(|candidate| {
+            let target = link_target(&candidate);
+            std::iter::once(candidate).chain(target)
+        })
         .find_map(|candidate| run_version(&candidate).map(|text| (candidate, text)))?;
 
     if let Ok(mut cache) = resolved_tools().lock() {
@@ -1345,6 +1349,27 @@ fn search_for_tool(name: &str) -> Option<(PathBuf, String)> {
 /// and following one can fail even though CreateProcess would launch it.
 fn candidate_exists(path: &Path) -> bool {
     std::fs::symlink_metadata(path).is_ok()
+}
+
+/// Where a reparse-point candidate points, so the real binary can be tried too.
+///
+/// The winget shims are symlinks, and a process the installer launched is
+/// refused permission to traverse one: measured as os error 448, "the path
+/// cannot be traversed because it contains an untrusted mount point", on the
+/// launch that raised the missing-FFmpeg banner. read_link reads the link
+/// itself rather than following it, so it answers where a spawn could not go.
+fn link_target(path: &Path) -> Option<PathBuf> {
+    let meta = std::fs::symlink_metadata(path).ok()?;
+    if !meta.file_type().is_symlink() {
+        return None;
+    }
+    let target = std::fs::read_link(path).ok()?;
+    let target = if target.is_absolute() {
+        target
+    } else {
+        path.parent()?.join(target)
+    };
+    candidate_exists(&target).then_some(target)
 }
 
 /// The stdout of a `-version` that exited zero, or None - which is what keeps a
