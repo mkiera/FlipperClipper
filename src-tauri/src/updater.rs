@@ -142,6 +142,17 @@ pub async fn check_for_update(app: tauri::AppHandle) -> Result<Option<UpdateInfo
         .await
         .map_err(|e| format!("GitHub's release list could not be read: {e}"))?;
 
+    Ok(pick_update(releases, &current))
+}
+
+/// Which release, if any, the running version should be offered.
+///
+/// Split out from the command so it can be tested: everything that decides
+/// whether a person is interrupted lives here, and none of it needs a network
+/// or an AppHandle. Getting it wrong is quiet in both directions - offering a
+/// downgrade walks somebody backwards, and offering nothing means a fix never
+/// reaches them - so it is the part of the updater worth pinning down.
+fn pick_update(releases: Vec<GhRelease>, current: &semver::Version) -> Option<UpdateInfo> {
     // FinFetcher had a settings toggle for its beta channel. The same
     // behaviour falls out of the running version here: somebody on
     // 0.2.0-beta.1 asked for pre-releases by installing one, and somebody on
@@ -169,7 +180,7 @@ pub async fn check_for_update(app: tauri::AppHandle) -> Result<Option<UpdateInfo
 
         // semver's ordering already puts 0.2.0-beta.1 below 0.2.0, so the
         // stable release of a version correctly updates a pre-release of it.
-        if version <= current {
+        if version <= *current {
             continue;
         }
 
@@ -200,7 +211,7 @@ pub async fn check_for_update(app: tauri::AppHandle) -> Result<Option<UpdateInfo
         }
     }
 
-    Ok(best.map(|(_, info)| info))
+    best.map(|(_, info)| info)
 }
 
 #[tauri::command]
@@ -394,4 +405,196 @@ pub async fn apply_update(app: tauri::AppHandle, info: UpdateInfo) -> Result<(),
     // what starts the new version.
     app.exit(0);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn version(raw: &str) -> semver::Version {
+        semver::Version::parse(raw).expect("test version should parse")
+    }
+
+    fn releases(json: &str) -> Vec<GhRelease> {
+        serde_json::from_str(json).expect("test payload should deserialise")
+    }
+
+    /// Trimmed from what api.github.com actually returned for this repo, so the
+    /// field names and types are the real ones rather than what we assume they
+    /// are. A response GitHub can send and serde cannot read would fail here
+    /// rather than silently becoming "no update available" for everybody.
+    const REAL_PAYLOAD: &str = r#"[
+      {
+        "html_url": "https://github.com/mkiera/QuickClip/releases/tag/v0.1.0-beta",
+        "tag_name": "v0.1.0-beta",
+        "draft": false,
+        "prerelease": true,
+        "assets": [
+          {
+            "name": "QuickClip-Setup.exe",
+            "size": 3309048,
+            "browser_download_url": "https://github.com/mkiera/QuickClip/releases/download/v0.1.0-beta/QuickClip-Setup.exe"
+          }
+        ]
+      }
+    ]"#;
+
+    #[test]
+    fn the_real_github_payload_deserialises_and_is_offered_to_an_older_prerelease() {
+        let picked = pick_update(releases(REAL_PAYLOAD), &version("0.0.9-beta"))
+            .expect("an older pre-release build should be offered this one");
+        assert_eq!(picked.version, "0.1.0-beta");
+        assert_eq!(picked.asset_name, "QuickClip-Setup.exe");
+        assert_eq!(picked.size_bytes, 3309048);
+        assert!(picked.prerelease);
+        assert!(picked.download_url.ends_with("/QuickClip-Setup.exe"));
+    }
+
+    #[test]
+    fn a_stable_build_is_never_pulled_onto_a_prerelease() {
+        // The whole beta channel, with no settings toggle: a person running a
+        // stable build never asked to be moved onto a beta, even a newer one.
+        assert!(pick_update(releases(REAL_PAYLOAD), &version("0.0.1")).is_none());
+    }
+
+    #[test]
+    fn the_running_version_is_not_offered_to_itself() {
+        // The bug FinFetcher hit: ship a build whose version does not match its
+        // tag and it is offered its own release forever.
+        assert!(pick_update(releases(REAL_PAYLOAD), &version("0.1.0-beta")).is_none());
+        assert!(pick_update(releases(REAL_PAYLOAD), &version("0.2.0-beta")).is_none());
+    }
+
+    #[test]
+    fn the_stable_release_of_a_version_updates_its_prerelease() {
+        let payload = r#"[
+          {"html_url":"h","tag_name":"v0.1.0","draft":false,"prerelease":false,
+           "assets":[{"name":"QuickClip-Setup.exe","size":10,"browser_download_url":"u"}]}
+        ]"#;
+        let picked = pick_update(releases(payload), &version("0.1.0-beta"))
+            .expect("0.1.0 is newer than 0.1.0-beta and stable, so it is offered");
+        assert_eq!(picked.version, "0.1.0");
+        assert!(!picked.prerelease);
+    }
+
+    #[test]
+    fn the_newest_release_wins_regardless_of_the_order_github_lists_them() {
+        let payload = r#"[
+          {"html_url":"h","tag_name":"v0.3.0","draft":false,"prerelease":false,
+           "assets":[{"name":"QuickClip-Setup.exe","size":3,"browser_download_url":"u3"}]},
+          {"html_url":"h","tag_name":"v0.9.0","draft":false,"prerelease":false,
+           "assets":[{"name":"QuickClip-Setup.exe","size":9,"browser_download_url":"u9"}]},
+          {"html_url":"h","tag_name":"v0.5.0","draft":false,"prerelease":false,
+           "assets":[{"name":"QuickClip-Setup.exe","size":5,"browser_download_url":"u5"}]}
+        ]"#;
+        let picked = pick_update(releases(payload), &version("0.1.0")).expect("something is newer");
+        assert_eq!(picked.version, "0.9.0");
+    }
+
+    #[test]
+    fn drafts_and_unparseable_tags_are_skipped_rather_than_guessed_at() {
+        let payload = r#"[
+          {"html_url":"h","tag_name":"v9.9.9","draft":true,"prerelease":false,
+           "assets":[{"name":"QuickClip-Setup.exe","size":1,"browser_download_url":"u"}]},
+          {"html_url":"h","tag_name":"nightly","draft":false,"prerelease":false,
+           "assets":[{"name":"QuickClip-Setup.exe","size":1,"browser_download_url":"u"}]},
+          {"html_url":"h","tag_name":"v0.2.0","draft":false,"prerelease":false,
+           "assets":[{"name":"QuickClip-Setup.exe","size":2,"browser_download_url":"u2"}]}
+        ]"#;
+        let picked = pick_update(releases(payload), &version("0.1.0")).expect("v0.2.0 is usable");
+        assert_eq!(picked.version, "0.2.0");
+    }
+
+    #[test]
+    fn a_release_still_uploading_does_not_hide_an_older_usable_one() {
+        // A tag exists the moment the workflow starts; the asset appears
+        // minutes later. Treating the newest release as authoritative when it
+        // has no installer would mean nobody is offered anything until the
+        // upload finishes.
+        let payload = r#"[
+          {"html_url":"h","tag_name":"v0.4.0","draft":false,"prerelease":false,"assets":[]},
+          {"html_url":"h","tag_name":"v0.2.0","draft":false,"prerelease":false,
+           "assets":[{"name":"QuickClip-Setup.exe","size":2,"browser_download_url":"u2"}]}
+        ]"#;
+        let picked = pick_update(releases(payload), &version("0.1.0")).expect("v0.2.0 is ready");
+        assert_eq!(picked.version, "0.2.0");
+    }
+
+    #[test]
+    fn only_the_setup_exe_is_ever_offered() {
+        // Whatever else a release carries - a portable build, a zip, checksums -
+        // the updater must hand the installer to Setup, because that is the
+        // thing that understands /SILENT and the [Run] relaunch.
+        let payload = r#"[
+          {"html_url":"h","tag_name":"v0.2.0","draft":false,"prerelease":false,
+           "assets":[
+             {"name":"QuickClip-portable.exe","size":1,"browser_download_url":"bad"},
+             {"name":"checksums.txt","size":1,"browser_download_url":"bad"},
+             {"name":"QuickClip-Setup.exe","size":7,"browser_download_url":"good"}
+           ]}
+        ]"#;
+        let picked = pick_update(releases(payload), &version("0.1.0")).expect("the setup exe");
+        assert_eq!(picked.download_url, "good");
+        assert_eq!(picked.size_bytes, 7);
+    }
+
+    #[test]
+    fn an_empty_release_list_is_not_an_error() {
+        assert!(pick_update(releases("[]"), &version("0.1.0")).is_none());
+    }
+
+    /// Hits the real GitHub API. #[ignore] so an offline machine, or one that
+    /// has spent its 60 unauthenticated requests for the hour, does not fail
+    /// the suite for a reason that has nothing to do with the code:
+    ///
+    ///     cargo test -- --ignored
+    ///
+    /// What it covers that the fixtures above cannot: that RELEASES_URL names
+    /// the right repository, and that GitHub accepts the User-Agent. GitHub
+    /// answers 403 to a request without one, and the app would report that as
+    /// "could not check" forever without anybody noticing an update existed.
+    #[tokio::test]
+    #[ignore]
+    async fn the_live_release_feed_is_reachable_and_parses() {
+        let current = version("0.0.1-alpha");
+        let response = reqwest::Client::new()
+            .get(RELEASES_URL)
+            .header(reqwest::header::USER_AGENT, user_agent(&current))
+            .header(reqwest::header::ACCEPT, "application/vnd.github+json")
+            .send()
+            .await
+            .expect("could not reach GitHub");
+        assert!(
+            response.status().is_success(),
+            "GitHub answered {} - a 403 here means the User-Agent was refused",
+            response.status()
+        );
+
+        let releases: Vec<GhRelease> = response
+            .json()
+            .await
+            .expect("the live payload did not match GhRelease");
+
+        // Every published release must carry the installer the updater knows
+        // how to run, or a client would reach it and find nothing to install.
+        for release in &releases {
+            if release.draft {
+                continue;
+            }
+            assert!(
+                release
+                    .assets
+                    .iter()
+                    .any(|a| a.name.to_ascii_lowercase().ends_with(INSTALLER_SUFFIX)),
+                "release {} has no {INSTALLER_SUFFIX} asset",
+                release.tag_name
+            );
+        }
+
+        let picked = pick_update(releases, &current);
+        assert!(
+            picked.is_some(),
+            "a 0.0.1-alpha build should be offered the newest published release"
+        );
+    }
 }

@@ -28,6 +28,12 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "str
 futures-util = "0.3"
 semver = "1"
 
+[dev-dependencies]
+# Test-only, so none of this reaches the shipped exe. The live update-feed test
+# is async because reqwest is, and tokio is already in the tree underneath
+# Tauri - this only makes it linkable from the test harness.
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+
 [profile.release]
 # A quick-edit tool is judged on how fast it starts and how small the download
 # is. opt-level "s" plus LTO and a single codegen unit trade compile time we
