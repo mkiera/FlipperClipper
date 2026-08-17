@@ -227,6 +227,8 @@ fn job(input: &Path, name: &str) -> ExportJob {
         format: ExportFormat::Mp4,
         quality: QualityPreset::Balanced,
         target_mb: None,
+        output_height: None,
+        video_kbps: None,
         lossless: false,
     }
 }

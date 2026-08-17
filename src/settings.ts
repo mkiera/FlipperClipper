@@ -20,6 +20,7 @@ import { setSettings, settings } from './state';
 import {
   AUDIO_FORMATS,
   DEFAULT_SETTINGS,
+  OUTPUT_HEIGHTS,
   VIDEO_FORMATS,
   type AlphaBuild,
   type AppSettings,
@@ -113,6 +114,7 @@ let note!: HTMLElement;
 let formatSelect!: HTMLSelectElement;
 let qualitySelect!: HTMLSelectElement;
 let targetMbInput!: HTMLInputElement;
+let resSelect!: HTMLSelectElement;
 let filmstripBox!: HTMLInputElement;
 let encoderSelect!: HTMLSelectElement;
 let proxyBox!: HTMLInputElement;
@@ -151,6 +153,7 @@ export function initSettings(): Promise<void> {
   formatSelect = el<HTMLSelectElement>('set-format');
   qualitySelect = el<HTMLSelectElement>('set-quality');
   targetMbInput = el<HTMLInputElement>('set-target-mb');
+  resSelect = el<HTMLSelectElement>('set-res');
   filmstripBox = el<HTMLInputElement>('set-filmstrip');
   encoderSelect = el<HTMLSelectElement>('set-encoder');
   proxyBox = el<HTMLInputElement>('set-proxy');
@@ -195,6 +198,11 @@ export function initSettings(): Promise<void> {
     const clamped = Number.isFinite(raw) ? clamp(raw, 0.5, 10_000) : DEFAULT_SETTINGS.defaultTargetMb;
     targetMbInput.value = String(clamped);
     settings.defaultTargetMb = clamped;
+    void persist();
+  });
+
+  resSelect.addEventListener('change', () => {
+    settings.defaultOutputHeight = resSelect.value === 'auto' ? null : Number(resSelect.value);
     void persist();
   });
 
@@ -282,6 +290,10 @@ async function loadSettings(): Promise<void> {
     const loaded = await getSettings();
     const merged: AppSettings = { ...DEFAULT_SETTINGS, ...loaded };
     merged.defaultTargetMb = clamp(merged.defaultTargetMb, 0.5, 10_000);
+    // A height the dropdown has no entry for would leave the select blank and
+    // be refused at export time.
+    const height = merged.defaultOutputHeight;
+    if (height !== null && !OUTPUT_HEIGHTS.includes(height)) merged.defaultOutputHeight = null;
     setSettings(merged);
   } catch {
     // No command on the other side, or an unreadable file. Defaults still work.
@@ -307,6 +319,8 @@ function applySettings(): void {
   formatSelect.value = settings.defaultFormat;
   qualitySelect.value = settings.defaultQuality;
   targetMbInput.value = String(settings.defaultTargetMb);
+  resSelect.value =
+    settings.defaultOutputHeight === null ? 'auto' : String(settings.defaultOutputHeight);
   filmstripBox.checked = settings.showFilmstrip;
   encoderSelect.value = settings.encoder;
   proxyBox.checked = settings.autoPreviewProxy;

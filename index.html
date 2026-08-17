@@ -134,6 +134,17 @@
 
         <select id="format-select" title="Export format"></select>
 
+        <!-- Options above the source's own size are disabled in controls.ts. -->
+        <select id="res-select" title="Output resolution. Auto keeps the source size." aria-label="Output resolution">
+          <option value="auto">Auto</option>
+          <option value="2160">2160p</option>
+          <option value="1440">1440p</option>
+          <option value="1080">1080p</option>
+          <option value="720">720p</option>
+          <option value="480">480p</option>
+          <option value="360">360p</option>
+        </select>
+
         <select id="quality-select" title="Export quality">
           <option value="high">High</option>
           <option value="balanced">Balanced</option>
@@ -148,6 +159,15 @@
           <option value="50"></option>
           <option value="100"></option>
         </datalist>
+
+        <select id="bitrate-mode" title="Video bitrate" aria-label="Video bitrate">
+          <option value="auto">Auto bitrate</option>
+          <option value="manual">Manual bitrate</option>
+        </select>
+
+        <input id="bitrate-kbps" type="number" min="50" max="200000" step="50" value="4000" title="Video bitrate in kbps" aria-label="Video bitrate in kbps" hidden />
+
+        <span id="size-estimate" class="estimate" hidden></span>
 
         <div id="export-area">
           <button id="export-btn" class="btn primary" type="button" title="Export (Ctrl+E)">Export</button>
@@ -291,6 +311,22 @@
               <span class="set-hint">Megabytes the "Fit under…" quality aims at.</span>
             </div>
             <input id="set-target-mb" class="set-number" type="number" min="0.5" max="10000" step="0.5" aria-label="Default fit size in MB" />
+          </div>
+
+          <div class="set-row">
+            <div class="set-label">
+              <span id="set-res-label">Default output resolution</span>
+              <span class="set-hint">Clips smaller than this keep their own size - nothing is ever upscaled.</span>
+            </div>
+            <select id="set-res" aria-labelledby="set-res-label">
+              <option value="auto">Match the source</option>
+              <option value="2160">2160p</option>
+              <option value="1440">1440p</option>
+              <option value="1080">1080p</option>
+              <option value="720">720p</option>
+              <option value="480">480p</option>
+              <option value="360">360p</option>
+            </select>
           </div>
 
           <div class="settings-divider"></div>

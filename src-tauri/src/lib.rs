@@ -46,6 +46,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             sysutil::ffmpeg_status,
+            sysutil::ffmpeg_check_log,
             sysutil::install_ffmpeg,
             sysutil::probe,
             sysutil::make_filmstrip,

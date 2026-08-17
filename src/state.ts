@@ -15,6 +15,7 @@ import {
   type EditState,
   type ExportFormat,
   type MediaInfo,
+  type OutputHeight,
   type QualityPreset,
 } from './types';
 
@@ -61,6 +62,8 @@ export const edit: EditState = {
   audioOnly: false,
   targetMb: rememberedTargetMb() ?? settings.defaultTargetMb,
   quality: rememberedQuality() ?? settings.defaultQuality,
+  outputHeight: settings.defaultOutputHeight,
+  videoKbps: null,
   lossless: false,
 };
 
@@ -154,6 +157,8 @@ export function loadMedia(media: MediaInfo, src: string): void {
     audioOnly,
     quality: rememberedQuality() ?? settings.defaultQuality,
     targetMb: rememberedTargetMb() ?? settings.defaultTargetMb,
+    outputHeight: seedOutputHeight(media),
+    videoKbps: null,
     lossless: false,
   } satisfies Partial<EditState>);
   Object.assign(ui, {
@@ -162,6 +167,16 @@ export function loadMedia(media: MediaInfo, src: string): void {
     filmstrip: [],
   } satisfies Partial<UiState>);
   notify();
+}
+
+/**
+ * A default taller than the source becomes Auto rather than a disabled entry:
+ * the export would emit no scale filter for it anyway, so the two agree.
+ */
+function seedOutputHeight(media: MediaInfo): OutputHeight {
+  const wanted = settings.defaultOutputHeight;
+  if (wanted === null) return null;
+  return wanted > Math.min(media.width, media.height) ? null : wanted;
 }
 
 /** Redraw without changing anything, e.g. after a window resize. */

@@ -1,6 +1,9 @@
+use std::collections::HashSet;
+use std::fmt::Write as _;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 use tauri::{AppHandle, Manager};
@@ -15,7 +18,7 @@ pub struct FfmpegStatus {
 }
 
 #[tauri::command(async)]
-pub fn ffmpeg_status() -> FfmpegStatus {
+pub fn ffmpeg_status(app: AppHandle) -> FfmpegStatus {
     // Every call is a real re-check, so a "missing" verdict cannot outlive the
     // conditions that produced it.
     ffmpeg::forget_resolved_tools();
@@ -30,11 +33,245 @@ pub fn ffmpeg_status() -> FfmpegStatus {
         // Anything else - not on PATH, not executable, a stub that exits non-zero
         // - is the same thing as far as the install banner is concerned: this
         // machine cannot export until FFmpeg is dealt with.
-        None => FfmpegStatus {
-            available: false,
-            version: None,
-        },
+        None => {
+            write_check_log(&app);
+            FfmpegStatus {
+                available: false,
+                version: None,
+            }
+        }
     }
+}
+
+// ---------------------------------------------------------------------------
+// The "why did it say missing?" log
+// ---------------------------------------------------------------------------
+
+const CHECK_LOG_NAME: &str = "ffmpeg-check.log";
+
+/// The text of the last negative check, for a UI that wants to show it.
+#[tauri::command(async)]
+pub fn ffmpeg_check_log(app: AppHandle) -> Option<String> {
+    std::fs::read_to_string(check_log_path(&app)?).ok()
+}
+
+fn check_log_path(app: &AppHandle) -> Option<PathBuf> {
+    app.path()
+        .app_config_dir()
+        .ok()
+        .map(|dir| dir.join(CHECK_LOG_NAME))
+}
+
+/// A snapshot of one failed check, not a history: the file is replaced every
+/// time, so what is in it always describes the banner currently on screen.
+fn write_check_log(app: &AppHandle) {
+    let Some(path) = check_log_path(app) else {
+        return;
+    };
+    if let Some(parent) = path.parent() {
+        if std::fs::create_dir_all(parent).is_err() {
+            return;
+        }
+    }
+    let rows = probe_candidates("ffmpeg");
+    let text = render_check_log(
+        &utc_stamp(SystemTime::now()),
+        &std::env::var("PATH").unwrap_or_else(|_| "(unset)".to_string()),
+        &rows,
+    );
+    let _ = std::fs::write(path, text);
+}
+
+fn render_check_log(
+    stamp: &str,
+    path_value: &str,
+    rows: &[(&'static str, PathBuf, String)],
+) -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, "FlipperClipper ffmpeg check - {stamp}");
+    let _ = writeln!(out, "verdict: ffmpeg could not be run");
+    let _ = writeln!(out, "inherited PATH: {path_value}");
+    let _ = writeln!(out, "tried, in order:");
+    for (tier, candidate, outcome) in rows {
+        let _ = writeln!(out, "  [{tier}] {} -> {outcome}", candidate.display());
+    }
+    out
+}
+
+/// Walks the same tiers `ffmpeg::resolve_tool` walks, recording what each one
+/// did. It is a second implementation rather than a hook into the resolver,
+/// which reports nothing but its final answer.
+fn probe_candidates(name: &str) -> Vec<(&'static str, PathBuf, String)> {
+    let file_name = format!("{}{}", name, std::env::consts::EXE_SUFFIX);
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut rows: Vec<(&'static str, PathBuf, String)> = Vec::new();
+
+    for (tier, dir) in diagnostic_dirs() {
+        let key = dir
+            .to_string_lossy()
+            .trim_end_matches(['\\', '/'])
+            .to_lowercase();
+        if key.is_empty() || !seen.insert(key) {
+            continue;
+        }
+        let candidate = dir.join(&file_name);
+        if std::fs::symlink_metadata(&candidate).is_err() {
+            rows.push((tier, candidate, "no such file".to_string()));
+            continue;
+        }
+        // Every tier is probed, never stopping at the first that runs: this log
+        // exists for the case where the resolver said missing and a second look
+        // says otherwise, and stopping early would hide exactly that.
+        let (_, outcome) = version_outcome(&candidate);
+        rows.push((tier, candidate, outcome));
+    }
+
+    let bare = PathBuf::from(&file_name);
+    let (_, outcome) = version_outcome(&bare);
+    rows.push(("bare", bare, outcome));
+
+    // The resolver's own answer, taken after the walk above, so "the check
+    // failed but everything here runs" is a printed fact rather than something
+    // the reader has to infer.
+    let second = match ffmpeg::resolve_tool_with_version(name) {
+        Some((path, _)) => format!("found at {}", path.display()),
+        None => "still not found".to_string(),
+    };
+    rows.push(("resolver", PathBuf::from("(asked again)"), second));
+    rows
+}
+
+/// The dirs the resolver would try, tagged with which tier produced them. The
+/// registry values are expanded by PowerShell rather than here because the
+/// Path of HKCU\Environment is REG_EXPAND_SZ and can hold %VAR% references.
+fn diagnostic_dirs() -> Vec<(&'static str, PathBuf)> {
+    let mut dirs: Vec<(&'static str, PathBuf)> = Vec::new();
+
+    if let Some(value) = std::env::var_os("PATH") {
+        dirs.extend(
+            split_path_list(&value.to_string_lossy())
+                .into_iter()
+                .map(|dir| ("PATH", dir)),
+        );
+    }
+    for (tier, scope) in [("registry User", "User"), ("registry Machine", "Machine")] {
+        if let Some(value) = registry_path_value(scope) {
+            dirs.extend(split_path_list(&value).into_iter().map(|dir| (tier, dir)));
+        }
+    }
+    dirs.extend(
+        known_install_dirs()
+            .into_iter()
+            .map(|dir| ("known dir", dir)),
+    );
+    dirs
+}
+
+fn known_install_dirs() -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    let mut push = |var: &str, tail: &[&str]| {
+        if let Some(root) = std::env::var_os(var) {
+            let mut dir = PathBuf::from(root);
+            for part in tail {
+                dir.push(part);
+            }
+            dirs.push(dir);
+        }
+    };
+    push("LOCALAPPDATA", &["Microsoft", "WinGet", "Links"]);
+    push("ProgramFiles", &["ffmpeg", "bin"]);
+    push("ProgramData", &["chocolatey", "bin"]);
+    push("LOCALAPPDATA", &["Programs", "ffmpeg", "bin"]);
+    dirs
+}
+
+fn registry_path_value(scope: &str) -> Option<String> {
+    let script = format!(
+        "[Console]::OutputEncoding=[Text.Encoding]::UTF8; \
+         [Environment]::ExpandEnvironmentVariables(\
+         [Environment]::GetEnvironmentVariable('Path','{scope}'))"
+    );
+    let output = ffmpeg::hidden_command("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", script.as_str()])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if value.is_empty() {
+        None
+    } else {
+        Some(value)
+    }
+}
+
+fn split_path_list(value: &str) -> Vec<PathBuf> {
+    value
+        .split(';')
+        .map(|part| part.trim().trim_matches('"'))
+        .filter(|part| !part.is_empty())
+        .map(PathBuf::from)
+        .collect()
+}
+
+/// Runs `-version` exactly the way the resolver validates a candidate, and says
+/// what happened. The bool is "this one would have been accepted".
+fn version_outcome(path: &Path) -> (bool, String) {
+    let result = ffmpeg::hidden_command(path.to_string_lossy().as_ref())
+        .arg("-version")
+        .stdin(Stdio::null())
+        .output();
+
+    match result {
+        Ok(output) if output.status.success() => (true, "ran, exit 0".to_string()),
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let detail = match last_meaningful_line(&stderr) {
+                Some(line) => format!("{}, {}", output.status, clip_to(&line, 160)),
+                None => output.status.to_string(),
+            };
+            (false, detail)
+        }
+        Err(error) => (false, format!("could not start: {error}")),
+    }
+}
+
+fn clip_to(text: &str, max_chars: usize) -> String {
+    match text.char_indices().nth(max_chars) {
+        Some((cut, _)) => format!("{}...", &text[..cut]),
+        None => text.to_string(),
+    }
+}
+
+/// Hinnant's civil-from-days, so the log carries a readable UTC time without a
+/// date crate. Its era starts in March, which is why the month is rotated back.
+fn utc_stamp(now: SystemTime) -> String {
+    let secs = now
+        .duration_since(UNIX_EPOCH)
+        .map(|since| since.as_secs())
+        .unwrap_or(0);
+    let days = (secs / 86_400) as i64;
+    let tod = secs % 86_400;
+
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+
+    format!(
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
+        tod / 3_600,
+        tod / 60 % 60,
+        tod % 60
+    )
 }
 
 /// "ffmpeg version 7.1-full_build-www.gyan.dev Copyright (c) 2000-2024 ..." from
@@ -419,4 +656,81 @@ fn base64_encode(bytes: &[u8]) -> String {
         });
     }
     encoded
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    fn at(secs: u64) -> String {
+        utc_stamp(UNIX_EPOCH + Duration::from_secs(secs))
+    }
+
+    #[test]
+    fn the_stamp_is_utc_and_survives_leap_years() {
+        assert_eq!(at(0), "1970-01-01T00:00:00Z");
+        // 2000 is a leap year under the 400 rule that the era arithmetic exists
+        // to get right; 1900 and 2100 are not.
+        assert_eq!(at(951_782_400), "2000-02-29T00:00:00Z");
+        assert_eq!(at(1_700_000_000), "2023-11-14T22:13:20Z");
+    }
+
+    #[test]
+    fn the_log_names_the_tier_and_the_reason_for_every_candidate() {
+        let rows = vec![
+            (
+                "PATH",
+                PathBuf::from("C:\\Windows\\System32\\ffmpeg.exe"),
+                "no such file".to_string(),
+            ),
+            (
+                "known dir",
+                PathBuf::from("C:\\Links\\ffmpeg.exe"),
+                "exit code: 3221225781".to_string(),
+            ),
+        ];
+        let text = render_check_log("2026-08-17T09:00:00Z", "C:\\Windows\\System32", &rows);
+
+        assert!(text.starts_with("FlipperClipper ffmpeg check - 2026-08-17T09:00:00Z\n"));
+        assert!(text.contains("inherited PATH: C:\\Windows\\System32\n"));
+        assert!(text.contains("  [PATH] C:\\Windows\\System32\\ffmpeg.exe -> no such file\n"));
+        assert!(text.contains("  [known dir] C:\\Links\\ffmpeg.exe -> exit code: 3221225781\n"));
+    }
+
+    #[test]
+    fn a_long_stderr_line_is_clipped_rather_than_dumped() {
+        assert_eq!(clip_to("short", 160), "short");
+        assert_eq!(clip_to("abcdef", 3), "abc...");
+    }
+
+    #[test]
+    fn the_path_list_splits_the_way_windows_writes_it() {
+        assert_eq!(
+            split_path_list("C:\\a; \"C:\\b b\" ;;C:\\c"),
+            vec![
+                PathBuf::from("C:\\a"),
+                PathBuf::from("C:\\b b"),
+                PathBuf::from("C:\\c"),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_winget_links_dir_is_the_first_known_dir_tried() {
+        // It is where Kiera's ffmpeg actually lives, so a diagnostic that never
+        // reached it would be describing the wrong search.
+        if std::env::var_os("LOCALAPPDATA").is_none() {
+            return;
+        }
+        let first = known_install_dirs()
+            .into_iter()
+            .next()
+            .expect("a known dir");
+        assert!(
+            first.ends_with("Microsoft\\WinGet\\Links"),
+            "{}",
+            first.display()
+        );
+    }
 }

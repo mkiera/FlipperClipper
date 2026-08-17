@@ -44,6 +44,11 @@ export function ffmpegStatus(): Promise<FfmpegStatus> {
   return invoke<FfmpegStatus>('ffmpeg_status');
 }
 
+/** The diagnostic the last negative ffmpegStatus() wrote; null if there is none. */
+export function ffmpegCheckLog(): Promise<string | null> {
+  return invoke<string | null>('ffmpeg_check_log');
+}
+
 /** Also adds the path to the asset-protocol scope; assetUrl() 403s without it. */
 export function probe(path: string): Promise<MediaInfo> {
   return invoke<MediaInfo>('probe', { path });
@@ -60,6 +65,21 @@ export function startExport(job: ExportJob): Promise<void> {
 
 export function cancelExport(): Promise<void> {
   return invoke<void>('cancel_export');
+}
+
+/**
+ * Projected size in bytes of the clip the same job would export. The frame size
+ * and rate are passed in from the MediaInfo the caller already holds, so a
+ * slider drag costs no probe. 0 means the Rust side could not say.
+ */
+export function estimateExportSize(job: ExportJob, media: MediaInfo): Promise<number> {
+  return invoke<number>('estimate_export_size', {
+    job,
+    width: media.width,
+    height: media.height,
+    fps: media.fps,
+    hasAudio: media.hasAudio,
+  });
 }
 
 export function makeFilmstrip(path: string, count: number, height: number): Promise<string[]> {

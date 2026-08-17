@@ -45,6 +45,11 @@ let rectEl!: HTMLElement;
 let sizeLabel!: HTMLElement;
 let aspectChips!: HTMLElement;
 
+let markLayer!: HTMLElement;
+let markShade!: HTMLElement;
+let markOutline!: HTMLElement;
+let markLabel!: HTMLElement;
+
 let working: Rect = { x: 0, y: 0, w: 0, h: 0 };
 let aspect: number | null = null;
 
@@ -68,6 +73,7 @@ export function initCrop(): void {
   aspectChips = el('crop-aspects');
 
   buildAspectChips();
+  buildMark();
 
   el('crop-done').addEventListener('click', confirmCrop);
   el('crop-cancel').addEventListener('click', cancelCrop);
@@ -86,7 +92,15 @@ export function initCrop(): void {
   // with it, so the mapping has to be recomputed rather than cached.
   new ResizeObserver(() => {
     if (ui.cropping) drawRect();
+    drawMark();
   }).observe(videoElement());
+
+  // Before metadata contentBox() falls back to ffprobe's dimensions, which are
+  // the wrong shape on anamorphic footage; a proxy swap reopens that window.
+  videoElement().addEventListener('loadedmetadata', () => {
+    if (ui.cropping) drawRect();
+    drawMark();
+  });
 
   subscribe(syncVisibility);
   syncVisibility();
@@ -132,6 +146,81 @@ export function toggleCrop(): void {
 function syncVisibility(): void {
   layer.hidden = !ui.cropping;
   if (ui.cropping) drawRect();
+  drawMark();
+}
+
+/**
+ * The confirmed crop, drawn back over the full frame as an inert reminder:
+ * crop mode's geometry and tokens, half its dimming, no pointer events.
+ */
+function buildMark(): void {
+  const stage = layer.parentElement;
+  if (!stage) throw new Error('FlipperClipper: #crop-layer has no stage to sit in');
+
+  markLayer = document.createElement('div');
+  markLayer.id = 'crop-mark';
+  Object.assign(markLayer.style, {
+    position: 'absolute',
+    inset: '0',
+    pointerEvents: 'none',
+    zIndex: '1',
+  });
+
+  // Separate from the outline so halving the dimming does not fade the outline.
+  markShade = document.createElement('div');
+  Object.assign(markShade.style, {
+    position: 'absolute',
+    boxShadow: '0 0 0 9999px var(--shade)',
+    opacity: '0.5',
+  });
+
+  markOutline = document.createElement('div');
+  Object.assign(markOutline.style, {
+    position: 'absolute',
+    border: '1px solid var(--fg-dim)',
+  });
+
+  markLabel = document.createElement('span');
+  Object.assign(markLabel.style, {
+    position: 'absolute',
+    left: '6px',
+    bottom: '6px',
+    padding: '2px 6px',
+    border: '1px solid var(--line)',
+    borderRadius: 'var(--radius)',
+    background: 'var(--float)',
+    color: 'var(--fg-dim)',
+    fontSize: '11px',
+    fontVariantNumeric: 'tabular-nums',
+    whiteSpace: 'nowrap',
+  });
+
+  markOutline.append(markLabel);
+  markLayer.append(markShade, markOutline);
+  stage.append(markLayer);
+}
+
+function drawMark(): void {
+  const crop = edit.crop;
+  const show = crop !== null && edit.media !== null && !ui.cropping;
+  // Unhidden before measuring: display:none reports a zero rect, which would
+  // pin the mark to the stage's top-left corner.
+  markLayer.hidden = !show;
+  if (!crop || !show) return;
+
+  const box = contentBox(markLayer);
+  if (!box) return;
+
+  const geometry = {
+    left: `${box.left + crop.x * box.scaleX}px`,
+    top: `${box.top + crop.y * box.scaleY}px`,
+    width: `${crop.w * box.scaleX}px`,
+    height: `${crop.h * box.scaleY}px`,
+  };
+  Object.assign(markShade.style, geometry);
+  Object.assign(markOutline.style, geometry);
+
+  markLabel.textContent = `${Math.round(crop.w)} x ${Math.round(crop.h)}`;
 }
 
 function buildAspectChips(): void {
@@ -173,7 +262,9 @@ function coversFrame(r: Rect): boolean {
 }
 
 /**
- * The video's real content rectangle, in coordinates local to the crop layer.
+ * The video's real content rectangle, in coordinates local to `host`. The host
+ * is a parameter because #crop-layer is display:none outside crop mode and
+ * would measure as a zero rect; the mark maps against its own layer instead.
  *
  * The shape of that rectangle has to come from videoWidth/videoHeight, not
  * from media.width/height: ffprobe reports the dimensions the frames are
@@ -189,13 +280,13 @@ function coversFrame(r: Rect): boolean {
  * because that is what ffmpeg's crop filter takes and it must not follow the
  * preview when the preview is running off a downscaled proxy.
  */
-function contentBox(): Box | null {
+function contentBox(host: HTMLElement): Box | null {
   const media = edit.media;
   if (!media || media.width <= 0 || media.height <= 0) return null;
 
   const video = videoElement();
   const videoRect = video.getBoundingClientRect();
-  const layerRect = layer.getBoundingClientRect();
+  const layerRect = host.getBoundingClientRect();
   if (videoRect.width <= 0 || videoRect.height <= 0) return null;
 
   // Both are 0 until the element has metadata, and crop mode can be entered in
@@ -219,7 +310,7 @@ function contentBox(): Box | null {
 }
 
 function drawRect(): void {
-  const box = contentBox();
+  const box = contentBox(layer);
   if (!box) return;
 
   rectEl.style.left = `${box.left + working.x * box.scaleX}px`;
@@ -231,7 +322,7 @@ function drawRect(): void {
 }
 
 function onPointerDown(e: PointerEvent): void {
-  const box = contentBox();
+  const box = contentBox(layer);
   if (!box || !edit.media) return;
 
   const target = e.target as HTMLElement;

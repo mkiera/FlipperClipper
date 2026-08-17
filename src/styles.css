@@ -369,6 +369,21 @@ input[type='range']:disabled::-webkit-slider-thumb {
   width: 74px;
 }
 
+#bitrate-kbps {
+  width: 82px;
+}
+
+/* Auto is the resting state, so neither of these advertises itself: they read
+   as the format and quality selects beside them until one is changed. */
+#res-select,
+#bitrate-mode {
+  flex: none;
+}
+
+select option:disabled {
+  color: var(--fg-dim);
+}
+
 .readout {
   min-width: 36px;
   font-size: 11px;
@@ -645,6 +660,12 @@ input[type='range']:disabled::-webkit-slider-thumb {
   .btn-label {
     display: none;
   }
+}
+
+.estimate {
+  color: var(--fg-dim);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
 #export-area {

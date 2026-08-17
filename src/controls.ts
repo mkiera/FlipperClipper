@@ -7,6 +7,7 @@
 import {
   cancelExport,
   copyFileToClipboard,
+  estimateExportSize,
   ffmpegStatus,
   installFfmpeg,
   onExportDone,
@@ -30,10 +31,14 @@ import { currentTime, onTime, togglePlay } from './player';
 import { toggleCrop } from './crop';
 import {
   AUDIO_FORMATS,
+  OUTPUT_HEIGHTS,
   VIDEO_FORMATS,
+  VIDEO_KBPS_MAX,
+  VIDEO_KBPS_MIN,
   defaultFormatFor,
   losslessEligible,
   outputDuration,
+  shortEdge,
   type ExportFormat,
   type ExportJob,
   type QualityPreset,
@@ -59,6 +64,13 @@ const SPEED_MAX = 20;
  */
 const REVERSE_WARN_SECONDS = 30;
 let reverseWarned = false;
+
+/** The estimate crosses IPC, so edits settle before one is asked for. */
+const ESTIMATE_DEBOUNCE_MS = 250;
+
+/** What Manual starts on, and what returning to Manual comes back to. */
+const DEFAULT_MANUAL_KBPS = 4000;
+let manualKbps = DEFAULT_MANUAL_KBPS;
 
 export interface ToastAction {
   label: string;
@@ -94,6 +106,10 @@ let audioOnlyBtn!: HTMLButtonElement;
 let formatSelect!: HTMLSelectElement;
 let qualitySelect!: HTMLSelectElement;
 let fitMbInput!: HTMLInputElement;
+let resSelect!: HTMLSelectElement;
+let bitrateMode!: HTMLSelectElement;
+let bitrateInput!: HTMLInputElement;
+let estimateLabel!: HTMLElement;
 let exportBtn!: HTMLButtonElement;
 let exportRunning!: HTMLElement;
 let exportFill!: HTMLElement;
@@ -106,6 +122,11 @@ let toastMsg!: HTMLElement;
 let toastActions!: HTMLElement;
 
 let toastTimer = 0;
+
+let estimateTimer = 0;
+/** Bumped per request, so a slow answer cannot overwrite a newer one. */
+let estimateToken = 0;
+let estimateKey = '';
 
 /** Which list the format dropdown currently holds, so it is only rebuilt on a switch. */
 let formatListIsAudio: boolean | null = null;
@@ -134,6 +155,10 @@ export function initControls(controlsDeps: ControlsDeps): void {
   formatSelect = el<HTMLSelectElement>('format-select');
   qualitySelect = el<HTMLSelectElement>('quality-select');
   fitMbInput = el<HTMLInputElement>('fit-mb');
+  resSelect = el<HTMLSelectElement>('res-select');
+  bitrateMode = el<HTMLSelectElement>('bitrate-mode');
+  bitrateInput = el<HTMLInputElement>('bitrate-kbps');
+  estimateLabel = el('size-estimate');
   exportBtn = el<HTMLButtonElement>('export-btn');
   exportRunning = el('export-running');
   exportFill = el('export-fill');
@@ -200,6 +225,25 @@ export function initControls(controlsDeps: ControlsDeps): void {
     fitMbInput.value = String(clamped);
     rememberTargetMb(clamped);
     patchEdit({ targetMb: clamped });
+  });
+
+  resSelect.addEventListener('change', () => {
+    const raw = resSelect.value;
+    patchEdit({ outputHeight: raw === 'auto' ? null : Number(raw) });
+  });
+
+  bitrateMode.addEventListener('change', () => {
+    patchEdit({ videoKbps: bitrateMode.value === 'manual' ? manualKbps : null });
+  });
+
+  bitrateInput.addEventListener('change', () => {
+    const raw = Number(bitrateInput.value);
+    const clamped = Number.isFinite(raw)
+      ? Math.round(clamp(raw, VIDEO_KBPS_MIN, VIDEO_KBPS_MAX))
+      : manualKbps;
+    bitrateInput.value = String(clamped);
+    manualKbps = clamped;
+    patchEdit({ videoKbps: clamped });
   });
 
   exportBtn.addEventListener('click', beginExport);
@@ -304,6 +348,20 @@ function render(): void {
     return;
   }
 
+  // Same shape of correction, for the two combinations the row can reach that
+  // export.rs would refuse: a size target owns the rate, and a height above the
+  // source is an upscale the app never offers.
+  if (edit.quality === 'fit' && edit.videoKbps !== null) {
+    patchEdit({ videoKbps: null });
+    return;
+  }
+
+  const edge = shortEdge(edit);
+  if (edit.outputHeight !== null && edge !== null && edit.outputHeight > edge) {
+    patchEdit({ outputHeight: null });
+    return;
+  }
+
   playBtn.disabled = !hasMedia;
   playBtn.classList.toggle('is-playing', ui.playing);
   playBtn.setAttribute('aria-label', ui.playing ? 'Pause' : 'Play');
@@ -351,6 +409,32 @@ function render(): void {
   fitMbInput.disabled = ui.exporting;
   if (document.activeElement !== fitMbInput) fitMbInput.value = String(edit.targetMb);
 
+  // Both are video-only knobs; an audio export has neither a frame nor a video
+  // stream to give a rate to.
+  resSelect.hidden = edit.audioOnly;
+  resSelect.disabled = !hasMedia || ui.exporting;
+  for (const height of OUTPUT_HEIGHTS) {
+    const option = resSelect.querySelector<HTMLOptionElement>(`option[value="${height}"]`);
+    if (option) option.disabled = edge !== null && height > edge;
+  }
+  resSelect.value = edit.outputHeight === null ? 'auto' : String(edit.outputHeight);
+
+  const fitOwnsRate = edit.quality === 'fit';
+  bitrateMode.hidden = edit.audioOnly;
+  bitrateMode.disabled = !hasMedia || ui.exporting || fitOwnsRate;
+  bitrateMode.value = edit.videoKbps === null ? 'auto' : 'manual';
+  bitrateMode.title = fitOwnsRate
+    ? 'Fit under… works out the bitrate itself.'
+    : 'Video bitrate. Auto lets the quality setting decide.';
+
+  bitrateInput.hidden = edit.audioOnly || edit.videoKbps === null;
+  bitrateInput.disabled = ui.exporting;
+  if (document.activeElement !== bitrateInput && edit.videoKbps !== null) {
+    bitrateInput.value = String(edit.videoKbps);
+  }
+
+  scheduleEstimate();
+
   exportBtn.hidden = ui.exporting;
   exportBtn.disabled = !hasMedia || !ui.ffmpegAvailable;
   exportRunning.hidden = !ui.exporting;
@@ -379,6 +463,78 @@ function formatTime(seconds: number): string {
   const whole = Math.floor(rest);
   const tenths = Math.floor((rest - whole) * 10);
   return `${minutes}:${String(whole).padStart(2, '0')}.${tenths}`;
+}
+
+/* --------------------------------------------------------------------------
+ * Size estimate
+ * ----------------------------------------------------------------------- */
+
+/**
+ * Only the fields the estimate depends on, so the export-progress events - which
+ * re-render the row several times a second - do not each ask the Rust side again.
+ */
+function estimateSignature(): string {
+  const crop = edit.crop;
+  return [
+    edit.media?.path ?? '',
+    edit.inPoint,
+    edit.outPoint,
+    edit.speed,
+    crop ? `${crop.x},${crop.y},${crop.w},${crop.h}` : '',
+    edit.mute,
+    edit.reverse,
+    edit.volume,
+    edit.format,
+    edit.audioOnly,
+    edit.quality,
+    edit.targetMb,
+    edit.outputHeight,
+    edit.videoKbps,
+    edit.lossless,
+  ].join('|');
+}
+
+function scheduleEstimate(): void {
+  const signature = estimateSignature();
+  if (signature === estimateKey) return;
+  estimateKey = signature;
+
+  window.clearTimeout(estimateTimer);
+  if (!edit.media) {
+    // Bumped so an answer already in flight for the previous file is dropped.
+    estimateToken += 1;
+    estimateLabel.hidden = true;
+    return;
+  }
+  estimateTimer = window.setTimeout(() => void refreshEstimate(), ESTIMATE_DEBOUNCE_MS);
+}
+
+async function refreshEstimate(): Promise<void> {
+  const media = edit.media;
+  if (!media) return;
+
+  const token = (estimateToken += 1);
+  let bytes: number | null;
+  try {
+    bytes = await estimateExportSize(buildJob(media.path, defaultOutputPath(media.path)), media);
+  } catch {
+    // No number at all beats a wrong one: this line sits next to Export.
+    bytes = null;
+  }
+  if (token !== estimateToken) return;
+
+  if (bytes === null || !Number.isFinite(bytes) || bytes <= 0) {
+    estimateLabel.hidden = true;
+    return;
+  }
+  estimateLabel.textContent = approximateSize(bytes);
+  estimateLabel.hidden = false;
+}
+
+/** "about 12 MB" - for the CRF presets this is a projection, not a promise. */
+function approximateSize(bytes: number): string {
+  const mb = Math.max(bytes / 1_000_000, 0.05);
+  return mb < 10 ? `about ${mb.toFixed(1)} MB` : `about ${Math.round(mb)} MB`;
 }
 
 /* --------------------------------------------------------------------------
@@ -412,18 +568,11 @@ export function closeExportPopover(): boolean {
   return true;
 }
 
-async function runExport(): Promise<void> {
-  const media = edit.media;
-  if (!media || ui.exporting) return;
-
-  if (!(await ffmpegReady())) return;
-
-  const target = await pickExportTarget(defaultOutputPath(media.path));
-  if (!target) return;
-
-  const job: ExportJob = {
-    input: media.path,
-    output: target,
+/** The one shape both the export and the estimate go out in. */
+function buildJob(input: string, output: string): ExportJob {
+  return {
+    input,
+    output,
     inPoint: edit.inPoint,
     outPoint: edit.outPoint,
     speed: edit.speed,
@@ -434,15 +583,27 @@ async function runExport(): Promise<void> {
     format: edit.format,
     quality: edit.quality,
     targetMb: edit.quality === 'fit' ? edit.targetMb : null,
+    outputHeight: edit.audioOnly ? null : edit.outputHeight,
+    videoKbps: edit.audioOnly || edit.quality === 'fit' ? null : edit.videoKbps,
     // Belt and braces: the checkbox is only reachable while the edit is
     // eligible, but the edit can change between opening the popover and
     // getting through the save dialog.
     lossless: edit.lossless && losslessEligible(edit),
   };
+}
+
+async function runExport(): Promise<void> {
+  const media = edit.media;
+  if (!media || ui.exporting) return;
+
+  if (!(await ffmpegReady())) return;
+
+  const target = await pickExportTarget(defaultOutputPath(media.path));
+  if (!target) return;
 
   patchUi({ exporting: true, exportPercent: 0 });
   try {
-    await startExport(job);
+    await startExport(buildJob(media.path, target));
   } catch (error) {
     patchUi({ exporting: false, exportPercent: 0 });
     showToast(describe(error), [], true);

@@ -33,6 +33,11 @@ const STDERR_TAIL_LINES: usize = 40;
 /// encoder being absent from `-encoders`, which is why each one is test-run.
 const ENCODER_CANDIDATES: [&str; 3] = ["h264_nvenc", "h264_qsv", "h264_amf"];
 
+/// The output sizes the UI offers, named by the finished clip's smaller edge.
+/// Anything else would still build a valid filter, so this list is the only
+/// thing keeping an arbitrary number out of a job that arrives over IPC.
+const OUTPUT_HEIGHTS: [i64; 6] = [2160, 1440, 1080, 720, 480, 360];
+
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ExportProgress {
@@ -319,6 +324,25 @@ fn validate(job: &ExportJob) -> Result<(), String> {
         }
     }
 
+    if let Some(height) = job.output_height {
+        if !OUTPUT_HEIGHTS.contains(&height) {
+            return Err(
+                "The output size has to be 2160, 1440, 1080, 720, 480 or 360.".to_string(),
+            );
+        }
+    }
+    if let Some(kbps) = job.video_kbps {
+        if !(50..=200_000).contains(&kbps) {
+            return Err("The video bitrate has to be between 50 and 200000 kbps.".to_string());
+        }
+        if matches!(job.quality, QualityPreset::Fit) {
+            return Err(
+                "A size target works out its own bitrate, so it cannot be given one as well."
+                    .to_string(),
+            );
+        }
+    }
+
     if job.mute && is_audio_format(&job.format) {
         return Err("A muted audio export would be silence.".to_string());
     }
@@ -539,4 +563,92 @@ fn explain_failure(tail: &VecDeque<String>) -> String {
         return "FFmpeg failed without saying why. The source file may be damaged.".to_string();
     }
     picked.join("\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The input file is checked further down validate() than any of these
+    /// rules, so a job that never names a real file still reaches them.
+    fn job() -> ExportJob {
+        ExportJob {
+            input: "C:\\clips\\a.mp4".to_string(),
+            output: "C:\\clips\\b.mp4".to_string(),
+            in_point: 0.0,
+            out_point: 10.0,
+            speed: 1.0,
+            crop: None,
+            mute: false,
+            reverse: false,
+            volume: 1.0,
+            format: ExportFormat::Mp4,
+            quality: QualityPreset::Balanced,
+            target_mb: None,
+            lossless: false,
+            output_height: None,
+            video_kbps: None,
+        }
+    }
+
+    #[test]
+    fn only_the_offered_output_sizes_are_accepted() {
+        for height in [2160, 1440, 1080, 720, 480, 360] {
+            let mut j = job();
+            j.output_height = Some(height);
+            // Past the size rule and stopped by the missing source file, which
+            // is the last check before the ones this test does not care about.
+            assert_ne!(
+                validate(&j).unwrap_err(),
+                "The output size has to be 2160, 1440, 1080, 720, 480 or 360."
+            );
+        }
+        for height in [1081, 0, -720, 4320] {
+            let mut j = job();
+            j.output_height = Some(height);
+            assert_eq!(
+                validate(&j).unwrap_err(),
+                "The output size has to be 2160, 1440, 1080, 720, 480 or 360."
+            );
+        }
+    }
+
+    #[test]
+    fn the_explicit_bitrate_is_bounded() {
+        for kbps in [49, 0, -1, 200_001] {
+            let mut j = job();
+            j.video_kbps = Some(kbps);
+            assert_eq!(
+                validate(&j).unwrap_err(),
+                "The video bitrate has to be between 50 and 200000 kbps."
+            );
+        }
+        for kbps in [50, 8_000, 200_000] {
+            let mut j = job();
+            j.video_kbps = Some(kbps);
+            assert_ne!(
+                validate(&j).unwrap_err(),
+                "The video bitrate has to be between 50 and 200000 kbps."
+            );
+        }
+    }
+
+    #[test]
+    fn a_size_target_and_an_explicit_bitrate_cannot_both_be_asked_for() {
+        let mut j = job();
+        j.quality = QualityPreset::Fit;
+        j.target_mb = Some(10.0);
+        j.video_kbps = Some(4000);
+        assert_eq!(
+            validate(&j).unwrap_err(),
+            "A size target works out its own bitrate, so it cannot be given one as well."
+        );
+
+        // Either one alone is fine.
+        j.video_kbps = None;
+        assert_ne!(
+            validate(&j).unwrap_err(),
+            "A size target works out its own bitrate, so it cannot be given one as well."
+        );
+    }
 }

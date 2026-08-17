@@ -110,6 +110,11 @@ pub struct ExportJob {
     /// target_bytes_for.
     pub target_mb: Option<f64>,
     pub lossless: bool,
+    /// None follows the source. Otherwise the finished clip's *smaller*
+    /// dimension, the way "1080p" names it whichever way up the frame is.
+    pub output_height: Option<i64>,
+    /// None lets the quality preset's CRF/CQ decide the rate.
+    pub video_kbps: Option<i64>,
 }
 
 /// Below this many bits per pixel per second H.264 stops being able to hold
@@ -304,6 +309,91 @@ fn downscale_width(video_kbps: i64, width: i64, height: i64, fps: f64) -> Option
     chosen
 }
 
+/// Rounds a computed dimension the way ffmpeg's `-2` does, so the estimator
+/// measures the frame the encoder will actually be handed.
+fn even_down(value: i64) -> i64 {
+    (value.max(2) / 2) * 2
+}
+
+/// The scale filter an explicit output height asks for, and the frame it
+/// leaves behind. None means no filter at all, which is both the never-upscale
+/// rule and what a degenerate frame falls back to.
+///
+/// The requested number names the smaller dimension, so it lands on the height
+/// of a landscape frame and on the width of a portrait one. `-2` on the other
+/// axis keeps the aspect ratio and forces an even result for yuv420p.
+fn explicit_scale(target: i64, width: i64, height: i64) -> Option<(String, i64, i64)> {
+    if target < 2 || width < 2 || height < 2 {
+        return None;
+    }
+    if width >= height {
+        if target >= height {
+            return None;
+        }
+        let scaled = even_down(((width as f64) * (target as f64) / (height as f64)).round() as i64);
+        Some((format!("scale=-2:{}", target), scaled, target))
+    } else {
+        if target >= width {
+            return None;
+        }
+        let scaled = even_down(((height as f64) * (target as f64) / (width as f64)).round() as i64);
+        Some((format!("scale={}:-2", target), target, scaled))
+    }
+}
+
+/// The video path's scale step, measured from the already-cropped size: the
+/// filter to emit, if any, and the resulting frame.
+///
+/// An explicit output height owns this step outright - the fit ladder does not
+/// get to add a second scale on top of it, and does not get to override a
+/// request that was a no-op because it would have upscaled.
+fn scale_step(
+    job: &ExportJob,
+    width: i64,
+    height: i64,
+    fps: f64,
+    fit_kbps: Option<i64>,
+) -> (Option<String>, i64, i64) {
+    if let Some(target) = job.output_height {
+        return match explicit_scale(target, width, height) {
+            Some((filter, w, h)) => (Some(filter), w, h),
+            None => (None, width, height),
+        };
+    }
+    match fit_kbps.and_then(|kbps| downscale_width(kbps, width, height, fps)) {
+        Some(scaled) => {
+            let h = even_down(((height as f64) * (scaled as f64) / (width as f64)).round() as i64);
+            (Some(format!("scale={}:-2", scaled)), scaled, h)
+        }
+        None => (None, width, height),
+    }
+}
+
+/// The frame rate and width caps the gif chain applies per quality.
+fn gif_caps(quality: QualityPreset) -> (i64, i64) {
+    match quality {
+        QualityPreset::High => (20, 640),
+        QualityPreset::Small => (10, 360),
+        // Fit lands on the balanced numbers: export.rs refuses a size target
+        // for gif before build_args runs, and a total function here beats a
+        // panic if that guard ever slips.
+        _ => (15, 480),
+    }
+}
+
+/// The frame after crop, which is what both the scale step and the estimator
+/// measure against.
+fn cropped_size(job: &ExportJob, width: i64, height: i64) -> (i64, i64) {
+    match job
+        .crop
+        .as_ref()
+        .and_then(|r| normalize_crop(r, width, height))
+    {
+        Some(r) => (r.w, r.h),
+        None => (width, height),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Encoder families
 // ---------------------------------------------------------------------------
@@ -412,57 +502,107 @@ fn target_bytes_for(job: &ExportJob) -> Option<u64> {
     Some((mb * 1_000_000.0).round() as u64)
 }
 
-/// Codec and rate flags for the audio-only formats.
+/// Fit hands the entire byte budget to the audio stream - there is no video to
+/// share it with. The 0.93 is the same container-overhead margin the video
+/// arithmetic uses. The floor is 32 kbps because libmp3lame's lowest MPEG-1
+/// Layer III rate is 32k and it rejects anything under it, and a pathological
+/// target (0.5 MB across ten minutes) should degrade to bad audio rather than
+/// to a failed export.
+fn fit_audio_kbps(job: &ExportJob) -> Option<i64> {
+    let bytes = target_bytes_for(job)?;
+    let duration = output_duration(job);
+    if duration <= 0.0 {
+        return None;
+    }
+    Some(((bytes as f64 * 8.0 * 0.93) / duration / 1000.0).max(32.0).round() as i64)
+}
+
+/// The rate an audio-only export runs at.
 ///
 /// The bitrates step [high, balanced, small] per codec rather than sharing one
 /// table because the codecs are not equally efficient: 96k opus is comparable
 /// to 128k mp3, so giving them the same numbers would make "small" mean
-/// different things depending on which format happened to be picked.
-fn push_audio_codec(args: &mut Vec<String>, job: &ExportJob) {
-    // Fit hands the entire byte budget to the audio stream - there is no video
-    // to share it with. The 0.93 is the same container-overhead margin the
-    // video arithmetic uses. The floor is 32 kbps because libmp3lame's lowest
-    // MPEG-1 Layer III rate is 32k and it rejects anything under it, and a
-    // pathological target (0.5 MB across ten minutes) should degrade to bad
-    // audio rather than to a failed export.
-    let fit_kbps: Option<i64> = target_bytes_for(job).and_then(|bytes| {
-        let duration = output_duration(job);
-        if duration <= 0.0 {
-            return None;
-        }
-        Some(((bytes as f64 * 8.0 * 0.93) / duration / 1000.0).max(32.0).round() as i64)
-    });
+/// different things depending on which format happened to be picked. For wav
+/// and flac nothing is asked of the encoder at all, so those two are what the
+/// codec produces rather than what it is told: 16-bit stereo at 48 kHz, and
+/// flac's usual ~60% of that.
+fn audio_only_kbps(job: &ExportJob) -> i64 {
+    let fit = fit_audio_kbps(job);
     let by_quality = |high: i64, balanced: i64, small: i64| -> i64 {
-        fit_kbps.unwrap_or(match job.quality {
+        fit.unwrap_or(match job.quality {
             QualityPreset::High => high,
             QualityPreset::Small => small,
             _ => balanced,
         })
     };
+    match job.format {
+        ExportFormat::Mp3 => by_quality(256, 192, 128),
+        ExportFormat::M4a => by_quality(256, 160, 96),
+        ExportFormat::Opus => by_quality(192, 128, 96),
+        ExportFormat::Ogg => by_quality(224, 160, 112),
+        ExportFormat::Wav => 1536,
+        ExportFormat::Flac => 900,
+        _ => 0,
+    }
+}
+
+/// The audio allowance on the video path. webm carries opus at a flat 128k -
+/// transparent for opus at any preset - while the aac path keeps its per-quality
+/// dial.
+fn video_path_audio_kbps(job: &ExportJob) -> i64 {
+    if job.format == ExportFormat::Webm {
+        128
+    } else {
+        audio_kbps_for(job.quality) as i64
+    }
+}
+
+/// The video bitrate a size target works out to, or None when this is not a fit
+/// job. The 0.93 is container overhead headroom: MP4 boxes, per-packet headers
+/// and the encoder overshooting its own target all come out of the same budget,
+/// and landing at 10.2 MB fails just as hard as landing at 20 MB would.
+fn fit_video_kbps(job: &ExportJob, keep_audio: bool) -> Option<i64> {
+    let target_bytes = target_bytes_for(job)?;
+    let duration = output_duration(job);
+    let audio_bits = if keep_audio {
+        video_path_audio_kbps(job) as f64 * 1000.0 * duration
+    } else {
+        0.0
+    };
+    let kbps = if duration > 0.0 {
+        (target_bytes as f64 * 8.0 * 0.93 - audio_bits) / duration / 1000.0
+    } else {
+        0.0
+    };
+    Some(kbps.max(100.0).round() as i64)
+}
+
+fn push_audio_codec(args: &mut Vec<String>, job: &ExportJob) {
+    let kbps = audio_only_kbps(job);
 
     match job.format {
         ExportFormat::Mp3 => {
             push_all(args, &["-c:a", "libmp3lame"]);
             args.push("-b:a".to_string());
-            args.push(format!("{}k", by_quality(256, 192, 128)));
+            args.push(format!("{}k", kbps));
         }
         ExportFormat::M4a => {
             push_all(args, &["-c:a", "aac"]);
             args.push("-b:a".to_string());
-            args.push(format!("{}k", by_quality(256, 160, 96)));
+            args.push(format!("{}k", kbps));
         }
         ExportFormat::Opus => {
             push_all(args, &["-c:a", "libopus"]);
             args.push("-b:a".to_string());
-            args.push(format!("{}k", by_quality(192, 128, 96)));
+            args.push(format!("{}k", kbps));
         }
         ExportFormat::Ogg => {
             push_all(args, &["-c:a", "libvorbis"]);
-            match fit_kbps {
+            match fit_audio_kbps(job) {
                 // Vorbis is natively VBR and sounds best driven by its own
                 // quality scale, but a size target needs a rate the arithmetic
                 // can hold it to, so fit alone switches to ABR.
-                Some(kbps) => {
+                Some(_) => {
                     args.push("-b:a".to_string());
                     args.push(format!("{}k", kbps));
                 }
@@ -613,14 +753,9 @@ pub fn build_args(
             .crop
             .as_ref()
             .and_then(|r| normalize_crop(r, width, height));
-        let (fps_cap, width_cap) = match job.quality {
-            QualityPreset::High => (20, 640),
-            QualityPreset::Small => (10, 360),
-            // Fit lands on the balanced numbers: export.rs refuses a size
-            // target for gif before build_args runs, and a total function here
-            // beats a panic if that guard ever slips.
-            _ => (15, 480),
-        };
+        // The gif chain owns its own frame rate and width caps, so neither an
+        // explicit output height nor an explicit bitrate applies here.
+        let (fps_cap, width_cap) = gif_caps(job.quality);
 
         let mut chain: Vec<String> = Vec::new();
         if let Some(r) = crop {
@@ -667,45 +802,19 @@ pub fn build_args(
         .crop
         .as_ref()
         .and_then(|r| normalize_crop(r, width, height));
-    let (effective_width, effective_height) = match crop {
-        Some(r) => (r.w, r.h),
-        None => (width, height),
-    };
+    let (effective_width, effective_height) = cropped_size(job, width, height);
 
     let is_webm = job.format == ExportFormat::Webm;
-    // webm carries opus at a flat 128k - transparent for opus at any preset -
-    // while the aac path keeps its per-quality dial. The fit arithmetic below
-    // subtracts whichever number is in play, so the two stay consistent.
-    let audio_kbps = if is_webm {
-        128
-    } else {
-        audio_kbps_for(job.quality)
-    };
+    let audio_kbps = video_path_audio_kbps(job);
 
     // The bitrate has to be settled before the filter chain because the
-    // auto-downscale decision is a function of it.
-    let mut video_kbps: Option<i64> = None;
-    if let Some(target_bytes) = target_bytes_for(job) {
-        let duration = output_duration(job);
-        let audio_bits = if keep_audio {
-            audio_kbps as f64 * 1000.0 * duration
-        } else {
-            0.0
-        };
-        // The 0.93 is container overhead headroom: MP4 boxes, per-packet
-        // headers and the encoder overshooting its own target all come out of
-        // the same budget, and landing at 10.2 MB fails just as hard as landing
-        // at 20 MB would.
-        let kbps = if duration > 0.0 {
-            (target_bytes as f64 * 8.0 * 0.93 - audio_bits) / duration / 1000.0
-        } else {
-            0.0
-        };
-        video_kbps = Some(kbps.max(100.0).round() as i64);
-    }
+    // auto-downscale decision is a function of it. A size target overrides an
+    // explicit rate rather than fighting it - export.rs refuses that pair up
+    // front, so this only decides what a job that skipped validation does.
+    let fit_kbps = fit_video_kbps(job, keep_audio);
+    let video_kbps = fit_kbps.or_else(|| job.video_kbps.filter(|kbps| *kbps > 0));
 
-    let scale_width =
-        video_kbps.and_then(|kbps| downscale_width(kbps, effective_width, effective_height, fps));
+    let (scale_filter, _, _) = scale_step(job, effective_width, effective_height, fps, fit_kbps);
 
     let mut vfilters: Vec<String> = Vec::new();
     if let Some(r) = crop {
@@ -717,10 +826,8 @@ pub fn build_args(
     if (job.speed - 1.0).abs() > 1e-9 {
         vfilters.push(format!("setpts=PTS/{}", fmt_num(job.speed)));
     }
-    if let Some(sw) = scale_width {
-        // -2 keeps the aspect ratio and rounds the other axis to a multiple of
-        // two, which yuv420p requires.
-        vfilters.push(format!("scale={}:-2", sw));
+    if let Some(filter) = scale_filter {
+        vfilters.push(filter);
     }
     if job.reverse {
         // Last on purpose: reverse holds every frame it will ever emit in
@@ -854,6 +961,138 @@ pub fn build_args(
 
     args.push(job.output.clone());
     args
+}
+
+// ---------------------------------------------------------------------------
+// Size estimation
+// ---------------------------------------------------------------------------
+
+/// Bits per pixel per frame for the constant-quality presets, which is the only
+/// term in the estimate that is a guess rather than arithmetic.
+///
+/// Measured on the integration suite's own 1080p30 fixture: x264 veryfast lands
+/// at 0.115 / 0.079 / 0.036 bpp for crf 18 / 23 / 28, and VP9 at 0.117 / 0.092 /
+/// 0.067 for crf 30 / 34 / 38. The numbers below sit a little under the x264
+/// measurements because testsrc2 carries more fine detail than ordinary footage,
+/// and VP9 gets its own row rather than a multiplier of the x264 one because it
+/// measured no cheaper here at all - the two CRF ladders are not the same curve.
+fn bpp_for(format: ExportFormat, quality: QualityPreset) -> f64 {
+    if format == ExportFormat::Webm {
+        return match quality {
+            QualityPreset::High => 0.100,
+            QualityPreset::Small => 0.050,
+            _ => 0.070,
+        };
+    }
+    match quality {
+        QualityPreset::High => 0.100,
+        QualityPreset::Small => 0.035,
+        _ => 0.065,
+    }
+}
+
+/// A gif frame after palette quantisation, in bytes per pixel. Gif has no
+/// interframe compression worth the name, so its size is content-bound to a
+/// degree no constant can follow: the same 480x270 chain measured 0.10 on a
+/// mostly-static source and 1.01 on one where every pixel changes every frame.
+const GIF_BYTES_PER_PIXEL: f64 = 0.35;
+
+fn bytes_from_kbps(kbps: i64, seconds: f64) -> f64 {
+    kbps as f64 * 1000.0 * seconds / 8.0
+}
+
+/// How large the finished export is likely to be, for the "about N MB" line the
+/// UI shows beside the export button.
+///
+/// `width`, `height` and `fps` are the display-orientation source values from
+/// `probe`, the same ones `build_args` is given. Where the job names a rate -
+/// an explicit bitrate, or a size target - the answer is arithmetic and close to
+/// exact; the constant-quality presets can only be estimated, so treat the
+/// result as the order of magnitude it is.
+pub fn estimate_output_bytes(
+    job: &ExportJob,
+    width: i64,
+    height: i64,
+    fps: f64,
+    has_audio: bool,
+) -> u64 {
+    let duration = output_duration(job);
+    let fps = if fps.is_finite() && fps > 0.0 {
+        fps
+    } else {
+        30.0
+    };
+    let keep_audio = has_audio && !job.mute;
+    if duration <= 0.0 || width < 2 || height < 2 {
+        return 0;
+    }
+
+    if job.lossless {
+        // A stream copy keeps the source's own rate, which is not one of the
+        // arguments here, so the high-quality figure is the closest guess. The
+        // speed dial cannot reach this path, and neither crop nor scale does.
+        let seconds = (job.out_point - job.in_point).max(0.0);
+        let video = bpp_for(job.format, QualityPreset::High) * width as f64 * height as f64 * fps;
+        let audio = if keep_audio { 128_000.0 } else { 0.0 };
+        return (((video + audio) * seconds) / 8.0).round() as u64;
+    }
+
+    if job.format.is_audio() {
+        if !has_audio {
+            return 0;
+        }
+        return bytes_from_kbps(audio_only_kbps(job), duration).round() as u64;
+    }
+
+    let (cropped_width, cropped_height) = cropped_size(job, width, height);
+    // setpts moves the timestamps and keeps every frame, so a 2x export is
+    // half as long at twice the rate and the frame count does not change.
+    let output_fps = fps * job.speed.max(0.0);
+
+    if job.format == ExportFormat::Gif {
+        let (fps_cap, width_cap) = gif_caps(job.quality);
+        let w = cropped_width.min(width_cap);
+        let h = even_down(
+            ((cropped_height as f64) * (w as f64) / (cropped_width as f64)).round() as i64,
+        );
+        let frames = output_fps.min(fps_cap as f64) * duration;
+        return (w as f64 * h as f64 * GIF_BYTES_PER_PIXEL * frames).round() as u64;
+    }
+
+    let fit_kbps = fit_video_kbps(job, keep_audio);
+    let (_, frame_width, frame_height) =
+        scale_step(job, cropped_width, cropped_height, fps, fit_kbps);
+
+    let video_bits = match fit_kbps.or_else(|| job.video_kbps.filter(|kbps| *kbps > 0)) {
+        Some(kbps) => kbps as f64 * 1000.0 * duration,
+        None => {
+            bpp_for(job.format, job.quality)
+                * frame_width as f64
+                * frame_height as f64
+                * output_fps
+                * duration
+        }
+    };
+    let audio_bits = if keep_audio {
+        video_path_audio_kbps(job) as f64 * 1000.0 * duration
+    } else {
+        0.0
+    };
+
+    ((video_bits + audio_bits) / 8.0).round() as u64
+}
+
+/// The estimator over IPC. The frame size and rate come from the MediaInfo the
+/// frontend already holds, so a slider drag costs no probe.
+#[tauri::command]
+pub fn estimate_export_size(
+    job: ExportJob,
+    width: i64,
+    height: i64,
+    fps: f64,
+    has_audio: bool,
+) -> u64 {
+    estimate_output_bytes(&job, width, height, fps, has_audio)
 }
 
 // ---------------------------------------------------------------------------
@@ -1268,6 +1507,8 @@ mod tests {
             quality,
             target_mb: None,
             lossless: false,
+            output_height: None,
+            video_kbps: None,
         }
     }
 
@@ -1311,7 +1552,8 @@ mod tests {
             "speed": 1.0, "crop": null, "mute": false,
             "reverse": true, "volume": 1.5,
             "format": "m4a", "quality": "fit",
-            "targetMb": 2.5, "lossless": false
+            "targetMb": 2.5, "lossless": false,
+            "outputHeight": 720, "videoKbps": null
         }"#;
         let j: ExportJob = serde_json::from_str(json).unwrap();
         assert!(j.reverse);
@@ -1319,6 +1561,8 @@ mod tests {
         assert_eq!(j.format, ExportFormat::M4a);
         assert_eq!(j.quality, QualityPreset::Fit);
         assert_eq!(j.target_mb, Some(2.5));
+        assert_eq!(j.output_height, Some(720));
+        assert_eq!(j.video_kbps, None);
     }
 
     // -- trim ---------------------------------------------------------------
@@ -2344,6 +2588,377 @@ mod tests {
             .map(|s| s.to_string())
             .collect::<Vec<String>>()
         );
+    }
+
+    // -- explicit output size ------------------------------------------------
+
+    #[test]
+    fn an_explicit_height_scales_the_short_edge_of_a_landscape_frame() {
+        let mut j = job(QualityPreset::Balanced);
+        j.output_height = Some(720);
+        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0);
+        // "720p" names the height here, and -2 works out the width.
+        assert_eq!(value_after(&args, "-vf"), Some("scale=-2:720"));
+    }
+
+    #[test]
+    fn an_explicit_height_scales_the_width_of_a_portrait_frame() {
+        let mut j = job(QualityPreset::Balanced);
+        j.output_height = Some(720);
+        let args = build_args(&j, "libx264", true, 1080, 1920, 30.0);
+        // A phone clip's short edge is its width, so the same "720p" request
+        // has to land on the other axis or the frame comes out 405 wide.
+        assert_eq!(value_after(&args, "-vf"), Some("scale=720:-2"));
+    }
+
+    #[test]
+    fn an_explicit_height_never_upscales() {
+        for (source_w, source_h) in [(1280i64, 720i64), (720, 1280)] {
+            for requested in [720, 1080, 2160] {
+                let mut j = job(QualityPreset::Balanced);
+                j.output_height = Some(requested);
+                let args = build_args(&j, "libx264", true, source_w, source_h, 30.0);
+                assert!(
+                    !has(&args, "-vf"),
+                    "{requested} on {source_w}x{source_h} emitted a scale filter"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn an_explicit_height_measures_the_crop_not_the_source() {
+        let mut j = job(QualityPreset::Balanced);
+        // A portrait region cut out of a landscape source: the crop decides
+        // which axis is the short one, so this has to flip to a width scale.
+        j.crop = Some(Rect {
+            x: 0,
+            y: 0,
+            w: 608,
+            h: 1080,
+        });
+        j.output_height = Some(480);
+        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0);
+        assert_eq!(
+            value_after(&args, "-vf"),
+            Some("crop=608:1080:0:0,scale=480:-2")
+        );
+
+        // And a crop that is already smaller than the request is left alone.
+        j.output_height = Some(720);
+        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0);
+        assert_eq!(value_after(&args, "-vf"), Some("crop=608:1080:0:0"));
+    }
+
+    #[test]
+    fn the_scale_sits_between_setpts_and_reverse() {
+        let mut j = job(QualityPreset::Balanced);
+        j.crop = Some(Rect {
+            x: 0,
+            y: 0,
+            w: 1920,
+            h: 1080,
+        });
+        j.speed = 2.0;
+        j.reverse = true;
+        j.output_height = Some(480);
+        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0);
+        assert_eq!(
+            value_after(&args, "-vf"),
+            Some("crop=1920:1080:0:0,setpts=PTS/2.0,scale=-2:480,reverse")
+        );
+    }
+
+    #[test]
+    fn an_explicit_height_wins_over_the_fit_ladder() {
+        let mut j = fit_job(10.0);
+        j.in_point = 0.0;
+        j.out_point = 900.0;
+        j.mute = true;
+        // Left alone this budget walks the ladder all the way to 640 wide.
+        j.output_height = Some(1080);
+        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0);
+        assert!(!has(&args, "-vf"), "the ladder overrode the explicit height");
+
+        j.output_height = Some(480);
+        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0);
+        assert_eq!(value_after(&args, "-vf"), Some("scale=-2:480"));
+    }
+
+    #[test]
+    fn gif_and_audio_formats_ignore_the_explicit_size_and_rate() {
+        let mut j = job(QualityPreset::Balanced);
+        j.output_height = Some(360);
+        j.video_kbps = Some(4000);
+
+        j.format = ExportFormat::Gif;
+        j.output = "C:\\clips\\out.gif".to_string();
+        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0);
+        // The gif chain owns its own width and frame rate caps.
+        assert_eq!(
+            value_after(&args, "-filter_complex"),
+            Some("fps=15,scale='min(iw,480)':-2:flags=lanczos,split[a][b];[a]palettegen=stats_mode=diff[p];[b][p]paletteuse=dither=bayer:bayer_scale=5")
+        );
+        assert!(!has(&args, "-b:v"));
+
+        j.format = ExportFormat::Mp3;
+        j.output = "C:\\clips\\out.mp3".to_string();
+        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0);
+        assert!(!has(&args, "-vf"));
+        assert!(!has(&args, "-b:v"));
+        assert_eq!(value_after(&args, "-b:a"), Some("192k"));
+    }
+
+    // -- explicit bitrate ----------------------------------------------------
+
+    #[test]
+    fn an_explicit_bitrate_replaces_the_constant_quality_flags() {
+        for encoder in ["libx264", "h264_nvenc", "h264_qsv", "h264_amf"] {
+            let mut j = job(QualityPreset::High);
+            j.video_kbps = Some(2500);
+            let args = build_args(&j, encoder, true, 1920, 1080, 30.0);
+
+            assert_eq!(value_after(&args, "-b:v"), Some("2500k"), "{encoder}");
+            assert_eq!(value_after(&args, "-maxrate"), Some("2500k"), "{encoder}");
+            assert_eq!(value_after(&args, "-bufsize"), Some("5000k"), "{encoder}");
+            assert!(!has(&args, "-crf"), "{encoder}");
+            assert!(!has(&args, "-cq"), "{encoder}");
+            assert!(!has(&args, "-global_quality"), "{encoder}");
+            assert!(!has(&args, "-qp_i"), "{encoder}");
+            // The audio rate still comes from the quality preset.
+            assert_eq!(value_after(&args, "-b:a"), Some("160k"), "{encoder}");
+        }
+    }
+
+    #[test]
+    fn an_explicit_bitrate_drives_vp9_too() {
+        let mut j = job(QualityPreset::Balanced);
+        j.format = ExportFormat::Webm;
+        j.output = "C:\\clips\\out.webm".to_string();
+        j.video_kbps = Some(1500);
+        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0);
+        assert!(has_pair(&args, "-c:v", "libvpx-vp9"));
+        assert_eq!(value_after(&args, "-b:v"), Some("1500k"));
+        assert_eq!(value_after(&args, "-bufsize"), Some("3000k"));
+        // -b:v 0 is the constant-quality spelling; with a real rate it must go.
+        assert!(!has_pair(&args, "-b:v", "0"));
+        assert!(!has(&args, "-crf"));
+        assert!(has_pair(&args, "-row-mt", "1"));
+    }
+
+    #[test]
+    fn a_size_target_overrides_an_explicit_bitrate() {
+        // export.rs refuses this pair, so this only pins what a job that
+        // skipped validation does: the target owns the rate.
+        let mut j = fit_job(10.0);
+        j.in_point = 0.0;
+        j.out_point = 30.0;
+        j.mute = true;
+        j.video_kbps = Some(9999);
+        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0);
+        assert_eq!(value_after(&args, "-b:v"), Some("2480k"));
+    }
+
+    // -- size estimation -----------------------------------------------------
+
+    #[test]
+    fn the_estimate_of_an_explicit_bitrate_is_arithmetic() {
+        let mut j = job(QualityPreset::Balanced);
+        j.video_kbps = Some(2000);
+        j.mute = true;
+        // 2000 kbps across the 10 s trim.
+        assert_eq!(
+            estimate_output_bytes(&j, 1920, 1080, 30.0, true),
+            2_500_000
+        );
+
+        // Unmuted adds the preset's 128k aac.
+        j.mute = false;
+        assert_eq!(
+            estimate_output_bytes(&j, 1920, 1080, 30.0, true),
+            2_660_000
+        );
+        // A source with no audio track pays nothing for one.
+        assert_eq!(
+            estimate_output_bytes(&j, 1920, 1080, 30.0, false),
+            2_500_000
+        );
+    }
+
+    #[test]
+    fn the_estimate_of_a_size_target_is_the_budget_it_aimed_at() {
+        let mut j = fit_job(10.0);
+        j.in_point = 0.0;
+        j.out_point = 20.0;
+        j.mute = true;
+        // The 0.93 overhead margin is deliberate undershoot, so the estimate
+        // has to report 9.3 MB rather than the 10 MB the user typed.
+        assert_eq!(estimate_output_bytes(&j, 1920, 1080, 30.0, true), 9_300_000);
+
+        // With audio the two streams still add back up to the same budget.
+        j.mute = false;
+        assert_eq!(estimate_output_bytes(&j, 1920, 1080, 30.0, true), 9_300_000);
+    }
+
+    #[test]
+    fn the_constant_quality_estimate_uses_bits_per_pixel() {
+        let j = job(QualityPreset::Balanced);
+        // 0.065 * 1920 * 1080 * 30 fps * 10 s, plus 128k of aac, in bytes.
+        assert_eq!(estimate_output_bytes(&j, 1920, 1080, 30.0, true), 5_214_400);
+
+        let mut j = job(QualityPreset::Small);
+        j.mute = true;
+        assert_eq!(estimate_output_bytes(&j, 1920, 1080, 30.0, true), 2_721_600);
+    }
+
+    #[test]
+    fn the_estimate_counts_frames_rather_than_seconds_through_a_speed_change() {
+        let mut j = job(QualityPreset::Balanced);
+        j.speed = 2.0;
+        // Half the output length at twice the frame rate: the same frames, so
+        // only the audio allowance halves.
+        assert_eq!(estimate_output_bytes(&j, 1920, 1080, 30.0, true), 5_134_400);
+    }
+
+    #[test]
+    fn the_estimate_measures_the_frame_after_crop_and_scale() {
+        let mut j = job(QualityPreset::Balanced);
+        j.output_height = Some(720);
+        // 0.065 * 1280 * 720 * 30 * 10, plus the audio.
+        assert_eq!(estimate_output_bytes(&j, 1920, 1080, 30.0, true), 2_406_400);
+
+        // A request the never-upscale rule drops must not shrink the estimate.
+        j.output_height = Some(2160);
+        assert_eq!(estimate_output_bytes(&j, 1920, 1080, 30.0, true), 5_214_400);
+
+        // Cropping counts even without a scale.
+        j.output_height = None;
+        j.crop = Some(Rect {
+            x: 0,
+            y: 0,
+            w: 1280,
+            h: 720,
+        });
+        assert_eq!(estimate_output_bytes(&j, 1920, 1080, 30.0, true), 2_406_400);
+    }
+
+    #[test]
+    fn the_estimate_of_an_audio_export_is_its_bitrate() {
+        let mut j = job(QualityPreset::Balanced);
+        j.format = ExportFormat::Mp3;
+        j.output = "C:\\clips\\out.mp3".to_string();
+        assert_eq!(estimate_output_bytes(&j, 1920, 1080, 30.0, true), 240_000);
+        // No audio track means no file worth predicting.
+        assert_eq!(estimate_output_bytes(&j, 1920, 1080, 30.0, false), 0);
+
+        let mut j = fit_job(2.0);
+        j.format = ExportFormat::Mp3;
+        j.in_point = 0.0;
+        j.out_point = 60.0;
+        // The 248k the fit arithmetic asks lame for, over 60 s.
+        assert_eq!(estimate_output_bytes(&j, 1920, 1080, 30.0, true), 1_860_000);
+    }
+
+    #[test]
+    fn the_estimate_of_a_gif_counts_quantised_frames() {
+        let mut j = job(QualityPreset::Balanced);
+        j.format = ExportFormat::Gif;
+        j.output = "C:\\clips\\out.gif".to_string();
+        // 480x270 at the balanced 15 fps cap for 10 s.
+        assert_eq!(estimate_output_bytes(&j, 1920, 1080, 30.0, true), 6_804_000);
+    }
+
+    #[test]
+    fn an_empty_or_unmeasurable_job_estimates_nothing() {
+        let mut j = job(QualityPreset::Balanced);
+        j.out_point = j.in_point;
+        assert_eq!(estimate_output_bytes(&j, 1920, 1080, 30.0, true), 0);
+
+        let j = job(QualityPreset::Balanced);
+        assert_eq!(estimate_output_bytes(&j, 0, 0, 30.0, true), 0);
+    }
+
+    #[test]
+    fn a_lossless_trim_is_estimated_from_the_source_frame() {
+        let mut j = job(QualityPreset::Balanced);
+        j.lossless = true;
+        // A stream copy ignores crop, so the crop must not shrink the answer.
+        j.crop = Some(Rect {
+            x: 0,
+            y: 0,
+            w: 640,
+            h: 360,
+        });
+        // 0.10 * 1920 * 1080 * 30 * 10, plus 128k of audio, in bytes.
+        assert_eq!(estimate_output_bytes(&j, 1920, 1080, 30.0, true), 7_936_000);
+    }
+
+    /// The estimate against a real encode, which is the only thing that can
+    /// tell a wrong constant from a plausible one.
+    ///
+    /// #[ignore] and living here rather than in tests/real_export.rs because
+    /// that file belongs to another change this round. Run it with:
+    ///     cargo test -- --ignored estimate_lands
+    #[test]
+    #[ignore]
+    fn the_estimate_lands_within_a_factor_of_two_of_a_real_export() {
+        let ffmpeg_missing = std::process::Command::new("ffmpeg")
+            .arg("-version")
+            .output()
+            .map(|out| !out.status.success())
+            .unwrap_or(true);
+        if ffmpeg_missing {
+            return;
+        }
+
+        let dir = std::env::temp_dir().join("flipperclipper-test-clips");
+        std::fs::create_dir_all(&dir).expect("could not create the fixture directory");
+        let src = dir.join("estimate-source.mp4");
+        if !src.exists() {
+            let status = std::process::Command::new("ffmpeg")
+                .args([
+                    "-hide_banner", "-loglevel", "error", "-y",
+                    "-f", "lavfi", "-i", "testsrc2=size=1920x1080:rate=30:duration=10",
+                    "-f", "lavfi", "-i", "sine=frequency=440:duration=10",
+                    "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p",
+                    "-c:a", "aac", "-b:a", "128k", "-shortest",
+                ])
+                .arg(&src)
+                .status()
+                .expect("could not run ffmpeg");
+            assert!(status.success(), "could not build the fixture");
+        }
+
+        let check = |name: &str, tune: &dyn Fn(&mut ExportJob)| {
+            let mut j = job(QualityPreset::Balanced);
+            j.input = src.to_string_lossy().into_owned();
+            j.output = dir.join(name).to_string_lossy().into_owned();
+            j.in_point = 0.0;
+            j.out_point = 5.0;
+            tune(&mut j);
+
+            let args = build_args(&j, "libx264", true, 1920, 1080, 30.0);
+            let out = std::process::Command::new("ffmpeg")
+                .args(&args)
+                .output()
+                .expect("could not run ffmpeg");
+            assert!(
+                out.status.success(),
+                "ffmpeg refused the arguments: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+
+            let actual = std::fs::metadata(&j.output).expect("no output file").len() as f64;
+            let estimate = estimate_output_bytes(&j, 1920, 1080, 30.0, true) as f64;
+            let ratio = estimate / actual;
+            assert!(
+                (0.5..=2.0).contains(&ratio),
+                "{name}: estimated {estimate} bytes against an actual {actual}"
+            );
+        };
+
+        check("estimate-balanced.mp4", &|_| {});
+        check("estimate-bitrate.mp4", &|j| j.video_kbps = Some(2000));
     }
 
     // -- parse_probe --------------------------------------------------------

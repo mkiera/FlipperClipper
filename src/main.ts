@@ -11,6 +11,7 @@ import {
   appVersion,
   assetUrl,
   detectEncoder,
+  ffmpegCheckLog,
   ffmpegStatus,
   launchFilePath,
   makeFilmstrip,
@@ -19,7 +20,7 @@ import {
   pickVideo,
   probe,
 } from './ipc';
-import { edit, loadMedia, patchEdit, patchUi, subscribe } from './state';
+import { edit, loadMedia, patchEdit, patchUi, subscribe, ui } from './state';
 import { initPlayer, loadSource, onPreviewTrouble, videoElement } from './player';
 import { initTimeline } from './timeline';
 import { initCrop } from './crop';
@@ -31,6 +32,13 @@ import { appSettings, buildInfo, initSettings } from './settings';
 /** How many thumbnails the strip gets. Long files reuse the same budget. */
 const FILMSTRIP_FRAMES = 16;
 const FILMSTRIP_HEIGHT = 64;
+
+/**
+ * Waits between the retries of one FFmpeg check: three attempts across about
+ * five seconds. A launch that resolves nothing on its first try costs that much
+ * silence instead of a banner telling the user to install what they already have.
+ */
+const FFMPEG_RETRY_MS = [1500, 3500];
 
 let emptyState!: HTMLElement;
 let dropHint!: HTMLElement;
@@ -71,8 +79,15 @@ function boot(): void {
   });
 
   // PATH resolution at launch is unreliable enough that a "missing" verdict can
-  // be wrong; re-asking on focus lets it correct itself without a restart.
+  // be wrong, so every route back to the app re-asks. 'focus' alone is not one:
+  // a window that opens already focused never fires it, and the banner then
+  // outlives the conditions that raised it until the app is restarted.
   window.addEventListener('focus', () => void checkFfmpeg(true));
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) void checkFfmpeg(true);
+  });
+  window.addEventListener('pointerdown', recheckIfMissing);
+  window.addEventListener('keydown', recheckIfMissing);
 
   void watchDrops();
   void checkFfmpeg();
@@ -151,16 +166,86 @@ async function watchDrops(): Promise<void> {
  * Startup checks
  * ----------------------------------------------------------------------- */
 
+let ffmpegCheckRunning = false;
+
+/**
+ * Asks whether FFmpeg is there, and does not believe the first "no".
+ *
+ * Each attempt is a full re-resolution on the Rust side, so a launch that races
+ * something - the installer's [Run] entry starting the app before the shell has
+ * the new environment, say - gets several chances before the user is told to
+ * install a thing they have. The banner is only raised once every attempt has
+ * failed.
+ */
 async function checkFfmpeg(quiet = false): Promise<void> {
+  // Focus, visibility and the interaction listeners can all fire inside one
+  // retry window; without this they would each start their own ladder.
+  if (ffmpegCheckRunning) return;
+  ffmpegCheckRunning = true;
   try {
-    const status = await ffmpegStatus();
-    patchUi({ ffmpegAvailable: status.available });
-    if (status.available) hideBanner('ffmpeg');
-    else showFfmpegBanner(() => void warmEncoder());
-  } catch (error) {
+    let failure: unknown = null;
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        if ((await ffmpegStatus()).available) {
+          patchUi({ ffmpegAvailable: true });
+          hideBanner('ffmpeg');
+          return;
+        }
+        failure = null;
+      } catch (error) {
+        failure = error;
+      }
+      if (attempt >= FFMPEG_RETRY_MS.length) break;
+      await sleep(FFMPEG_RETRY_MS[attempt]);
+    }
+
+    // A quiet re-check may only clear a wrong verdict, never raise one. It can
+    // start from a pointerdown, and pointerdown precedes click - so the banner's
+    // own "Install it" button would otherwise be undone by the ladder it began,
+    // putting the banner back after a successful install.
+    if (quiet) return;
+
     patchUi({ ffmpegAvailable: false });
-    if (!quiet) showToast(describe(error), [], true);
+    if (failure !== null) {
+      showToast(describe(failure), [], true);
+      return;
+    }
+    showFfmpegBanner(() => void warmEncoder());
+    void reportFfmpegDiagnostic();
+  } finally {
+    ffmpegCheckRunning = false;
   }
+}
+
+/** The banner is a verdict; the check log says which tier failed and why. */
+async function reportFfmpegDiagnostic(): Promise<void> {
+  try {
+    const text = await ffmpegCheckLog();
+    if (text) console.warn(text);
+  } catch {
+    /* a diagnostic that fails must not become a second failure */
+  }
+}
+
+/**
+ * One re-check per stretch of missing FFmpeg, not one per click. Each ladder is
+ * three resolutions, and a failing one walks the registry, so re-running it on
+ * every keystroke would spawn PowerShell continuously while the banner is up.
+ */
+let recheckedSinceMissing = false;
+
+function recheckIfMissing(): void {
+  if (ui.ffmpegAvailable) {
+    recheckedSinceMissing = false;
+    return;
+  }
+  if (recheckedSinceMissing) return;
+  recheckedSinceMissing = true;
+  void checkFfmpeg(true);
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
 
 /**

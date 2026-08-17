@@ -12,7 +12,7 @@
  */
 
 import { edit, patchEdit, subscribe, ui } from './state';
-import { beginScrub, currentTime, endScrub, onTime, seek } from './player';
+import { beginScrub, currentTime, endScrub, onTime, pause, seek } from './player';
 
 type Drag = 'in' | 'out' | 'scrub';
 
@@ -168,10 +168,16 @@ function onPointerDown(e: PointerEvent): void {
   // A scrub has no such offset: clicking the strip means "go to this frame".
   if (drag === 'scrub') {
     grabOffset = 0;
-    beginScrub();
   } else {
     grabOffset = e.clientX - bracketX(drag === 'in' ? inHandle : outHandle);
+    // A running preview fights the handle for the playhead, and the out point
+    // is exactly where the pump rewinds to the in point.
+    pause();
   }
+
+  // All three drags steer the playhead, so all three take the coalescer's
+  // scrub path: sloppy while moving, exact on release.
+  beginScrub();
 
   track.setPointerCapture(e.pointerId);
   track.classList.add('dragging');
@@ -191,13 +197,17 @@ function onPointerMove(e: PointerEvent): void {
 
 function endDrag(e: PointerEvent): void {
   if (!drag) return;
-  const wasScrub = drag === 'scrub';
   drag = null;
   track.classList.remove('dragging');
   if (track.hasPointerCapture(e.pointerId)) track.releasePointerCapture(e.pointerId);
-  if (wasScrub) endScrub();
+  endScrub();
 }
 
+/**
+ * A bracket drag parks the preview on the frame it is choosing. Done here and
+ * not from a state subscription: I and O set a point at the playhead, and
+ * reacting to the change would drag the playhead around with them.
+ */
 function applyDrag(clientX: number): void {
   const media = edit.media;
   if (!media || !drag) return;
@@ -205,9 +215,17 @@ function applyDrag(clientX: number): void {
   const t = timeAt(clientX);
   const gap = minRange();
 
-  if (drag === 'in') patchEdit({ inPoint: clamp(t, 0, edit.outPoint - gap) });
-  else if (drag === 'out') patchEdit({ outPoint: clamp(t, edit.inPoint + gap, media.duration) });
-  else seek(t);
+  if (drag === 'in') {
+    const inPoint = clamp(t, 0, edit.outPoint - gap);
+    patchEdit({ inPoint });
+    seek(inPoint);
+  } else if (drag === 'out') {
+    const outPoint = clamp(t, edit.inPoint + gap, media.duration);
+    patchEdit({ outPoint });
+    seek(outPoint);
+  } else {
+    seek(t);
+  }
 }
 
 function render(): void {

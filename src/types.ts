@@ -42,6 +42,26 @@ export const AUDIO_FORMATS: AudioFormat[] = ['mp3', 'm4a', 'wav', 'flac', 'ogg',
 /** 'fit' pairs with a typed size in EditState.targetMb. */
 export type QualityPreset = 'high' | 'balanced' | 'small' | 'fit';
 
+/**
+ * null = follow the source (after crop). Otherwise the finished clip's SMALLER
+ * dimension in pixels, the way "1080p" names it - so a portrait clip at 1080
+ * comes out 1080 wide, not 1080 tall.
+ */
+export type OutputHeight = number | null;
+
+export interface Rendition {
+  height: OutputHeight;
+  /** null = let quality decide (CRF/CQ). Otherwise an explicit rate. */
+  videoKbps: number | null;
+}
+
+/** In dropdown order. Also the set the Rust validator accepts. */
+export const OUTPUT_HEIGHTS: number[] = [2160, 1440, 1080, 720, 480, 360];
+
+/** The range the kbps input and the Rust validator agree on. */
+export const VIDEO_KBPS_MIN = 50;
+export const VIDEO_KBPS_MAX = 200_000;
+
 /** Everything the Rust side needs to build one ffmpeg command. */
 export interface ExportJob {
   input: string;
@@ -59,6 +79,8 @@ export interface ExportJob {
   quality: QualityPreset;
   /** Decimal megabytes; only read when quality is 'fit'. */
   targetMb: number | null;
+  outputHeight: number | null;
+  videoKbps: number | null;
   lossless: boolean;
 }
 
@@ -79,6 +101,9 @@ export interface EditState {
   audioOnly: boolean;
   targetMb: number;
   quality: QualityPreset;
+  outputHeight: OutputHeight;
+  /** null = automatic, i.e. the quality preset sets the rate. */
+  videoKbps: number | null;
   lossless: boolean;
 }
 
@@ -114,6 +139,7 @@ export interface AppSettings {
   defaultFormat: DefaultFormat;
   defaultQuality: QualityPreset;
   defaultTargetMb: number;
+  defaultOutputHeight: OutputHeight;
   showFilmstrip: boolean;
   encoder: EncoderPreference;
   autoPreviewProxy: boolean;
@@ -125,6 +151,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   defaultFormat: 'source',
   defaultQuality: 'balanced',
   defaultTargetMb: 10,
+  defaultOutputHeight: null,
   showFilmstrip: true,
   encoder: 'auto',
   autoPreviewProxy: true,
@@ -190,13 +217,28 @@ export function defaultFormatFor(inputPath: string): VideoFormat {
   }
 }
 
+/** The smaller dimension of the frame after crop; null with no media. */
+export function shortEdge(state: EditState): number | null {
+  const width = state.crop?.w ?? state.media?.width ?? null;
+  const height = state.crop?.h ?? state.media?.height ?? null;
+  return width === null || height === null ? null : Math.min(width, height);
+}
+
+/** False for a height at or above the source: that one emits no scale filter. */
+export function scalesDown(state: EditState): boolean {
+  const edge = shortEdge(state);
+  return state.outputHeight !== null && edge !== null && state.outputHeight < edge;
+}
+
 export function isTrimOnly(state: EditState): boolean {
   return (
     state.speed === 1 &&
     state.crop === null &&
     !state.mute &&
     !state.reverse &&
-    state.volume === 1
+    state.volume === 1 &&
+    !scalesDown(state) &&
+    state.videoKbps === null
   );
 }
 
