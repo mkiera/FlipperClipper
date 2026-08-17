@@ -48,14 +48,14 @@ fn user_agent(version: &semver::Version) -> String {
     format!("QuickClip/{version} (+https://github.com/mkiera/QuickClip)")
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 struct GhAsset {
     name: String,
     browser_download_url: String,
     size: u64,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 struct GhRelease {
     tag_name: String,
     #[serde(default)]
@@ -553,6 +553,12 @@ mod tests {
     /// the right repository, and that GitHub accepts the User-Agent. GitHub
     /// answers 403 to a request without one, and the app would report that as
     /// "could not check" forever without anybody noticing an update existed.
+    ///
+    /// A 404 is reported rather than failed, because it is not a defect: it is
+    /// what an anonymous request to a PRIVATE repository gets. GitHub answers
+    /// 404 instead of 403 there so as not to confirm the repository exists.
+    /// While the repository is private this test cannot run, and — the part
+    /// that matters — neither can the updater, for anyone.
     #[tokio::test]
     #[ignore]
     async fn the_live_release_feed_is_reachable_and_parses() {
@@ -564,6 +570,17 @@ mod tests {
             .send()
             .await
             .expect("could not reach GitHub");
+
+        if response.status().as_u16() == 404 {
+            println!(
+                "SKIPPED: {RELEASES_URL} answered 404 to an anonymous request.\n\
+                 That is what a private repository looks like from outside, and it means\n\
+                 the in-app updater cannot reach its release feed either. Nothing to fix\n\
+                 in this file - the repository has to be public for updates to work."
+            );
+            return;
+        }
+
         assert!(
             response.status().is_success(),
             "GitHub answered {} - a 403 here means the User-Agent was refused",
@@ -591,10 +608,35 @@ mod tests {
             );
         }
 
-        let picked = pick_update(releases, &current);
+        let picked = pick_update(releases.clone(), &current);
         assert!(
             picked.is_some(),
             "a 0.0.1-alpha build should be offered the newest published release"
         );
+
+        // The shipping case, asked of the live feed rather than a fixture:
+        // somebody running the second-newest published build must be offered
+        // the newest one. Derived from the feed instead of naming versions, so
+        // it keeps testing the real thing as releases come and go.
+        let mut published: Vec<semver::Version> = releases
+            .iter()
+            .filter(|r| !r.draft)
+            .filter_map(|r| semver::Version::parse(r.tag_name.trim_start_matches('v')).ok())
+            .collect();
+        published.sort();
+        published.dedup();
+
+        if published.len() >= 2 {
+            let newest = published.last().expect("checked len").clone();
+            let previous = published[published.len() - 2].clone();
+            let offered = pick_update(releases, &previous).unwrap_or_else(|| {
+                panic!("a {previous} build was offered nothing, with {newest} published")
+            });
+            assert_eq!(
+                offered.version,
+                newest.to_string(),
+                "a {previous} build should be offered {newest}"
+            );
+        }
     }
 }
