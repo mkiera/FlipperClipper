@@ -1,40 +1,39 @@
 /**
- * The whole application state, in two plain objects with a subscribe/notify
- * list around them.
+ * The whole application state, in two plain objects with a subscribe/notify list
+ * around them. No reactivity layer: a module subscribes, reads what it cares
+ * about and rewrites its own corner of the DOM.
  *
- * There is deliberately no reactivity layer. A module subscribes, reads the
- * fields it cares about and rewrites its own corner of the DOM; that costs a
- * few redundant attribute writes per change and buys a call stack you can read
- * top to bottom when a value ends up wrong.
- *
- * Playhead position is the one thing that is NOT kept here. It changes on every
- * presented frame, and routing it through this notifier would re-render the
- * control row and the timeline sixty times a second. player.ts owns it and
- * hands it out on its own channel.
+ * Playhead position is deliberately NOT here - it changes every presented frame
+ * and would re-render the control row 60 times a second. player.ts owns it.
  */
 
-import type { EditState, MediaInfo, QualityPreset } from './types';
+import { defaultFormatFor, type EditState, type MediaInfo, type QualityPreset } from './types';
 
-/** Transient things the user can see but that are not part of the edit. */
+/** Things the user can see that are not part of the edit. */
 export interface UiState {
-  /** False puts the install banner up and disables Export. */
   ffmpegAvailable: boolean;
   playing: boolean;
   cropping: boolean;
   exporting: boolean;
   /** 0 - 1, mirrored from the export-progress event. */
   exportPercent: number;
-  /** Thumbnail data URIs; empty until the filmstrip command comes back. */
+  /** Thumbnail data URIs; empty until the filmstrip command returns. */
   filmstrip: string[];
 }
 
-const QUALITY_KEY = 'quickclip.quality';
-const QUALITIES: QualityPreset[] = ['high', 'balanced', 'small', 'fit10', 'fit25'];
+const QUALITY_KEY = 'flipperclipper.quality';
+const TARGET_MB_KEY = 'flipperclipper.targetMb';
+const QUALITIES: QualityPreset[] = ['high', 'balanced', 'small', 'fit'];
 
 function storedQuality(): QualityPreset {
   const raw = localStorage.getItem(QUALITY_KEY);
   const match = QUALITIES.find((q) => q === raw);
   return match ?? 'balanced';
+}
+
+function storedTargetMb(): number {
+  const raw = Number(localStorage.getItem(TARGET_MB_KEY));
+  return Number.isFinite(raw) && raw >= 0.5 && raw <= 10_000 ? raw : 10;
 }
 
 export const edit: EditState = {
@@ -45,6 +44,11 @@ export const edit: EditState = {
   speed: 1,
   crop: null,
   mute: false,
+  reverse: false,
+  volume: 1,
+  format: 'mp4',
+  audioOnly: false,
+  targetMb: storedTargetMb(),
   quality: storedQuality(),
   lossless: false,
 };
@@ -69,15 +73,25 @@ export function subscribe(listener: Listener): () => void {
 }
 
 function notify(): void {
-  // Iterating a copy so that a listener which unsubscribes itself while being
-  // called (the toast does exactly that) cannot skip the listener after it.
+  // A copy, so a listener that unsubscribes itself mid-call (the toast does)
+  // cannot skip the one after it.
   for (const listener of [...listeners]) listener();
 }
 
 export function patchEdit(patch: Partial<EditState>): void {
   Object.assign(edit, patch);
-  if (patch.quality !== undefined) localStorage.setItem(QUALITY_KEY, patch.quality);
   notify();
+}
+
+// Separate from patchEdit: the app demotes quality itself when a format cannot
+// hit a size target, and persisting that would erase a remembered 'fit' the
+// moment a .gif is opened. Only the two control handlers call these.
+export function rememberQuality(quality: QualityPreset): void {
+  localStorage.setItem(QUALITY_KEY, quality);
+}
+
+export function rememberTargetMb(targetMb: number): void {
+  localStorage.setItem(TARGET_MB_KEY, String(targetMb));
 }
 
 export function patchUi(patch: Partial<UiState>): void {
@@ -86,9 +100,9 @@ export function patchUi(patch: Partial<UiState>): void {
 }
 
 /**
- * Swaps in a freshly opened file. Every edit resets except the quality choice,
- * which is the only preference the app remembers at all - opening a second clip
- * to send to the same person should not make you re-pick "Fit 10 MB".
+ * Quality and fit size survive a new file; the format does not - it follows the
+ * new file's extension, so a remembered webm cannot silently re-encode every
+ * mp4 opened after it.
  */
 export function loadMedia(media: MediaInfo, src: string): void {
   Object.assign(edit, {
@@ -99,6 +113,10 @@ export function loadMedia(media: MediaInfo, src: string): void {
     speed: 1,
     crop: null,
     mute: false,
+    reverse: false,
+    volume: 1,
+    format: defaultFormatFor(media.path),
+    audioOnly: false,
     lossless: false,
   } satisfies Partial<EditState>);
   Object.assign(ui, {
@@ -109,7 +127,7 @@ export function loadMedia(media: MediaInfo, src: string): void {
   notify();
 }
 
-/** Redraw everything without changing anything, e.g. after a window resize. */
+/** Redraw without changing anything, e.g. after a window resize. */
 export function refresh(): void {
   notify();
 }

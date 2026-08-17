@@ -57,7 +57,7 @@ let dragScaleY = 1;
 
 function el<T extends HTMLElement>(id: string): T {
   const found = document.getElementById(id);
-  if (!found) throw new Error(`QuickClip: index.html is missing #${id}`);
+  if (!found) throw new Error(`FlipperClipper: index.html is missing #${id}`);
   return found as T;
 }
 

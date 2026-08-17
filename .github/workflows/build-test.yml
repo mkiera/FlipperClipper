@@ -29,10 +29,6 @@ jobs:
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
 
-      # A cold Tauri build compiles several hundred crates and takes the better
-      # part of fifteen minutes on a runner. That is too slow to sit through for
-      # a branch build, which is the kind of build that is meant to be cheap
-      # enough to trigger without thinking about it.
       - name: Cache the Rust build
         uses: Swatinem/rust-cache@v2
         with:
@@ -41,16 +37,9 @@ jobs:
       - name: Install npm dependencies
         run: npm ci
 
-      # actions/upload-artifact rejects any name containing / \ : < > | * ? " or
-      # a newline, and this workflow triggers on feature/** — so a branch named
-      # feature/crop/handles still holds a slash after the prefix is stripped and
-      # fails the run at the upload step, after the whole fifteen-minute build.
-      # Everything outside A-Za-z0-9._- therefore becomes a dash before the name
-      # is handed on.
-      #
-      # The dispatch input arrives through env: rather than being interpolated
-      # into the script text: it is free text, and a value containing a quote, a
-      # backtick or $(...) would otherwise break the step or run on the runner.
+      # upload-artifact rejects names containing / \ : < > | * ? " or newline, and
+      # feature/** invites nested branch names. The input arrives via env: so free
+      # text containing quotes or $(...) cannot run on the runner.
       - name: Get build name
         id: build_name
         shell: bash
@@ -68,16 +57,12 @@ jobs:
           echo "NAME=${SAFE_NAME}" >> $GITHUB_OUTPUT
           echo "artifact name suffix: $SAFE_NAME"
 
-      # No version rewrite here, unlike the release workflow: there is no tag to
-      # take it from, and a test build should report the version in package.json
-      # so it is obvious which release it is a work-in-progress towards. The
-      # commit in build-info.json is what tells two test builds apart.
+      # No version rewrite, unlike the release workflow: there is no tag to take
+      # one from. build-info.json's commit is what tells two test builds apart.
       - name: Stamp the build with its commit and run
         run: node scripts/build_info.mjs
 
-      # npx rather than `npm run tauri build -- --no-bundle`: npm swallows the
-      # flag and Tauri bundles anyway, adding a WiX and an NSIS download to
-      # every run for artifacts this project does not ship.
+      # npx, not `npm run tauri build -- --no-bundle`: npm swallows the flag.
       - name: Build the app
         run: npx tauri build --no-bundle
 
@@ -91,20 +76,13 @@ jobs:
           echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
           echo "version: $VERSION ($VERNUM)"
 
-      # windows-latest is expected to ship Inno Setup, but "expected to" is not a
-      # build guarantee — install it rather than fail. The resolved path is
-      # exported instead of relying on PATH, because a fresh choco shim is not
-      # visible to a step that already started.
       - name: Ensure Inno Setup is available
         shell: pwsh
         run: |
           function Find-Iscc {
             $onPath = (Get-Command iscc.exe -ErrorAction SilentlyContinue).Source
             if ($onPath) { return $onPath }
-            # Version-agnostic glob: choco installs into "Inno Setup 6" today and
-            # a later major would be "Inno Setup 7".
-            # winget installs Inno Setup per-user into %LOCALAPPDATA%\Programs,
-            # which is not Program Files - a dev machine hits that path.
+            # winget installs Inno per-user, outside both Program Files roots.
             $globs = @("${env:ProgramFiles(x86)}\Inno Setup *\ISCC.exe", "$env:ProgramFiles\Inno Setup *\ISCC.exe", "$env:LOCALAPPDATA\Programs\Inno Setup *\ISCC.exe")
             return (Get-ChildItem -Path $globs -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName)
           }
@@ -116,30 +94,17 @@ jobs:
           }
           if (-not $iscc) { throw "ISCC.exe still not found after installing Inno Setup" }
           Write-Host "Using $iscc"
+          # Via GITHUB_ENV because a fresh choco shim is invisible to this step.
           Add-Content -Path $env:GITHUB_ENV -Value "ISCC=$iscc"
 
-      # Kept identical to the release build, so what a tester installs is packaged
-      # exactly the way the thing that eventually ships will be.
       - name: Build installer
         shell: pwsh
         run: |
           & "$env:ISCC" "/DAppVersion=${{ steps.vernum.outputs.VERSION }}" "/DVersionNumeric=${{ steps.vernum.outputs.VERNUM }}" installer.iss
 
-      # The installer, not the loose exe: it is what a tester should run, and it
-      # installs over an existing copy into the same per-user directory instead
-      # of leaving them with two QuickClips and no idea which one the shortcut
-      # points at.
-      #
-      # The QuickClip-Setup_ prefix is a naming convention for humans reading the
-      # Actions page, and nothing reads it. In FinFetcher it was load-bearing:
-      # its Alpha tab installed test builds straight from artifacts and used
-      # "Setup" in the name to tell, before downloading anything, which artifacts
-      # held an installer. QuickClip's updater only ever looks at published
-      # releases, so that channel does not exist here and the name is free to be
-      # decorative.
       - name: Upload Build Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: QuickClip-Setup_${{ steps.build_name.outputs.NAME }}
-          path: dist_installer/QuickClip-Setup.exe
+          name: FlipperClipper-Setup_${{ steps.build_name.outputs.NAME }}
+          path: dist_installer/FlipperClipper-Setup.exe
           retention-days: 30

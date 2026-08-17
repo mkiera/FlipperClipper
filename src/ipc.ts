@@ -1,9 +1,6 @@
 /**
- * The one module that is allowed to touch @tauri-apps/*.
- *
- * Everything else imports from here, so when a command signature changes on the
- * Rust side there is exactly one place in the UI that has to follow, and the
- * rest of the code stays plain TypeScript that reads like DOM work.
+ * The one module allowed to touch @tauri-apps/*. Everything else imports from
+ * here, so a changed command signature has exactly one place to follow.
  */
 
 import { convertFileSrc, invoke } from '@tauri-apps/api/core';
@@ -20,12 +17,7 @@ import {
   type UpdateInfo,
 } from './types';
 
-/**
- * Extensions offered in the open dialog. This is a convenience filter, not a
- * guard: the dialog always keeps an "All files" entry and probe() is the real
- * arbiter of whether something is playable, so a container missing from this
- * list costs the user one extra click rather than blocking them.
- */
+/** Dialog convenience only - probe() decides what is actually playable. */
 export const VIDEO_EXTENSIONS: string[] = [
   'mp4',
   'mov',
@@ -44,19 +36,11 @@ export const VIDEO_EXTENSIONS: string[] = [
   'ogv',
 ];
 
-/* --------------------------------------------------------------------------
- * Commands
- * ----------------------------------------------------------------------- */
-
 export function ffmpegStatus(): Promise<FfmpegStatus> {
   return invoke<FfmpegStatus>('ffmpeg_status');
 }
 
-/**
- * Reads the file's metadata and, as a side effect on the Rust side, adds the
- * path to the asset-protocol scope. Nothing may call assetUrl() for a path that
- * has not been through here first, or the <video> element gets a 403.
- */
+/** Also adds the path to the asset-protocol scope; assetUrl() 403s without it. */
 export function probe(path: string): Promise<MediaInfo> {
   return invoke<MediaInfo>('probe', { path });
 }
@@ -65,7 +49,7 @@ export function detectEncoder(): Promise<string> {
   return invoke<string>('detect_encoder');
 }
 
-/** Returns as soon as ffmpeg is spawned; watch the export events for the rest. */
+/** Returns once ffmpeg is spawned; watch the export events for the rest. */
 export function startExport(job: ExportJob): Promise<void> {
   return invoke<void>('start_export', { job });
 }
@@ -74,12 +58,11 @@ export function cancelExport(): Promise<void> {
   return invoke<void>('cancel_export');
 }
 
-/** Thumbnails as `data:` URIs, ready to drop straight into an <img src>. */
 export function makeFilmstrip(path: string, count: number, height: number): Promise<string[]> {
   return invoke<string[]>('make_filmstrip', { path, count, height });
 }
 
-/** Returns a file path on disk, which the caller still has to run through assetUrl(). */
+/** Returns a disk path, which the caller still runs through assetUrl(). */
 export function makePreviewProxy(path: string): Promise<string> {
   return invoke<string>('make_preview_proxy', { path });
 }
@@ -108,14 +91,7 @@ export function applyUpdate(info: UpdateInfo): Promise<void> {
   return invoke<void>('apply_update', { info });
 }
 
-/**
- * The file path the app was launched with, if any.
- *
- * Windows hands a double-clicked or "Open with" file to the exe as argv[1], and
- * the Rust side is the only half that can see it. This resolves to null rather
- * than throwing when the command is absent so that opening by drop and dialog
- * keeps working even if the launch-argument path is not wired up.
- */
+/** argv[1] from a double-click or "Open with"; null keeps drop and dialog working. */
 export async function launchFilePath(): Promise<string | null> {
   try {
     return await invoke<string | null>('cli_file_path');
@@ -123,10 +99,6 @@ export async function launchFilePath(): Promise<string | null> {
     return null;
   }
 }
-
-/* --------------------------------------------------------------------------
- * Events
- * ----------------------------------------------------------------------- */
 
 export function onExportProgress(cb: (p: ExportProgress) => void): Promise<UnlistenFn> {
   return listen<ExportProgress>(EVENT.exportProgress, (e) => cb(e.payload));
@@ -144,21 +116,10 @@ export function onUpdateProgress(cb: (fraction: number) => void): Promise<Unlist
   return listen<number>(EVENT.updateProgress, (e) => cb(e.payload));
 }
 
-// There is deliberately no listener for a file handed over after startup - a
-// second "Open with" on a running QuickClip opens a second window instead of
-// reaching this one. Catching that needs the single-instance plugin, which the
-// app does not take, and a listener for an event nobody emits would only look
-// like the case was handled.
+// No post-startup file handover: a second "Open with" opens a second window.
+// Catching it needs the single-instance plugin, which the app does not take.
 
-/* --------------------------------------------------------------------------
- * Shell surfaces
- * ----------------------------------------------------------------------- */
-
-/**
- * Tauri swallows OS drops at the window level, so the HTML5 drop event never
- * reaches the document and a plain dragover/drop pair silently does nothing.
- * This webview-level stream is the only way to see a dropped path.
- */
+/** Tauri swallows OS drops at the window level, so HTML5 drop never fires. */
 export function onDragDrop(handler: (event: DragDropEvent) => void): Promise<UnlistenFn> {
   return getCurrentWebview().onDragDropEvent((e) => handler(e.payload));
 }
@@ -180,10 +141,13 @@ export async function pickVideo(): Promise<string | null> {
   return typeof picked === 'string' ? picked : null;
 }
 
+/** Filter derived from defaultPath's extension so the two cannot disagree. */
 export async function pickExportTarget(defaultPath: string): Promise<string | null> {
+  const dot = defaultPath.lastIndexOf('.');
+  const ext = dot >= 0 ? defaultPath.slice(dot + 1).toLowerCase() : 'mp4';
   return await saveFileDialog({
     title: 'Export clip',
     defaultPath,
-    filters: [{ name: 'MP4 video', extensions: ['mp4'] }],
+    filters: [{ name: `${ext.toUpperCase()} file`, extensions: [ext] }],
   });
 }

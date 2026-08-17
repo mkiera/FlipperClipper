@@ -15,14 +15,16 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use quickclip_lib::ffmpeg::{build_args, output_duration, ExportJob, QualityPreset, Rect};
+use flipperclipper_lib::ffmpeg::{
+    build_args, output_duration, ExportFormat, ExportJob, QualityPreset, Rect,
+};
 
 // ---------------------------------------------------------------------------
 // Fixtures
 // ---------------------------------------------------------------------------
 
 fn fixture_dir() -> PathBuf {
-    let dir = std::env::temp_dir().join("quickclip-test-clips");
+    let dir = std::env::temp_dir().join("flipperclipper-test-clips");
     std::fs::create_dir_all(&dir).expect("could not create the fixture directory");
     dir
 }
@@ -147,11 +149,51 @@ fn has_audio(path: &Path) -> bool {
     .is_empty()
 }
 
+fn has_video(path: &Path) -> bool {
+    !ffprobe(
+        &["-select_streams", "v", "-show_entries", "stream=codec_type", "-of", "csv=p=0"],
+        path,
+    )
+    .is_empty()
+}
+
 fn video_codec_of(path: &Path) -> String {
     ffprobe(
         &["-select_streams", "v:0", "-show_entries", "stream=codec_name", "-of", "csv=p=0"],
         path,
     )
+}
+
+fn audio_codec_of(path: &Path) -> String {
+    ffprobe(
+        &["-select_streams", "a:0", "-show_entries", "stream=codec_name", "-of", "csv=p=0"],
+        path,
+    )
+}
+
+fn stream_count_of(path: &Path) -> i64 {
+    ffprobe(
+        &["-show_entries", "format=nb_streams", "-of", "csv=p=0"],
+        path,
+    )
+    .parse()
+    .unwrap_or(-1)
+}
+
+/// Decode the first frame of a finished export into an uncompressed BMP and
+/// hand back its bytes. BMP rather than PNG so the comparison is over raw
+/// pixels with no encoder freedom in between.
+fn first_frame_bytes(path: &Path, frame_name: &str) -> Vec<u8> {
+    let frame = fixture_dir().join(frame_name);
+    let status = Command::new("ffmpeg")
+        .args(["-hide_banner", "-loglevel", "error", "-y", "-i"])
+        .arg(path)
+        .args(["-frames:v", "1"])
+        .arg(&frame)
+        .status()
+        .expect("could not run ffmpeg");
+    assert!(status.success(), "could not extract a frame into {frame_name}");
+    std::fs::read(&frame).expect("the extracted frame file is missing")
 }
 
 /// Build the argv the app would build, run it, and hand back the output path.
@@ -180,7 +222,11 @@ fn job(input: &Path, name: &str) -> ExportJob {
         speed: 1.0,
         crop: None,
         mute: false,
+        reverse: false,
+        volume: 1.0,
+        format: ExportFormat::Mp4,
         quality: QualityPreset::Balanced,
+        target_mb: None,
         lossless: false,
     }
 }
@@ -253,6 +299,142 @@ fn quarter_speed_chains_atempo_without_losing_the_audio() {
     // run_export would already have failed.
     assert!((actual - 8.0).abs() < 0.3, "expected ~8.0 s, got {actual} s");
     assert!(has_audio(&out), "the audio track was dropped");
+}
+
+#[test]
+fn reverse_actually_reverses_the_video() {
+    if ffmpeg_missing() {
+        return;
+    }
+    let src = landscape();
+    let mut forward = job(&src, "out-rev-forward.mp4");
+    forward.out_point = 2.0;
+    let mut backward = job(&src, "out-rev-backward.mp4");
+    backward.out_point = 2.0;
+    backward.reverse = true;
+
+    let a = run_export(&forward, 1920, 1080, 30.0, true);
+    let b = run_export(&backward, 1920, 1080, 30.0, true);
+
+    // testsrc2 paints a moving pattern with a burnt-in counter, so the frame
+    // at t=0 and the frame at t=2 look nothing alike. If reverse worked, the
+    // reversed file opens on what used to be the last frame; comparing the two
+    // decoded first frames is a cheap proxy for "the clip plays backwards"
+    // that does not need every frame decoded and matched.
+    assert_ne!(
+        first_frame_bytes(&a, "rev-forward.bmp"),
+        first_frame_bytes(&b, "rev-backward.bmp"),
+        "the reversed export starts on the same frame as the forward one"
+    );
+    // Reversal must rearrange time, not consume it.
+    assert!((duration_of(&b) - 2.0).abs() < 0.3);
+    assert!(has_audio(&b), "areverse dropped the audio track");
+}
+
+#[test]
+fn doubled_volume_still_carries_an_audio_stream() {
+    if ffmpeg_missing() {
+        return;
+    }
+    let src = landscape();
+    let mut j = job(&src, "out-volume.mp4");
+    j.out_point = 3.0;
+    j.volume = 2.0;
+
+    // The risk is not the maths of the gain, it is the filter string: a typo
+    // in "volume=" fails the whole export, and run_export already asserts the
+    // exit code. What is left to check is that the stream survived the chain.
+    let out = run_export(&j, 1920, 1080, 30.0, true);
+    assert!(has_audio(&out), "the volume filter lost the audio stream");
+    assert!((duration_of(&out) - 3.0).abs() < 0.2);
+}
+
+#[test]
+fn gif_export_is_one_animated_video_stream_and_nothing_else() {
+    if ffmpeg_missing() {
+        return;
+    }
+    let src = landscape();
+    let mut j = job(&src, "out-anim.gif");
+    j.out_point = 2.0;
+    j.format = ExportFormat::Gif;
+
+    let out = run_export(&j, 1920, 1080, 30.0, true);
+    assert_eq!(video_codec_of(&out), "gif");
+    // Exactly one stream: the source's audio must not have been mapped, and
+    // the palette must have been consumed by paletteuse rather than muxed as a
+    // second video stream.
+    assert_eq!(stream_count_of(&out), 1);
+    assert!(!has_audio(&out));
+    // Balanced caps the width at 480.
+    let (w, _) = dimensions_of(&out);
+    assert_eq!(w, 480);
+}
+
+#[test]
+fn webm_export_is_vp9_with_opus() {
+    if ffmpeg_missing() {
+        return;
+    }
+    let src = landscape();
+    let mut j = job(&src, "out-container.webm");
+    j.out_point = 2.0;
+    j.format = ExportFormat::Webm;
+    // Small keeps the VP9 encode short; the codec pair is the same at every
+    // quality and VP9 is the slowest encoder in the whole matrix.
+    j.quality = QualityPreset::Small;
+
+    let out = run_export(&j, 1920, 1080, 30.0, true);
+    assert_eq!(video_codec_of(&out), "vp9");
+    assert_eq!(audio_codec_of(&out), "opus");
+}
+
+#[test]
+fn mp3_export_drops_the_video_and_tracks_the_speed_maths() {
+    if ffmpeg_missing() {
+        return;
+    }
+    let src = landscape();
+    let mut j = job(&src, "out-audio.mp3");
+    j.in_point = 2.0;
+    j.out_point = 10.0;
+    j.speed = 2.0;
+    j.format = ExportFormat::Mp3;
+
+    let out = run_export(&j, 1920, 1080, 30.0, true);
+    assert!(has_audio(&out));
+    assert!(!has_video(&out), "the mp3 export still carries a video stream");
+    // (10 - 2) / 2 = 4 s. If atempo were missing from this path the file
+    // would come out at 8 s and the progress bar's prediction would be wrong
+    // for every sped-up audio export.
+    let actual = duration_of(&out);
+    assert!((actual - 4.0).abs() < 0.3, "expected ~4.0 s, got {actual} s");
+}
+
+#[test]
+fn a_custom_two_megabyte_audio_fit_lands_under_two_megabytes() {
+    if ffmpeg_missing() {
+        return;
+    }
+    let src = landscape();
+    let mut j = job(&src, "out-fit-audio.mp3");
+    j.in_point = 0.0;
+    j.out_point = 20.0;
+    // Quarter speed stretches the 20 s source to 80 s of output, which pushes
+    // the computed rate (186 kbps) under lame's 320k ceiling; at 1x the budget
+    // would ask for 744k and lame would round it down to 320k anyway, making
+    // the test pass without exercising the arithmetic.
+    j.speed = 0.25;
+    j.format = ExportFormat::Mp3;
+    j.quality = QualityPreset::Fit;
+    j.target_mb = Some(2.0);
+
+    let out = run_export(&j, 1920, 1080, 30.0, true);
+    let size = std::fs::metadata(&out).expect("no output file").len();
+    assert!(size <= 2_000_000, "{size} bytes exceeds the 2 MB target");
+    // lame snaps the requested rate to the nearest valid MPEG-1 rate (192k),
+    // so the file should still land close to the budget, not miles under it.
+    assert!(size > 1_000_000, "{size} bytes is suspiciously far under target");
 }
 
 #[test]
@@ -346,7 +528,8 @@ fn the_ten_megabyte_target_is_actually_met() {
     let mut j = job(&src, "out-fit10.mp4");
     j.in_point = 0.0;
     j.out_point = 20.0;
-    j.quality = QualityPreset::Fit10;
+    j.quality = QualityPreset::Fit;
+    j.target_mb = Some(10.0);
 
     let out = run_export(&j, 1920, 1080, 30.0, true);
     let size = std::fs::metadata(&out).expect("no output file").len();
@@ -387,6 +570,7 @@ fn a_non_mp4_container_does_not_get_mp4_only_flags() {
     let src = landscape();
     let mut j = job(&src, "out-container.mkv");
     j.out_point = 2.0;
+    j.format = ExportFormat::Mkv;
 
     // -movflags belongs to the mov/mp4 muxer; leaving it on a Matroska output
     // makes ffmpeg abort with "Option movflags not found" after the user has

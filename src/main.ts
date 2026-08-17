@@ -65,7 +65,7 @@ let about!: HTMLElement;
 
 function el<T extends HTMLElement>(id: string): T {
   const found = document.getElementById(id);
-  if (!found) throw new Error(`QuickClip: index.html is missing #${id}`);
+  if (!found) throw new Error(`FlipperClipper: index.html is missing #${id}`);
   return found as T;
 }
 
@@ -80,7 +80,7 @@ function boot(): void {
   initPlayer(el<HTMLVideoElement>('video'));
   initTimeline();
   initCrop();
-  initControls();
+  initControls({ openFile: () => void openViaDialog() });
   initShortcuts({ openFile: () => void openViaDialog() });
 
   el('empty-open').addEventListener('click', () => void openViaDialog());
@@ -182,8 +182,8 @@ async function checkFfmpeg(): Promise<void> {
 }
 
 /**
- * The version in the corner of the empty state, with the commit and build date
- * in its tooltip.
+ * The version line under the wordmark, with the commit and build date in its
+ * tooltip.
  *
  * package.json says the same version for every build off a branch, so "which
  * build of 0.1.0 is this?" can only be answered by the commit, and that is the
@@ -207,7 +207,9 @@ async function showBuildIdentity(): Promise<void> {
     info.builtAt ? `built ${info.builtAt.slice(0, 10)}` : null,
   ].filter((part): part is string => part !== null);
 
-  about.textContent = `v${version}`;
+  // The same treatment as FinFetcher's "v1.1.0 · Made by Kiera" header line,
+  // because the two apps are meant to read as siblings from the first screen.
+  about.textContent = `v${version} · Made by Kiera`;
   if (details.length > 0) about.title = details.join(' - ');
   about.hidden = false;
 }

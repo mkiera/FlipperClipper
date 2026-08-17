@@ -28,12 +28,12 @@ pub struct UpdateInfo {
     pub prerelease: bool,
 }
 
-const RELEASES_URL: &str = "https://api.github.com/repos/mkiera/QuickClip/releases";
+const RELEASES_URL: &str = "https://api.github.com/repos/mkiera/FlipperClipper/releases";
 
 /// The tail of the one asset a release carries that can update an installed
 /// copy. FinFetcher matched on "an .exe with 'setup' in the name" because its
 /// older releases also shipped a bare stand-alone exe that would merely start
-/// an unpacked old version out of the cache directory. QuickClip has shipped
+/// an unpacked old version out of the cache directory. FlipperClipper has shipped
 /// the installer and nothing else from its first release, so the name the CI
 /// job writes can be matched exactly.
 const INSTALLER_SUFFIX: &str = "-setup.exe";
@@ -45,7 +45,7 @@ const UPDATE_PROGRESS_EVENT: &str = "update-progress";
 /// and no release list at all, so the header is not decoration — see the
 /// "User agent required" section of the GitHub REST API docs.
 fn user_agent(version: &semver::Version) -> String {
-    format!("QuickClip/{version} (+https://github.com/mkiera/QuickClip)")
+    format!("FlipperClipper/{version} (+https://github.com/mkiera/FlipperClipper)")
 }
 
 #[derive(Deserialize, Clone)]
@@ -236,7 +236,7 @@ pub async fn apply_update(app: tauri::AppHandle, info: UpdateInfo) -> Result<(),
         .child
         .is_some();
     if export_running {
-        return Err("QuickClip is still exporting a clip. Let it finish, then update.".to_string());
+        return Err("FlipperClipper is still exporting a clip. Let it finish, then update.".to_string());
     }
 
     // Nothing downstream can tell a truncated installer from a complete one
@@ -389,7 +389,7 @@ pub async fn apply_update(app: tauri::AppHandle, info: UpdateInfo) -> Result<(),
         .child
         .is_some();
     if export_started_meanwhile {
-        return Err("QuickClip started exporting a clip while the update was downloading. Let it finish, then update.".to_string());
+        return Err("FlipperClipper started exporting a clip while the update was downloading. Let it finish, then update.".to_string());
     }
 
     // Blocked by antivirus or policy, not an executable at all, gone from
@@ -425,15 +425,15 @@ mod tests {
     /// rather than silently becoming "no update available" for everybody.
     const REAL_PAYLOAD: &str = r#"[
       {
-        "html_url": "https://github.com/mkiera/QuickClip/releases/tag/v0.1.0-beta",
+        "html_url": "https://github.com/mkiera/FlipperClipper/releases/tag/v0.1.0-beta",
         "tag_name": "v0.1.0-beta",
         "draft": false,
         "prerelease": true,
         "assets": [
           {
-            "name": "QuickClip-Setup.exe",
+            "name": "FlipperClipper-Setup.exe",
             "size": 3309048,
-            "browser_download_url": "https://github.com/mkiera/QuickClip/releases/download/v0.1.0-beta/QuickClip-Setup.exe"
+            "browser_download_url": "https://github.com/mkiera/FlipperClipper/releases/download/v0.1.0-beta/FlipperClipper-Setup.exe"
           }
         ]
       }
@@ -444,10 +444,10 @@ mod tests {
         let picked = pick_update(releases(REAL_PAYLOAD), &version("0.0.9-beta"))
             .expect("an older pre-release build should be offered this one");
         assert_eq!(picked.version, "0.1.0-beta");
-        assert_eq!(picked.asset_name, "QuickClip-Setup.exe");
+        assert_eq!(picked.asset_name, "FlipperClipper-Setup.exe");
         assert_eq!(picked.size_bytes, 3309048);
         assert!(picked.prerelease);
-        assert!(picked.download_url.ends_with("/QuickClip-Setup.exe"));
+        assert!(picked.download_url.ends_with("/FlipperClipper-Setup.exe"));
     }
 
     #[test]
@@ -469,7 +469,7 @@ mod tests {
     fn the_stable_release_of_a_version_updates_its_prerelease() {
         let payload = r#"[
           {"html_url":"h","tag_name":"v0.1.0","draft":false,"prerelease":false,
-           "assets":[{"name":"QuickClip-Setup.exe","size":10,"browser_download_url":"u"}]}
+           "assets":[{"name":"FlipperClipper-Setup.exe","size":10,"browser_download_url":"u"}]}
         ]"#;
         let picked = pick_update(releases(payload), &version("0.1.0-beta"))
             .expect("0.1.0 is newer than 0.1.0-beta and stable, so it is offered");
@@ -481,11 +481,11 @@ mod tests {
     fn the_newest_release_wins_regardless_of_the_order_github_lists_them() {
         let payload = r#"[
           {"html_url":"h","tag_name":"v0.3.0","draft":false,"prerelease":false,
-           "assets":[{"name":"QuickClip-Setup.exe","size":3,"browser_download_url":"u3"}]},
+           "assets":[{"name":"FlipperClipper-Setup.exe","size":3,"browser_download_url":"u3"}]},
           {"html_url":"h","tag_name":"v0.9.0","draft":false,"prerelease":false,
-           "assets":[{"name":"QuickClip-Setup.exe","size":9,"browser_download_url":"u9"}]},
+           "assets":[{"name":"FlipperClipper-Setup.exe","size":9,"browser_download_url":"u9"}]},
           {"html_url":"h","tag_name":"v0.5.0","draft":false,"prerelease":false,
-           "assets":[{"name":"QuickClip-Setup.exe","size":5,"browser_download_url":"u5"}]}
+           "assets":[{"name":"FlipperClipper-Setup.exe","size":5,"browser_download_url":"u5"}]}
         ]"#;
         let picked = pick_update(releases(payload), &version("0.1.0")).expect("something is newer");
         assert_eq!(picked.version, "0.9.0");
@@ -495,11 +495,11 @@ mod tests {
     fn drafts_and_unparseable_tags_are_skipped_rather_than_guessed_at() {
         let payload = r#"[
           {"html_url":"h","tag_name":"v9.9.9","draft":true,"prerelease":false,
-           "assets":[{"name":"QuickClip-Setup.exe","size":1,"browser_download_url":"u"}]},
+           "assets":[{"name":"FlipperClipper-Setup.exe","size":1,"browser_download_url":"u"}]},
           {"html_url":"h","tag_name":"nightly","draft":false,"prerelease":false,
-           "assets":[{"name":"QuickClip-Setup.exe","size":1,"browser_download_url":"u"}]},
+           "assets":[{"name":"FlipperClipper-Setup.exe","size":1,"browser_download_url":"u"}]},
           {"html_url":"h","tag_name":"v0.2.0","draft":false,"prerelease":false,
-           "assets":[{"name":"QuickClip-Setup.exe","size":2,"browser_download_url":"u2"}]}
+           "assets":[{"name":"FlipperClipper-Setup.exe","size":2,"browser_download_url":"u2"}]}
         ]"#;
         let picked = pick_update(releases(payload), &version("0.1.0")).expect("v0.2.0 is usable");
         assert_eq!(picked.version, "0.2.0");
@@ -514,7 +514,7 @@ mod tests {
         let payload = r#"[
           {"html_url":"h","tag_name":"v0.4.0","draft":false,"prerelease":false,"assets":[]},
           {"html_url":"h","tag_name":"v0.2.0","draft":false,"prerelease":false,
-           "assets":[{"name":"QuickClip-Setup.exe","size":2,"browser_download_url":"u2"}]}
+           "assets":[{"name":"FlipperClipper-Setup.exe","size":2,"browser_download_url":"u2"}]}
         ]"#;
         let picked = pick_update(releases(payload), &version("0.1.0")).expect("v0.2.0 is ready");
         assert_eq!(picked.version, "0.2.0");
@@ -528,9 +528,9 @@ mod tests {
         let payload = r#"[
           {"html_url":"h","tag_name":"v0.2.0","draft":false,"prerelease":false,
            "assets":[
-             {"name":"QuickClip-portable.exe","size":1,"browser_download_url":"bad"},
+             {"name":"FlipperClipper-portable.exe","size":1,"browser_download_url":"bad"},
              {"name":"checksums.txt","size":1,"browser_download_url":"bad"},
-             {"name":"QuickClip-Setup.exe","size":7,"browser_download_url":"good"}
+             {"name":"FlipperClipper-Setup.exe","size":7,"browser_download_url":"good"}
            ]}
         ]"#;
         let picked = pick_update(releases(payload), &version("0.1.0")).expect("the setup exe");

@@ -24,7 +24,7 @@ dist-ssr
 *.sw?
 
 # Build output. src-tauri/target is the Rust build tree and reaches several GB;
-# dist_installer is where installer.iss drops QuickClip-Setup.exe.
+# dist_installer is where installer.iss drops FlipperClipper-Setup.exe.
 src-tauri/target/
 dist_installer/
 

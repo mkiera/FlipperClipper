@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager};
 
-use crate::ffmpeg::{self, ExportJob};
+use crate::ffmpeg::{self, ExportFormat, ExportJob, QualityPreset};
 use crate::{AppState, ExportSlot};
 
 const EVENT_PROGRESS: &str = "export-progress";
@@ -127,11 +127,26 @@ pub fn start_export(app: AppHandle, job: ExportJob) -> Result<(), String> {
     //
     // The same probe answers the other two questions build_args has to settle:
     // the frame size it clamps the crop rectangle against, and the size and rate
-    // it measures bits-per-pixel with when a fit-under-10-MB target has to decide
-    // whether to downscale. These are display-orientation values, which is the
+    // it measures bits-per-pixel with when a fit-under-a-size-target export has
+    // to decide whether to downscale. These are display-orientation values, which is the
     // space the crop rectangle already arrives in, so they pass straight through.
     let info = crate::sysutil::probe_media(&job.input)?;
-    let encoder = resolve_encoder(&state);
+    if is_audio_format(&job.format) && !info.has_audio {
+        return Err("This video has no audio track to export.".to_string());
+    }
+    // Only the h264 containers ever read the encoder argument: webm is pinned
+    // to libvpx-vp9, gif has no video codec choice, and the audio formats have
+    // no video stream at all. The first resolve_encoder call test-runs a real
+    // ffmpeg process per candidate, so paying that on an mp3 export would add
+    // seconds of GPU probing to a job that cannot use the answer.
+    let encoder = if matches!(
+        job.format,
+        ExportFormat::Mp4 | ExportFormat::Mov | ExportFormat::Mkv
+    ) {
+        resolve_encoder(&state)
+    } else {
+        "libx264".to_string()
+    };
     let args = ffmpeg::build_args(
         &job,
         &encoder,
@@ -157,7 +172,7 @@ pub fn start_export(app: AppHandle, job: ExportJob) -> Result<(), String> {
         _ => {
             let _ = child.kill();
             let _ = child.wait();
-            return Err("FFmpeg started but QuickClip could not read from it.".to_string());
+            return Err("FFmpeg started but FlipperClipper could not read from it.".to_string());
         }
     };
 
@@ -193,7 +208,7 @@ pub fn start_export(app: AppHandle, job: ExportJob) -> Result<(), String> {
             (slot.child.take(), slot.cancelled)
         };
         // Reaped even when cancelled, otherwise the killed ffmpeg lingers as a
-        // zombie for as long as QuickClip stays open.
+        // zombie for as long as FlipperClipper stays open.
         let status = child.map(|mut child| child.wait());
 
         if cancelled {
@@ -236,6 +251,26 @@ pub fn cancel_export(app: AppHandle) {
     }
 }
 
+/// The formats whose output has no video stream at all. Matched here rather
+/// than imported so that adding a container to ffmpeg.rs without deciding what
+/// mute or lossless mean for it fails to compile in this match, instead of
+/// silently defaulting to "video".
+fn is_audio_format(format: &ExportFormat) -> bool {
+    match format {
+        ExportFormat::Mp3
+        | ExportFormat::M4a
+        | ExportFormat::Wav
+        | ExportFormat::Flac
+        | ExportFormat::Ogg
+        | ExportFormat::Opus => true,
+        ExportFormat::Mp4
+        | ExportFormat::Mkv
+        | ExportFormat::Mov
+        | ExportFormat::Webm
+        | ExportFormat::Gif => false,
+    }
+}
+
 fn validate(job: &ExportJob) -> Result<(), String> {
     if !job.in_point.is_finite() || !job.out_point.is_finite() {
         return Err("The trim points are not valid numbers.".to_string());
@@ -246,8 +281,54 @@ fn validate(job: &ExportJob) -> Result<(), String> {
     if job.out_point <= job.in_point {
         return Err("The trim range is empty. Move the out point after the in point.".to_string());
     }
-    if !job.speed.is_finite() || !(0.25..=4.0).contains(&job.speed) {
-        return Err("Speed has to be between 0.25x and 4x.".to_string());
+    // Wider than the slider on purpose: the number input goes to 0.05..20 and
+    // the slider only to 0.25..8, so validating the slider's range would fail
+    // jobs the UI legitimately produces.
+    if !job.speed.is_finite() || !(0.05..=20.0).contains(&job.speed) {
+        return Err("Speed has to be between 0.05x and 20x.".to_string());
+    }
+    if !job.volume.is_finite() || !(0.0..=2.0).contains(&job.volume) {
+        return Err("Volume has to be between 0% and 200%.".to_string());
+    }
+
+    if matches!(job.quality, QualityPreset::Fit) {
+        // GIF has no rate control worth the name - palette plus dithering makes
+        // its size a function of the content, not of a bitrate - and WAV/FLAC
+        // encode every sample at full fidelity by definition, so a byte target
+        // is not something ffmpeg can honour for any of the three.
+        if matches!(job.format, ExportFormat::Gif) {
+            return Err("A GIF cannot be fitted under a size target.".to_string());
+        }
+        if matches!(job.format, ExportFormat::Wav | ExportFormat::Flac) {
+            return Err("WAV and FLAC cannot be fitted under a size target.".to_string());
+        }
+        match job.target_mb {
+            Some(mb) if mb.is_finite() && (0.5..=10_000.0).contains(&mb) => {}
+            _ => {
+                return Err("The target size has to be between 0.5 and 10000 MB.".to_string());
+            }
+        }
+    }
+
+    if job.mute && is_audio_format(&job.format) {
+        return Err("A muted audio export would be silence.".to_string());
+    }
+
+    // The UI greys these combinations out, but a job arrives over IPC and
+    // anything can invoke a command, so the greying is not a guarantee. Stream
+    // copy hands the input's packets through untouched: it cannot play them
+    // backwards, rescale their loudness, or re-wrap video packets as an audio
+    // file or a GIF, and ffmpeg would either error or emit a file that lies
+    // about what was asked for.
+    if job.lossless
+        && (job.reverse
+            || job.volume != 1.0
+            || is_audio_format(&job.format)
+            || matches!(job.format, ExportFormat::Gif))
+    {
+        return Err(
+            "A lossless export copies the video as it is, so it cannot reverse, change the volume, or change to an audio or GIF format.".to_string(),
+        );
     }
     if !Path::new(&job.input).is_file() {
         return Err("The source video is no longer there. It may have been moved or deleted."

@@ -66,7 +66,7 @@ pub fn install_ffmpeg() -> Result<(), String> {
         .output()
         .map_err(|_| {
             "Windows Package Manager (winget) is not available on this PC, so FFmpeg cannot be \
-             installed automatically. Install FFmpeg yourself and restart QuickClip."
+             installed automatically. Install FFmpeg yourself and restart FlipperClipper."
                 .to_string()
         })?;
 
@@ -96,7 +96,7 @@ pub fn install_ffmpeg() -> Result<(), String> {
 /// winget drops its shims in %LOCALAPPDATA%\Microsoft\WinGet\Links and adds that
 /// folder to the *user's* PATH, but a process only ever sees the copy of the
 /// environment it was launched with. Without this the install banner would stay
-/// up, and every export would keep failing, until QuickClip was restarted -
+/// up, and every export would keep failing, until FlipperClipper was restarted -
 /// while ffmpeg.exe sat on disk the whole time. Child processes inherit this
 /// process's environment, so patching it here is enough to find the new exe.
 fn add_winget_links_to_path() {
@@ -140,7 +140,7 @@ pub fn probe(app: AppHandle, path: String) -> Result<MediaInfo, String> {
     // it could name up front - so each file earns its entry at the moment it is
     // opened, and nothing else on the disk is reachable from the webview.
     app.asset_protocol_scope().allow_file(&path).map_err(|_| {
-        "QuickClip could not give itself permission to play that file.".to_string()
+        "FlipperClipper could not give itself permission to play that file.".to_string()
     })?;
 
     Ok(info)
@@ -166,11 +166,11 @@ pub fn probe_media(path: &str) -> Result<MediaInfo, String> {
         .stdin(Stdio::null())
         .output()
         .map_err(|_| {
-            "FFmpeg is not installed, so QuickClip cannot read that video.".to_string()
+            "FFmpeg is not installed, so FlipperClipper cannot read that video.".to_string()
         })?;
 
     if !output.status.success() {
-        return Err("That is not a video file QuickClip can read.".to_string());
+        return Err("That is not a video file FlipperClipper can read.".to_string());
     }
 
     ffmpeg::parse_probe(&String::from_utf8_lossy(&output.stdout), path, size_bytes)
@@ -222,7 +222,7 @@ fn render_filmstrip(
         .stderr(Stdio::null())
         .status()
         .map_err(|_| {
-            "FFmpeg is not installed, so QuickClip cannot draw the filmstrip.".to_string()
+            "FFmpeg is not installed, so FlipperClipper cannot draw the filmstrip.".to_string()
         })?;
 
     if !status.success() {
@@ -258,7 +258,7 @@ pub fn make_preview_proxy(app: AppHandle, path: String) -> Result<String, String
     // Named after the source path rather than the clock, so opening the same
     // HEVC clip twice in one session overwrites one temp file instead of leaving
     // a new 40 MB proxy behind on every attempt.
-    let output = std::env::temp_dir().join(format!("quickclip-proxy-{}.mp4", path_key(&path)));
+    let output = std::env::temp_dir().join(format!("flipperclipper-proxy-{}.mp4", path_key(&path)));
 
     let status = ffmpeg::hidden_command("ffmpeg")
         .args(["-hide_banner", "-loglevel", "error", "-y", "-i", path.as_str()])
@@ -275,17 +275,17 @@ pub fn make_preview_proxy(app: AppHandle, path: String) -> Result<String, String
         .stderr(Stdio::null())
         .status()
         .map_err(|_| {
-            "FFmpeg is not installed, so QuickClip cannot build a preview.".to_string()
+            "FFmpeg is not installed, so FlipperClipper cannot build a preview.".to_string()
         })?;
 
     if !status.success() {
-        return Err("QuickClip could not build a playable preview of that video.".to_string());
+        return Err("FlipperClipper could not build a playable preview of that video.".to_string());
     }
 
     let output = output.to_string_lossy().to_string();
     app.asset_protocol_scope()
         .allow_file(&output)
-        .map_err(|_| "QuickClip could not give itself permission to play the preview.".to_string())?;
+        .map_err(|_| "FlipperClipper could not give itself permission to play the preview.".to_string())?;
     Ok(output)
 }
 
@@ -318,9 +318,9 @@ pub fn copy_file_to_clipboard(path: String) -> Result<(), String> {
             "-NonInteractive",
             "-Sta",
             "-Command",
-            "Set-Clipboard -LiteralPath $env:QUICKCLIP_CLIPBOARD_PATH",
+            "Set-Clipboard -LiteralPath $env:FLIPPERCLIPPER_CLIPBOARD_PATH",
         ])
-        .env("QUICKCLIP_CLIPBOARD_PATH", &path)
+        .env("FLIPPERCLIPPER_CLIPBOARD_PATH", &path)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -330,7 +330,7 @@ pub fn copy_file_to_clipboard(path: String) -> Result<(), String> {
         })?;
 
     if !status.success() {
-        return Err("Windows would not let QuickClip put that file on the clipboard.".to_string());
+        return Err("Windows would not let FlipperClipper put that file on the clipboard.".to_string());
     }
     Ok(())
 }
@@ -357,7 +357,7 @@ pub fn app_version(app: AppHandle) -> String {
     app.package_info().version.to_string()
 }
 
-/// The file a "Open with -> QuickClip" or a drag onto the exe was launched for.
+/// The file a "Open with -> FlipperClipper" or a drag onto the exe was launched for.
 ///
 /// Windows passes it as a plain command-line argument, and the frontend asks for
 /// it once on boot, so double-clicking a video lands in the editor with the clip
@@ -384,11 +384,11 @@ fn temp_subdir(kind: &str) -> Result<PathBuf, String> {
         .map(|since| since.as_nanos())
         .unwrap_or(0);
     let dir = std::env::temp_dir().join(format!(
-        "quickclip-{kind}-{}-{stamp}",
+        "flipperclipper-{kind}-{}-{stamp}",
         std::process::id()
     ));
     std::fs::create_dir_all(&dir)
-        .map_err(|_| "Windows would not let QuickClip write to the temp folder.".to_string())?;
+        .map_err(|_| "Windows would not let FlipperClipper write to the temp folder.".to_string())?;
     Ok(dir)
 }
 

@@ -1,6 +1,4 @@
-// Public so tests/real_export.rs can drive the real command builder. The unit
-// tests in here only prove what argv comes out; that suite proves ffmpeg
-// actually accepts it and produces the clip the arguments describe.
+// Public so tests/real_export.rs can drive the real command builder.
 pub mod ffmpeg;
 mod export;
 mod sysutil;
@@ -8,29 +6,17 @@ mod updater;
 
 use std::sync::{Arc, Mutex};
 
-/// The one export QuickClip runs at a time, plus how it ended.
-///
-/// `cancelled` has to sit next to the child handle instead of living in the
-/// reader thread, because from the thread's side a user cancel and ffmpeg dying
-/// on its own look identical: both arrive as a killed process with a non-zero
-/// exit code. Reading the flag under the same lock that hands the child over
-/// means the two possible orderings - cancel lands first, or the process exits
-/// first - still produce exactly one outcome instead of a done event and an
-/// error event racing each other to the UI.
 pub struct ExportSlot {
     pub child: Option<std::process::Child>,
+    // Lives beside the child handle so a user cancel and ffmpeg dying on its own
+    // - identical from the watcher thread's side - resolve to one outcome.
     pub cancelled: bool,
 }
 
 pub struct AppState {
-    /// Detecting the encoder costs one real ffmpeg process per candidate, since
-    /// "compiled in" says nothing about whether the GPU is actually there. That
-    /// is far too slow to redo per export, and a graphics card does not appear
-    /// or vanish while the app is open, so the first answer is kept for the life
-    /// of the process.
+    // Cached for the life of the process: detection costs one real ffmpeg run
+    // per candidate, and a GPU does not appear while the app is open.
     pub encoder: Mutex<Option<String>>,
-    /// Held behind an Arc as well as the Mutex so the thread that watches ffmpeg
-    /// can keep its own handle on the slot without borrowing from an AppHandle.
     pub export: Arc<Mutex<ExportSlot>>,
 }
 
@@ -53,11 +39,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .manage(AppState::new())
         .setup(|app| {
-            // The updater hands its downloaded installer to Windows and then
-            // forgets about it, so every update QuickClip has ever applied leaves
-            // an installer sitting in %APPDATA%\com.mkiera.quickclip\updates for
-            // good. Startup is the safe moment to sweep them: no download of this
-            // session has happened yet, so nothing in that folder is in use.
+            // Startup is the one moment nothing in that folder is in use.
             updater::clear_updates_dir(app.handle());
             Ok(())
         })

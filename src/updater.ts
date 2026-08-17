@@ -15,7 +15,7 @@ import { type UpdateInfo } from './types';
 /** FinFetcher's CHECK_COOLDOWN_SECONDS = 3600, in the units localStorage uses. */
 const CHECK_COOLDOWN_MS = 60 * 60 * 1000;
 
-const LAST_CHECK_KEY = 'quickclip.lastUpdateCheck';
+const LAST_CHECK_KEY = 'flipperclipper.lastUpdateCheck';
 
 /**
  * How long after boot the check fires. GitHub is not going anywhere, and the
@@ -25,16 +25,16 @@ const LAST_CHECK_KEY = 'quickclip.lastUpdateCheck';
  */
 const CHECK_DELAY_MS = 2000;
 
-const STYLE_ID = 'qc-updater-style';
+const STYLE_ID = 'fc-updater-style';
 
 /**
- * Scoped to `.qc-update-*` and injected from here rather than added to
+ * Scoped to `.fc-update-*` and injected from here rather than added to
  * styles.css, so the updater carries its own appearance and cannot collide
  * with the editor's stylesheet. Colours come from the app's custom properties
  * when it defines them, with a dark fallback for when it does not.
  */
 const STYLE_TEXT = `
-.qc-update-pill {
+.fc-update-pill {
   position: fixed;
   top: 12px;
   right: 12px;
@@ -53,17 +53,17 @@ const STYLE_TEXT = `
   line-height: 20px;
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
 }
-.qc-update-label {
+.fc-update-label {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 /* A refusal from the Rust side is a whole sentence, and one truncated to
-   "QuickClip is still exporting a c…" tells the user nothing they can act on. */
-.qc-update-failed .qc-update-label {
+   "FlipperClipper is still exporting a c…" tells the user nothing they can act on. */
+.fc-update-failed .fc-update-label {
   white-space: normal;
 }
-.qc-update-pill button {
+.fc-update-pill button {
   flex: none;
   margin: 0;
   font: inherit;
@@ -73,18 +73,18 @@ const STYLE_TEXT = `
   box-shadow: none;
   transition: none;
 }
-.qc-update-action {
+.fc-update-action {
   padding: 2px 12px;
   border: none;
   border-radius: 999px;
   background: var(--accent, #396cd8);
   color: #ffffff;
 }
-.qc-update-action:disabled {
+.fc-update-action:disabled {
   opacity: 0.6;
   cursor: default;
 }
-.qc-update-dismiss {
+.fc-update-dismiss {
   width: 22px;
   padding: 0;
   border: none;
@@ -93,17 +93,17 @@ const STYLE_TEXT = `
   color: inherit;
   opacity: 0.6;
 }
-.qc-update-dismiss:hover {
+.fc-update-dismiss:hover {
   opacity: 1;
 }
-.qc-update-track {
+.fc-update-track {
   flex: 1 1 90px;
   height: 4px;
   border-radius: 2px;
   background: var(--border, rgba(127, 127, 127, 0.4));
   overflow: hidden;
 }
-.qc-update-fill {
+.fc-update-fill {
   width: 0%;
   height: 100%;
   border-radius: 2px;
@@ -175,28 +175,28 @@ function showPill(info: UpdateInfo): void {
   ensureStyle();
 
   pill = document.createElement('div');
-  pill.className = 'qc-update-pill';
+  pill.className = 'fc-update-pill';
   pill.title = info.releaseUrl;
 
   const label = document.createElement('span');
-  label.className = 'qc-update-label';
+  label.className = 'fc-update-label';
   label.textContent = `v${info.version} available`;
 
   const track = document.createElement('div');
-  track.className = 'qc-update-track';
+  track.className = 'fc-update-track';
   track.hidden = true;
   const fill = document.createElement('div');
-  fill.className = 'qc-update-fill';
+  fill.className = 'fc-update-fill';
   track.appendChild(fill);
 
   const action = document.createElement('button');
   action.type = 'button';
-  action.className = 'qc-update-action';
+  action.className = 'fc-update-action';
   action.textContent = 'Update';
 
   const dismiss = document.createElement('button');
   dismiss.type = 'button';
-  dismiss.className = 'qc-update-dismiss';
+  dismiss.className = 'fc-update-dismiss';
   dismiss.textContent = '×';
   dismiss.setAttribute('aria-label', 'Dismiss');
 
@@ -230,7 +230,7 @@ async function startUpdate(
   dismiss.hidden = true;
   track.hidden = false;
   fill.style.width = '0%';
-  pill?.classList.remove('qc-update-failed');
+  pill?.classList.remove('fc-update-failed');
   label.textContent = 'Downloading…';
 
   if (!unlistenProgress) {
@@ -260,7 +260,7 @@ async function startUpdate(
     // in the ellipsised single line a version number was sized for.
     const message = messageOf(error);
     label.textContent = message;
-    pill?.classList.add('qc-update-failed');
+    pill?.classList.add('fc-update-failed');
     if (pill) pill.title = message;
   }
 }
