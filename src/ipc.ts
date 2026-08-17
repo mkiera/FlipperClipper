@@ -1,7 +1,5 @@
-/**
- * The one module allowed to touch @tauri-apps/*. Everything else imports from
- * here, so a changed command signature has exactly one place to follow.
- */
+// The one module allowed to touch @tauri-apps/*, so a changed command signature
+// has exactly one place to follow.
 
 import { convertFileSrc, invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
@@ -21,7 +19,6 @@ import {
   type UpdateInfo,
 } from './types';
 
-/** Dialog convenience only - probe() decides what is actually playable. */
 export const VIDEO_EXTENSIONS: string[] = [
   'mp4',
   'mov',
@@ -44,7 +41,6 @@ export function ffmpegStatus(): Promise<FfmpegStatus> {
   return invoke<FfmpegStatus>('ffmpeg_status');
 }
 
-/** The diagnostic the last negative ffmpegStatus() wrote; null if there is none. */
 export function ffmpegCheckLog(): Promise<string | null> {
   return invoke<string | null>('ffmpeg_check_log');
 }
@@ -58,7 +54,6 @@ export function detectEncoder(): Promise<string> {
   return invoke<string>('detect_encoder');
 }
 
-/** Returns once ffmpeg is spawned; watch the export events for the rest. */
 export function startExport(job: ExportJob): Promise<void> {
   return invoke<void>('start_export', { job });
 }
@@ -67,11 +62,7 @@ export function cancelExport(): Promise<void> {
   return invoke<void>('cancel_export');
 }
 
-/**
- * Projected size in bytes of the clip the same job would export. The frame size
- * and rate are passed in from the MediaInfo the caller already holds, so a
- * slider drag costs no probe. 0 means the Rust side could not say.
- */
+/** Projected size in bytes. 0 means the Rust side could not say. */
 export function estimateExportSize(job: ExportJob, media: MediaInfo): Promise<number> {
   return invoke<number>('estimate_export_size', {
     job,
@@ -132,11 +123,7 @@ export function installRelease(info: ReleaseInfo): Promise<void> {
   return invoke<void>('install_release', { info });
 }
 
-/**
- * Branch builds, not releases: listReleases('alpha') is rejected on purpose.
- * currentSha comes from the caller because only the frontend can read
- * build-info.json; without it no row can be marked as the running build.
- */
+/** currentSha comes from the caller: only the frontend can read build-info.json. */
 export function listAlphaBuilds(
   refresh: boolean,
   currentSha: string | null,
@@ -149,7 +136,6 @@ export function installAlphaBuild(build: AlphaBuild): Promise<void> {
   return invoke<void>('install_alpha_build', { build });
 }
 
-/** argv[1] from a double-click or "Open with"; null keeps drop and dialog working. */
 export async function launchFilePath(): Promise<string | null> {
   try {
     return await invoke<string | null>('cli_file_path');
@@ -174,9 +160,6 @@ export function onUpdateProgress(cb: (fraction: number) => void): Promise<Unlist
   return listen<number>(EVENT.updateProgress, (e) => cb(e.payload));
 }
 
-// No post-startup file handover: a second "Open with" opens a second window.
-// Catching it needs the single-instance plugin, which the app does not take.
-
 /** Tauri swallows OS drops at the window level, so HTML5 drop never fires. */
 export function onDragDrop(handler: (event: DragDropEvent) => void): Promise<UnlistenFn> {
   return getCurrentWebview().onDragDropEvent((e) => handler(e.payload));
@@ -199,7 +182,6 @@ export async function pickVideo(): Promise<string | null> {
   return typeof picked === 'string' ? picked : null;
 }
 
-/** Filter derived from defaultPath's extension so the two cannot disagree. */
 export async function pickExportTarget(defaultPath: string): Promise<string | null> {
   const dot = defaultPath.lastIndexOf('.');
   const ext = dot >= 0 ? defaultPath.slice(dot + 1).toLowerCase() : 'mp4';

@@ -102,8 +102,7 @@ fn field<T: serde::de::DeserializeOwned>(
     }
 }
 
-/// Anything unreadable is settled as defaults here, so no caller has to decide
-/// what a broken settings file means. Folded field by field on purpose: an older
+/// Anything unreadable settles as defaults here. Folded field by field on purpose: an older
 /// build reading a newer build's file must lose only the fields it cannot parse.
 fn from_json_str(text: &str) -> AppSettings {
     let mut settings = AppSettings::default();

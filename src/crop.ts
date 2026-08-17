@@ -1,17 +1,3 @@
-/**
- * Crop mode: a draggable rectangle over the video with eight resize handles.
- *
- * The rectangle is stored in SOURCE pixels because that is what ffmpeg's crop
- * filter wants and what types.ts documents. Everything the user touches is in
- * displayed pixels, and the only bridge between the two is contentBox() below.
- *
- * That bridge is the part worth being careful about: the <video> element is
- * object-fit: contain, so on any clip whose aspect ratio differs from the
- * stage's there are letterbox bars inside the element's own box. Mapping
- * against the element rect instead of the real content rect puts every crop off
- * by the size of those bars, and the error is invisible until export.
- */
-
 import { edit, patchEdit, patchUi, subscribe, ui } from './state';
 import { videoElement } from './player';
 import type { Rect } from './types';
@@ -21,11 +7,7 @@ interface Box {
   top: number;
   width: number;
   height: number;
-  /**
-   * Displayed pixels per source pixel, kept per axis: a source with
-   * non-square pixels is rendered wider or taller than its stored dimensions,
-   * so one shared factor cannot describe both directions.
-   */
+  // Per axis: non-square pixels render wider or taller than the stored dimensions.
   scaleX: number;
   scaleY: number;
 }
@@ -37,7 +19,6 @@ const ASPECTS: { label: string; value: number | null }[] = [
   { label: '1:1', value: 1 },
 ];
 
-/** Source pixels. Small enough to crop hard, large enough to grab back. */
 const MIN_SIZE = 16;
 
 let layer!: HTMLElement;
@@ -88,15 +69,12 @@ export function initCrop(): void {
   rectEl.addEventListener('pointerup', onPointerUp);
   rectEl.addEventListener('pointercancel', onPointerUp);
 
-  // The stage grows and shrinks with the window, and the letterbox bars grow
-  // with it, so the mapping has to be recomputed rather than cached.
   new ResizeObserver(() => {
     if (ui.cropping) drawRect();
     drawMark();
   }).observe(videoElement());
 
-  // Before metadata contentBox() falls back to ffprobe's dimensions, which are
-  // the wrong shape on anamorphic footage; a proxy swap reopens that window.
+  // Before metadata contentBox() falls back to ffprobe's shape, wrong on anamorphic footage.
   videoElement().addEventListener('loadedmetadata', () => {
     if (ui.cropping) drawRect();
     drawMark();
@@ -127,8 +105,7 @@ export function confirmCrop(): void {
     w: Math.round(working.w),
     h: Math.round(working.h),
   };
-  // A rectangle that still covers the whole frame is not a crop, and recording
-  // it as one would cost the user the lossless trim path for no benefit.
+  // A rect still covering the whole frame is not a crop, and would cost the lossless path.
   patchEdit({ crop: coversFrame(rounded) ? null : rounded });
   patchUi({ cropping: false });
 }
@@ -149,10 +126,6 @@ function syncVisibility(): void {
   drawMark();
 }
 
-/**
- * The confirmed crop, drawn back over the full frame as an inert reminder:
- * crop mode's geometry and tokens, half its dimming, no pointer events.
- */
 function buildMark(): void {
   const stage = layer.parentElement;
   if (!stage) throw new Error('FlipperClipper: #crop-layer has no stage to sit in');
@@ -166,7 +139,6 @@ function buildMark(): void {
     zIndex: '1',
   });
 
-  // Separate from the outline so halving the dimming does not fade the outline.
   markShade = document.createElement('div');
   Object.assign(markShade.style, {
     position: 'absolute',
@@ -203,8 +175,7 @@ function buildMark(): void {
 function drawMark(): void {
   const crop = edit.crop;
   const show = crop !== null && edit.media !== null && !ui.cropping;
-  // Unhidden before measuring: display:none reports a zero rect, which would
-  // pin the mark to the stage's top-left corner.
+  // Unhidden before measuring: display:none reports a zero rect.
   markLayer.hidden = !show;
   if (!crop || !show) return;
 
@@ -261,25 +232,9 @@ function coversFrame(r: Rect): boolean {
   return r.x <= 1 && r.y <= 1 && r.w >= media.width - 1 && r.h >= media.height - 1;
 }
 
-/**
- * The video's real content rectangle, in coordinates local to `host`. The host
- * is a parameter because #crop-layer is display:none outside crop mode and
- * would measure as a zero rect; the mark maps against its own layer instead.
- *
- * The shape of that rectangle has to come from videoWidth/videoHeight, not
- * from media.width/height: ffprobe reports the dimensions the frames are
- * stored at (swapped for a rotation flag, but never adjusted for
- * sample_aspect_ratio), while the element lays the frame out at its display
- * aspect ratio with the sample aspect applied. On anamorphic footage - a
- * 720x480 SAR 32:27 DVD rip, most AVCHD camcorders - the two disagree, and
- * fitting the letterbox with ffprobe's numbers gets both the size and the
- * centring wrong, so every crop is quietly offset with nothing to show for it
- * until the user watches the export.
- *
- * media.width/height stay the coordinate space the crop rect is expressed in,
- * because that is what ffmpeg's crop filter takes and it must not follow the
- * preview when the preview is running off a downscaled proxy.
- */
+// Letterbox math uses videoWidth/videoHeight - ffprobe's stored dimensions ignore sample
+// aspect, so on anamorphic footage every crop comes out offset. The rect itself stays in
+// media.width/height, which is the space ffmpeg's crop filter takes.
 function contentBox(host: HTMLElement): Box | null {
   const media = edit.media;
   if (!media || media.width <= 0 || media.height <= 0) return null;
@@ -289,9 +244,7 @@ function contentBox(host: HTMLElement): Box | null {
   const layerRect = host.getBoundingClientRect();
   if (videoRect.width <= 0 || videoRect.height <= 0) return null;
 
-  // Both are 0 until the element has metadata, and crop mode can be entered in
-  // that window; the stored dimensions are the better guess than a divide by
-  // zero, and the ResizeObserver redraws with the real ones soon after.
+  // Both are 0 until metadata arrives, and crop mode can be entered in that window.
   const shownWidth = video.videoWidth > 0 ? video.videoWidth : media.width;
   const shownHeight = video.videoHeight > 0 ? video.videoHeight : media.height;
 
@@ -391,8 +344,6 @@ function resizeBy(handle: string, dx: number, dy: number): Rect {
     }
     if (south) h = start.h + dy;
 
-    // Pin the edge being dragged instead of letting the rectangle flip through
-    // itself, which reads as the handle jumping to the far side mid-drag.
     if (w < MIN_SIZE) {
       if (west) x = start.x + start.w - MIN_SIZE;
       w = MIN_SIZE;
@@ -416,9 +367,6 @@ function resizeBy(handle: string, dx: number, dy: number): Rect {
     return { x, y, w: Math.max(MIN_SIZE, w), h: Math.max(MIN_SIZE, h) };
   }
 
-  // With an aspect locked, the edge opposite the handle is the anchor and the
-  // rectangle can only grow into the space between that anchor and the frame
-  // edge - which is what keeps a 16:9 drag from silently leaving the frame.
   const anchorX = west ? start.x + start.w : start.x;
   const anchorY = north ? start.y + start.h : start.y;
   const availableW = west ? anchorX : media.width - anchorX;
@@ -461,7 +409,6 @@ function resizeBy(handle: string, dx: number, dy: number): Rect {
   return { x, y, w: Math.max(MIN_SIZE, w), h: Math.max(MIN_SIZE, h) };
 }
 
-/** Reshapes a rectangle to an aspect ratio around its own centre. */
 function fitAspect(r: Rect, ratio: number): Rect {
   const media = edit.media;
   if (!media) return r;

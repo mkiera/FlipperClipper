@@ -1,9 +1,3 @@
-/**
- * The control row, the export flow, and the two bits of transient chrome that
- * do not belong to any one control: banners along the top and a toast at the
- * bottom.
- */
-
 import {
   cancelExport,
   copyFileToClipboard,
@@ -44,31 +38,21 @@ import {
   type QualityPreset,
 } from './types';
 
-/** How long a success toast stays up. Errors ignore this and wait to be closed. */
 const TOAST_MS = 9000;
 
-/** The slider's travel in log2(speed): 0.25x to 8x, with 1x at log2 = 0. */
+// The slider's travel in log2(speed): -2 is 0.25x, 3 is 8x.
 const SPEED_SLIDER_MIN = -2;
 const SPEED_SLIDER_MAX = 3;
 
-/** The range the number input and the Rust validator agree on. */
 const SPEED_MIN = 0.05;
 const SPEED_MAX = 20;
 
-/**
- * Reversing makes ffmpeg hold every decoded frame of the clip in memory before
- * it can write the first output frame; past about half a minute of output that
- * is gigabytes, and the only symptom is an export that crawls or dies. Warned
- * once per session rather than every toggle, because the second warning teaches
- * nothing the first did not.
- */
+// ffmpeg buffers every decoded frame to reverse a clip, so long ones eat memory.
 const REVERSE_WARN_SECONDS = 30;
 let reverseWarned = false;
 
-/** The estimate crosses IPC, so edits settle before one is asked for. */
 const ESTIMATE_DEBOUNCE_MS = 250;
 
-/** What Manual starts on, and what returning to Manual comes back to. */
 const DEFAULT_MANUAL_KBPS = 4000;
 let manualKbps = DEFAULT_MANUAL_KBPS;
 
@@ -85,7 +69,6 @@ export interface BannerOptions {
 }
 
 export interface ControlsDeps {
-  /** Same flow as Ctrl+O. Owned by main.ts because opening is an app-level flow. */
   openFile: () => void;
 }
 
@@ -124,11 +107,10 @@ let toastActions!: HTMLElement;
 let toastTimer = 0;
 
 let estimateTimer = 0;
-/** Bumped per request, so a slow answer cannot overwrite a newer one. */
+// Bumped per request, so a slow answer cannot overwrite a newer one.
 let estimateToken = 0;
 let estimateKey = '';
 
-/** Which list the format dropdown currently holds, so it is only rebuilt on a switch. */
 let formatListIsAudio: boolean | null = null;
 
 function el<T extends HTMLElement>(id: string): T {
@@ -170,9 +152,6 @@ export function initControls(controlsDeps: ControlsDeps): void {
   toastMsg = el('toast-msg');
   toastActions = el('toast-actions');
 
-  // The webview previews speed through playbackRate, which Chromium refuses to
-  // set above 16 - the export pipeline has no such cap, so the input has to say
-  // which half of the app the extreme values reach.
   speedInput.title = 'Speed, 0.05 to 20. The preview tops out at 16x; export uses the exact value.';
 
   openBtn.addEventListener('click', () => deps.openFile());
@@ -183,9 +162,7 @@ export function initControls(controlsDeps: ControlsDeps): void {
   audioOnlyBtn.addEventListener('click', toggleAudioOnly);
 
   speedSlider.addEventListener('input', () => {
-    // Two decimals is what the notches need to land exactly: 2^0.585 comes out
-    // as 1.50006, and a chip that reads 1.5 but exports 1.50006 would make
-    // lossless-adjacent comparisons of durations look wrong by a frame.
+    // Two decimals, or a notch reads 1.5 and exports 1.50006.
     const speed = Math.round(2 ** Number(speedSlider.value) * 100) / 100;
     patchEdit({ speed });
   });
@@ -197,8 +174,6 @@ export function initControls(controlsDeps: ControlsDeps): void {
       return;
     }
     const speed = clamp(raw, SPEED_MIN, SPEED_MAX);
-    // The render-time sync skips the input while it still has focus, so a
-    // clamped entry would keep showing the out-of-range number the user typed.
     if (speed !== raw) speedInput.value = String(speed);
     patchEdit({ speed });
   });
@@ -219,8 +194,7 @@ export function initControls(controlsDeps: ControlsDeps): void {
 
   fitMbInput.addEventListener('change', () => {
     const raw = Number(fitMbInput.value);
-    // Same bounds the Rust side validates, enforced here so a typo is corrected
-    // at the input instead of surfacing as a refusal at export time.
+    // The bounds export.rs validates, enforced here so a typo is fixed at the input.
     const clamped = Number.isFinite(raw) ? clamp(raw, 0.5, 10_000) : settings.defaultTargetMb;
     fitMbInput.value = String(clamped);
     rememberTargetMb(clamped);
@@ -258,8 +232,6 @@ export function initControls(controlsDeps: ControlsDeps): void {
 
   el('toast-close').addEventListener('click', dismissToast);
 
-  // A click anywhere else is the normal way people dismiss a popover, and
-  // without this it survives until the next Escape, floating over the timeline.
   document.addEventListener('pointerdown', (e) => {
     if (popover.hidden) return;
     const target = e.target as Node;
@@ -278,10 +250,6 @@ export function initControls(controlsDeps: ControlsDeps): void {
   render();
 }
 
-/**
- * Exported because R in shortcuts.ts must come through here too: the memory
- * warning lives with the toggle, not with any one way of reaching it.
- */
 export function toggleReverse(): void {
   if (!edit.media) return;
   const reverse = !edit.reverse;
@@ -294,9 +262,6 @@ export function toggleReverse(): void {
 
 function toggleAudioOnly(): void {
   if (edit.audioOnly) {
-    // Coming back to video with an audio format still selected would leave the
-    // dropdown pointing at an entry that no longer exists in it, so the format
-    // falls back to the opened file's own container.
     const format = (AUDIO_FORMATS as string[]).includes(edit.format)
       ? defaultFormatFor(edit.media?.path ?? '')
       : edit.format;
@@ -309,9 +274,7 @@ function toggleAudioOnly(): void {
   }
 }
 
-/* --------------------------------------------------------------------------
- * Rendering
- * ----------------------------------------------------------------------- */
+/* --- Rendering --- */
 
 function rebuildFormatOptions(): void {
   if (formatListIsAudio === edit.audioOnly) return;
@@ -327,7 +290,7 @@ function rebuildFormatOptions(): void {
   formatSelect.replaceChildren(...options);
 }
 
-/** Formats whose fit is refused by export.rs: gif has no rate control worth the name, wav/flac have no rate control at all. */
+// gif, wav and flac have no rate control, so export.rs refuses a size target.
 function fitAllowed(format: ExportFormat): boolean {
   return format !== 'gif' && format !== 'wav' && format !== 'flac';
 }
@@ -336,21 +299,12 @@ function render(): void {
   const hasMedia = edit.media !== null;
   const hasAudio = edit.media?.hasAudio ?? false;
 
-  // The one combination the dropdowns can reach that export.rs would refuse:
-  // 'fit' with a format that cannot hit a byte target. Corrected here rather
-  // than in each format-changing handler because opening a .gif with a
-  // remembered 'fit' arrives through loadMedia and touches no handler at all.
-  // patchEdit inside a render re-enters notify once and then the condition is
-  // false, so this cannot loop.
+  // Corrected here, not in the handlers: loadMedia can arrive holding a remembered 'fit'.
   if (edit.quality === 'fit' && !fitAllowed(edit.format)) {
-    // The settings default, unless that is 'fit' too - which would loop here.
     patchEdit({ quality: settings.defaultQuality === 'fit' ? 'balanced' : settings.defaultQuality });
     return;
   }
 
-  // Same shape of correction, for the two combinations the row can reach that
-  // export.rs would refuse: a size target owns the rate, and a height above the
-  // source is an upscale the app never offers.
   if (edit.quality === 'fit' && edit.videoKbps !== null) {
     patchEdit({ videoKbps: null });
     return;
@@ -368,11 +322,7 @@ function render(): void {
 
   speedSlider.disabled = !hasMedia;
   speedInput.disabled = !hasMedia;
-  // The slider covers 0.25..8; a typed 0.05 or 20 pins it to its end while the
-  // real value stands in the number input beside it.
   speedSlider.value = String(clamp(Math.log2(edit.speed), SPEED_SLIDER_MIN, SPEED_SLIDER_MAX));
-  // Left alone while being typed in, or every keystroke would be rewritten
-  // under the cursor by the render its own change causes.
   if (document.activeElement !== speedInput) speedInput.value = String(edit.speed);
 
   reverseBtn.disabled = !hasMedia;
@@ -382,8 +332,6 @@ function render(): void {
   cropBtn.classList.toggle('active', ui.cropping || edit.crop !== null);
 
   muteBtn.hidden = hasMedia && !hasAudio;
-  // Mute and audio-only exclude each other: an export that is only the audio
-  // track with the audio track muted is a file of silence nobody asked for.
   muteBtn.disabled = !hasMedia || edit.audioOnly;
   muteBtn.classList.toggle('is-muted', edit.mute);
   muteBtn.classList.toggle('active', edit.mute);
@@ -409,8 +357,6 @@ function render(): void {
   fitMbInput.disabled = ui.exporting;
   if (document.activeElement !== fitMbInput) fitMbInput.value = String(edit.targetMb);
 
-  // Both are video-only knobs; an audio export has neither a frame nor a video
-  // stream to give a rate to.
   resSelect.hidden = edit.audioOnly;
   resSelect.disabled = !hasMedia || ui.exporting;
   for (const height of OUTPUT_HEIGHTS) {
@@ -452,10 +398,6 @@ function renderTime(t: number): void {
   timeLabel.textContent = `${formatTime(clamp(position, 0, total))} / ${formatTime(total)}`;
 }
 
-/**
- * m:ss.d - one decimal is what you need to judge a frame-accurate trim, and a
- * second decimal just makes the readout twitch.
- */
 function formatTime(seconds: number): string {
   const safe = Math.max(0, seconds);
   const minutes = Math.floor(safe / 60);
@@ -465,14 +407,9 @@ function formatTime(seconds: number): string {
   return `${minutes}:${String(whole).padStart(2, '0')}.${tenths}`;
 }
 
-/* --------------------------------------------------------------------------
- * Size estimate
- * ----------------------------------------------------------------------- */
+/* --- Size estimate --- */
 
-/**
- * Only the fields the estimate depends on, so the export-progress events - which
- * re-render the row several times a second - do not each ask the Rust side again.
- */
+// Only what the estimate depends on: export progress re-renders several times a second.
 function estimateSignature(): string {
   const crop = edit.crop;
   return [
@@ -501,7 +438,6 @@ function scheduleEstimate(): void {
 
   window.clearTimeout(estimateTimer);
   if (!edit.media) {
-    // Bumped so an answer already in flight for the previous file is dropped.
     estimateToken += 1;
     estimateLabel.hidden = true;
     return;
@@ -518,7 +454,6 @@ async function refreshEstimate(): Promise<void> {
   try {
     bytes = await estimateExportSize(buildJob(media.path, defaultOutputPath(media.path)), media);
   } catch {
-    // No number at all beats a wrong one: this line sits next to Export.
     bytes = null;
   }
   if (token !== estimateToken) return;
@@ -531,22 +466,16 @@ async function refreshEstimate(): Promise<void> {
   estimateLabel.hidden = false;
 }
 
-/** "about 12 MB" - for the CRF presets this is a projection, not a promise. */
 function approximateSize(bytes: number): string {
   const mb = Math.max(bytes / 1_000_000, 0.05);
   return mb < 10 ? `about ${mb.toFixed(1)} MB` : `about ${Math.round(mb)} MB`;
 }
 
-/* --------------------------------------------------------------------------
- * Export
- * ----------------------------------------------------------------------- */
+/* --- Export --- */
 
 export function beginExport(): void {
   if (!edit.media || ui.exporting || !ui.ffmpegAvailable) return;
 
-  // The lossless question only has an answer when a stream copy would actually
-  // produce the asked-for clip, so for every other edit the popover would be a
-  // dialog with nothing in it.
   if (losslessEligible(edit)) {
     losslessBox.checked = edit.lossless;
     popover.hidden = false;
@@ -561,14 +490,12 @@ function closePopover(): void {
   popover.hidden = true;
 }
 
-/** Returns whether there was a popover to close, which Escape needs to know. */
 export function closeExportPopover(): boolean {
   if (popover.hidden) return false;
   closePopover();
   return true;
 }
 
-/** The one shape both the export and the estimate go out in. */
 function buildJob(input: string, output: string): ExportJob {
   return {
     input,
@@ -585,9 +512,6 @@ function buildJob(input: string, output: string): ExportJob {
     targetMb: edit.quality === 'fit' ? edit.targetMb : null,
     outputHeight: edit.audioOnly ? null : edit.outputHeight,
     videoKbps: edit.audioOnly || edit.quality === 'fit' ? null : edit.videoKbps,
-    // Belt and braces: the checkbox is only reachable while the edit is
-    // eligible, but the edit can change between opening the popover and
-    // getting through the save dialog.
     lossless: edit.lossless && losslessEligible(edit),
   };
 }
@@ -629,15 +553,7 @@ async function ffmpegReady(): Promise<boolean> {
   return false;
 }
 
-/**
- * A cancelled export is the one ending that reports nothing: the Rust side
- * kills ffmpeg, deletes the half-written file and returns without emitting
- * export-done or export-error, because neither is true of a job the user
- * called off. The two listeners that clear ui.exporting therefore never fire,
- * and nothing else clears it - not even opening another file - so the flag has
- * to be dropped here or the progress row stays frozen, Export stays hidden and
- * the quality select stays disabled until the app is restarted.
- */
+// A cancel emits neither export-done nor export-error, so nothing else clears ui.exporting.
 function cancelRunningExport(): void {
   if (!ui.exporting) return;
   patchUi({ exporting: false, exportPercent: 0 });
@@ -649,9 +565,6 @@ function onExportFinished(outputPath: string): void {
   showToast(`Exported ${baseName(outputPath)}`, [
     { label: 'Reveal', run: () => void revealInExplorer(outputPath).catch(reportFailure) },
     { label: 'Copy file', run: () => void copyFileToClipboard(outputPath).catch(reportFailure) },
-    // The natural next act is the next clip, and before this existed the only
-    // routes there were a keyboard shortcut or dropping a file - neither of
-    // which anything on screen advertised once a video was open.
     { label: 'Open another…', run: () => deps.openFile() },
   ]);
 }
@@ -660,11 +573,6 @@ function reportFailure(error: unknown): void {
   showToast(describe(error), [], true);
 }
 
-/**
- * Beside the source, same stem, so it lands where the user is already looking.
- * The extension follows the chosen format - it is also what pickExportTarget
- * derives the save dialog's filter from.
- */
 function defaultOutputPath(input: string): string {
   const cut = Math.max(input.lastIndexOf('\\'), input.lastIndexOf('/'));
   const directory = cut >= 0 ? input.slice(0, cut + 1) : '';
@@ -679,9 +587,7 @@ function baseName(path: string): string {
   return cut >= 0 ? path.slice(cut + 1) : path;
 }
 
-/* --------------------------------------------------------------------------
- * Banners and toast
- * ----------------------------------------------------------------------- */
+/* --- Banners and toast --- */
 
 export function showBanner(key: string, options: BannerOptions): void {
   hideBanner(key);
@@ -731,10 +637,8 @@ function bannerShowing(key: string): boolean {
   return banners.querySelector(`[data-key="${key}"]`) !== null;
 }
 
-/** The FFmpeg banner, with the one-click install the plan calls for. */
 export function showFfmpegBanner(onInstalled: () => void = () => {}): void {
-  // Re-raising rebuilds the node, and the rebuilt button has lost the disabled
-  // flag that stops a running install from being started a second time.
+  // Re-raising rebuilds the button, losing the disabled flag that blocks a second install.
   if (bannerShowing('ffmpeg')) return;
 
   showBanner('ffmpeg', {
@@ -773,7 +677,6 @@ export function showToast(message: string, actions: ToastAction[] = [], persist 
   if (!persist) toastTimer = window.setTimeout(dismissToast, TOAST_MS);
 }
 
-/** Returns whether there was anything to dismiss, which Escape needs to know. */
 export function dismissToast(): boolean {
   if (toast.hidden) return false;
   window.clearTimeout(toastTimer);

@@ -1,5 +1,4 @@
-; Compile: iscc /DAppVersion=0.2.0-beta /DVersionNumeric=0.2.0.0 installer.iss
-; Output: dist_installer\FlipperClipper-Setup.exe
+; iscc /DAppVersion=0.2.0-beta /DVersionNumeric=0.2.0.0 installer.iss -> dist_installer\FlipperClipper-Setup.exe
 
 #define AppName "FlipperClipper"
 #define AppPublisher "mkiera"
@@ -39,14 +38,12 @@ DisableProgramGroupPage=yes
 DisableReadyPage=yes
 DisableFinishedPage=yes
 
-; The updater passes no /DIR or /TASKS; without these a silent update relocates
-; the install and resets the shortcut choice.
+; The updater passes no /DIR or /TASKS, so a silent update would otherwise relocate the install.
 UsePreviousAppDir=yes
 UsePreviousTasks=yes
 
 CloseApplications=yes
-; Relaunching is the [Run] entry's job; Restart Manager doing it too opens a
-; second window on the same clip.
+; Relaunching is the [Run] entry's job; Restart Manager doing it too opens a second window.
 RestartApplications=no
 
 Uninstallable=yes
@@ -76,19 +73,16 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"
 
 [Files]
-; DestName: cargo emits lowercase flipperclipper.exe and `tauri build` does not
-; rename it to productName, so this is what ships FlipperClipper.exe.
+; Cargo emits lowercase flipperclipper.exe and `tauri build` does not rename it, so DestName does.
 Source: "{#AppSourceExe}"; DestDir: "{app}"; DestName: "{#AppExeName}"; Flags: ignoreversion
 
 [Icons]
-; No AppUserModelID: tagging the shortcut while the process stays untagged
-; splits the taskbar button on any launch that did not come from the shortcut.
+; No AppUserModelID: tagging the shortcut while the process stays untagged splits the taskbar button.
 Name: "{autoprograms}\{#AppName}"; Filename: "{app}\{#AppExeName}"
 Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExeName}"; Tasks: desktopicon
 
 [Run]
-; Neither postinstall nor skipifsilent: this is the only thing that starts the
-; app again after a silent update.
+; Neither postinstall nor skipifsilent: this is the only thing that restarts the app after an update.
 Filename: "{app}\{#AppExeName}"; StatusMsg: "Starting {#AppName}..."; Flags: nowait
 
 [UninstallDelete]

@@ -1,15 +1,9 @@
-//! Pure command-building and probe-parsing logic.
+//! Pure command-building and probe-parsing, so the whole export matrix is unit-testable
+//! without ffmpeg installed. A wrong argument here produces a silently truncated or
+//! unwatchable export rather than an error, which is what the tests below are for.
 //!
-//! Everything in here except the process helpers at the bottom is a pure
-//! function of its arguments so the whole export matrix can be unit-tested
-//! without ffmpeg installed and without writing a file. A wrong argument here produces a
-//! silently truncated or unwatchable export rather than an error, so the tests
-//! at the bottom of this file are the only thing that catches it.
-//!
-//! Validation lives in export.rs, not here: build_args builds exactly what the
-//! job says, even combinations export.rs would refuse (fit-to-size gif, speed
-//! 50x). Folding the checks in here would mean the tests could no longer reach
-//! the argument builder with edge-case inputs to prove what it emits.
+//! Validation lives in export.rs: build_args builds exactly what the job says, including
+//! combinations export.rs would refuse, so the tests can reach it with edge-case inputs.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -43,9 +37,7 @@ pub struct MediaInfo {
     pub size_bytes: u64,
 }
 
-/// The container/codec the user picked. The lowercase serde names are the
-/// exact strings the frontend's ExportFormat union uses, so a mismatch here
-/// fails every export at the IPC boundary rather than in ffmpeg.
+/// The lowercase serde names are the exact strings the frontend's ExportFormat union uses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ExportFormat {
@@ -63,10 +55,8 @@ pub enum ExportFormat {
 }
 
 impl ExportFormat {
-    /// True for the formats that carry no video stream at all. The whole
-    /// audio-only branch of build_args keys off this, so a format added to the
-    /// enum but missed here would go down the video path and hand libx264 an
-    /// .mp3 output.
+    /// The whole audio-only branch keys off this, so a format missed here would go down the
+    /// video path and hand libx264 an .mp3 output.
     pub fn is_audio(self) -> bool {
         matches!(
             self,
@@ -117,26 +107,17 @@ pub struct ExportJob {
     pub video_kbps: Option<i64>,
 }
 
-/// Below this many bits per pixel per second H.264 stops being able to hold
-/// detail and a "fit under 10 MB" export turns into a block of mush. The value
-/// is the low end of the usual 0.04-0.10 working range for the veryfast preset;
-/// anything under it is better spent on fewer, sharper pixels.
+/// Below this, H.264 stops holding detail and a fit-under-10-MB export turns into mush.
+/// The low end of the usual 0.04-0.10 range for veryfast.
 const BPP_FLOOR: f64 = 0.04;
 
-/// The rungs the auto-downscale ladder is allowed to land on. They are the
-/// standard 720p/480p/360p widths for 16:9 and all three are even, so `-2` on
-/// the other axis always yields an even height too.
+/// The standard 16:9 widths, all even, so `-2` on the other axis yields an even height.
 const SCALE_LADDER: [i64; 3] = [1280, 854, 640];
 
-// ---------------------------------------------------------------------------
-// Small formatting helpers
-// ---------------------------------------------------------------------------
+// --- Small formatting helpers ---
 
-/// Formats a float for an ffmpeg filter expression: enough precision to survive
-/// a 1/3 speed, but with the trailing zeros of `{:.6}` trimmed so the argument
-/// vector that shows up in a bug report is readable. One digit is always kept
-/// after the point because `atempo=2` and `atempo=2.0` are the same to ffmpeg
-/// but only one of them looks like a rate.
+/// One digit is always kept after the point: `atempo=2` and `atempo=2.0` are the same to
+/// ffmpeg, but only one of them looks like a rate.
 fn fmt_num(v: f64) -> String {
     let mut s = format!("{:.6}", v);
     while s.ends_with('0') && !s.ends_with(".0") {
@@ -145,20 +126,14 @@ fn fmt_num(v: f64) -> String {
     s
 }
 
-/// Seek and duration values go out at millisecond precision. ffmpeg parses
-/// plain seconds happily and three decimals is finer than any frame we will
-/// ever cut on, while a full `{}` of an f64 can print `1.7999999999999998`.
+/// Millisecond precision. A full `{}` of an f64 can print `1.7999999999999998`.
 fn fmt_time(v: f64) -> String {
     format!("{:.3}", v.max(0.0))
 }
 
-// ---------------------------------------------------------------------------
-// Pure math
-// ---------------------------------------------------------------------------
+// --- Pure math ---
 
-/// The wall-clock length of the exported file, which the speed change alters.
-/// The progress reader divides ffmpeg's `out_time` by this, so a zero here
-/// would produce NaN percentages in the UI.
+/// The progress reader divides ffmpeg's `out_time` by this, so a zero would produce NaN.
 pub fn output_duration(job: &ExportJob) -> f64 {
     if job.speed <= 0.0 {
         return 0.0;
@@ -166,23 +141,16 @@ pub fn output_duration(job: &ExportJob) -> f64 {
     ((job.out_point - job.in_point) / job.speed).max(0.0)
 }
 
-/// The window of *source* material we read, which the speed change does not
-/// alter. Keeping this separate from `output_duration` is the whole reason the
-/// trim survives a speed change.
+/// The source window, which the speed change does not alter. Keeping it separate from
+/// output_duration is the whole reason the trim survives a speed change.
 fn source_duration(job: &ExportJob) -> f64 {
     (job.out_point - job.in_point).max(0.0)
 }
 
-/// Builds the `atempo` chain for any speed the UI can produce, which since the
-/// range was widened means anything in [0.05, 20].
-///
-/// atempo refuses factors below 0.5 and errors out rather than clamping, so the
-/// slow end has to be expressed as a chain of 0.5 stages. The fast end is
-/// chained too, in stages of 2.0, even though ffmpeg 7's atempo accepts factors
-/// up to 100 in a single stage: one big stage widens the WSOLA search window in
-/// proportion and the result audibly smears transients, while cascaded 2.0
-/// stages keep each window small. Returns an empty vector at 1x because
-/// emitting `atempo=1.0` would force a needless resample of the audio.
+/// atempo refuses factors below 0.5 and errors rather than clamping, so the slow end is a
+/// chain of 0.5 stages. The fast end chains 2.0 stages too, though ffmpeg 7 accepts up to 100
+/// in one: a big stage widens the WSOLA window in proportion and smears transients. Empty at
+/// 1x, because `atempo=1.0` would force a needless resample.
 pub fn atempo_chain(speed: f64) -> Vec<String> {
     let mut parts: Vec<String> = Vec::new();
     if !speed.is_finite() || speed <= 0.0 {
@@ -203,15 +171,9 @@ pub fn atempo_chain(speed: f64) -> Vec<String> {
     parts
 }
 
-/// The audio filter chain shared by the video and audio-only paths: tempo
-/// first, then gain, then reversal.
-///
-/// The gain rides after atempo purely so both paths emit the same readable
-/// order; the two filters commute. areverse does not get that freedom: it has
-/// to buffer the entire stream before it can emit a sample, so it sits last,
-/// where a sped-up export hands it the shortened stream instead of the full
-/// source-length one. volume is omitted at 1.0 for the same reason atempo is
-/// omitted at 1x - a no-op filter still costs a resample pass.
+/// areverse has to buffer the entire stream before it can emit a sample, so it sits last,
+/// where a sped-up export hands it the shortened stream. volume is omitted at 1.0 for the
+/// same reason atempo is: a no-op filter still costs a resample pass.
 fn audio_filters(job: &ExportJob) -> Vec<String> {
     let mut parts = atempo_chain(job.speed);
     if (job.volume - 1.0).abs() > 1e-9 {
@@ -223,23 +185,12 @@ fn audio_filters(job: &ExportJob) -> Vec<String> {
     parts
 }
 
-/// Snaps a crop rectangle to something yuv420p can actually encode.
-///
-/// Chroma is subsampled 2x2, so an odd width, height or offset makes libx264
-/// either refuse the filter or shift the colour planes half a pixel against the
-/// luma. The rectangle also arrives from a mouse drag on an overlay, so it can
-/// be a pixel or two outside the frame after the display-to-source scaling;
-/// ffmpeg treats an out-of-frame crop as a hard error and the export dies after
-/// the user has already picked a filename. Nothing upstream rejects an
-/// out-of-frame rectangle, so this clamp is the whole definition of what such a
-/// rectangle means. Returns None when nothing usable is left, which the caller
-/// reads as "do not crop".
-///
-/// The extent is derived from the rectangle's original *edges* rather than from
-/// its width and height. Pulling the width across from the unclamped rect would
-/// mean an origin of x=-30 with w=400 - a visible selection of 0..370 - emitted
-/// a 400-wide crop covering 0..400, so the user got 30px more than they dragged
-/// and every pixel inside the region shifted.
+/// Chroma is subsampled 2x2, so an odd width, height or offset makes libx264 refuse the
+/// filter or shift the colour planes half a pixel. The rectangle arrives from a mouse drag
+/// and can land outside the frame, which ffmpeg treats as a hard error, so this clamp is the
+/// whole definition of what an out-of-frame rectangle means. The extent comes from the
+/// original *edges*: pulling the width across from the unclamped rect would turn x=-30 w=400
+/// into a 400-wide crop of 0..400, 30px more than was dragged and every pixel shifted.
 fn normalize_crop(rect: &Rect, width: i64, height: i64) -> Option<Rect> {
     if width < 2 || height < 2 {
         return None;
@@ -251,9 +202,8 @@ fn normalize_crop(rect: &Rect, width: i64, height: i64) -> Option<Rect> {
     let mut w = (right - left).max(0);
     let mut h = (bottom - top).max(0);
 
-    // Rounding the origin *down* can only ever give the rectangle more room on
-    // that side, so it happens after the extent has been measured and cannot
-    // push the far edge back out of the frame.
+    // Rounding the origin down only ever gives the rectangle more room, so it happens after the
+    // extent is measured and cannot push the far edge back out of the frame.
     let x = left - left % 2;
     let y = top - top % 2;
     w -= w % 2;
@@ -265,12 +215,8 @@ fn normalize_crop(rect: &Rect, width: i64, height: i64) -> Option<Rect> {
     Some(Rect { x, y, w, h })
 }
 
-/// Picks a downscale width for the size-target presets, or None to keep the
-/// source resolution.
-///
-/// See BPP_FLOOR: past a point, spending the budget on 1080p pixels means every
-/// one of them is wrong. Steps down the ladder until the budget is comfortable
-/// again or 640 is reached, whichever comes first.
+/// See BPP_FLOOR: past a point, spending the budget on 1080p pixels means every one is wrong.
+/// Steps down the ladder until the budget is comfortable or 640 is reached.
 fn downscale_width(video_kbps: i64, width: i64, height: i64, fps: f64) -> Option<i64> {
     if width < 2 || height < 2 {
         return None;
@@ -315,13 +261,9 @@ fn even_down(value: i64) -> i64 {
     (value.max(2) / 2) * 2
 }
 
-/// The scale filter an explicit output height asks for, and the frame it
-/// leaves behind. None means no filter at all, which is both the never-upscale
-/// rule and what a degenerate frame falls back to.
-///
-/// The requested number names the smaller dimension, so it lands on the height
-/// of a landscape frame and on the width of a portrait one. `-2` on the other
-/// axis keeps the aspect ratio and forces an even result for yuv420p.
+/// The requested number names the smaller dimension, so it lands on the height of a landscape
+/// frame and the width of a portrait one; `-2` keeps the aspect and forces an even result.
+/// None means no filter at all, which is both the never-upscale rule and the degenerate case.
 fn explicit_scale(target: i64, width: i64, height: i64) -> Option<(String, i64, i64)> {
     if target < 2 || width < 2 || height < 2 {
         return None;
@@ -341,12 +283,8 @@ fn explicit_scale(target: i64, width: i64, height: i64) -> Option<(String, i64, 
     }
 }
 
-/// The video path's scale step, measured from the already-cropped size: the
-/// filter to emit, if any, and the resulting frame.
-///
-/// An explicit output height owns this step outright - the fit ladder does not
-/// get to add a second scale on top of it, and does not get to override a
-/// request that was a no-op because it would have upscaled.
+/// An explicit output height owns this step outright: the fit ladder does not add a second
+/// scale on top of it, or override a request that was a no-op because it would have upscaled.
 fn scale_step(
     job: &ExportJob,
     width: i64,
@@ -374,9 +312,8 @@ fn gif_caps(quality: QualityPreset) -> (i64, i64) {
     match quality {
         QualityPreset::High => (20, 640),
         QualityPreset::Small => (10, 360),
-        // Fit lands on the balanced numbers: export.rs refuses a size target
-        // for gif before build_args runs, and a total function here beats a
-        // panic if that guard ever slips.
+        // export.rs refuses a size target for gif before build_args runs; a total function here
+        // beats a panic if that guard ever slips.
         _ => (15, 480),
     }
 }
@@ -394,9 +331,7 @@ fn cropped_size(job: &ExportJob, width: i64, height: i64) -> (i64, i64) {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Encoder families
-// ---------------------------------------------------------------------------
+// --- Encoder families ---
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum EncoderFamily {
@@ -426,9 +361,8 @@ fn encoder_family(encoder: &str) -> EncoderFamily {
     }
 }
 
-/// CRF for libx264. 18 is visually transparent for most material, 23 is the
-/// encoder's own default, 28 is where a clip meant for a chat window stops
-/// being worth shrinking further.
+/// 18 is visually transparent for most material, 23 is the encoder's default, 28 is where a
+/// clip meant for a chat window stops being worth shrinking.
 fn crf_for(quality: QualityPreset) -> i32 {
     match quality {
         QualityPreset::High => 18,
@@ -437,9 +371,8 @@ fn crf_for(quality: QualityPreset) -> i32 {
     }
 }
 
-/// The hardware equivalents sit one step higher than the x264 numbers because
-/// the vendor quantiser scales are not the same curve: matching CRF exactly
-/// produces visibly larger files for no visible gain.
+/// One step higher than the x264 numbers: the vendor quantiser scales are a different curve,
+/// and matching CRF exactly produces larger files for no visible gain.
 fn cq_for(quality: QualityPreset) -> i32 {
     match quality {
         QualityPreset::High => 19,
@@ -448,9 +381,7 @@ fn cq_for(quality: QualityPreset) -> i32 {
     }
 }
 
-/// VP9's CRF scale runs roughly 4-5 points looser than x264's for the same
-/// visual result, which is why these are not the x264 numbers. 30/34/38 map to
-/// the same high/balanced/small intent as 18/23/28 do for H.264.
+/// VP9's CRF scale runs 4-5 points looser than x264's for the same visual result.
 fn vp9_crf_for(quality: QualityPreset) -> i32 {
     match quality {
         QualityPreset::High => 30,
@@ -463,20 +394,13 @@ fn audio_kbps_for(quality: QualityPreset) -> i32 {
     match quality {
         QualityPreset::High => 160,
         QualityPreset::Small => 96,
-        // The size-target preset subtracts the audio allowance from the video
-        // budget, so this number has to match the one the arithmetic uses.
+        // The size-target preset subtracts this audio allowance from the video budget.
         _ => 128,
     }
 }
 
-/// Whether the output path names a container the mov/mp4 muxer will handle.
-///
-/// -movflags is a private option of that muxer, so ffmpeg aborts with "Option
-/// movflags not found" on a .mkv or .webm output - and it does so after the user
-/// has already been through the save dialog. The extension is all we have to go
-/// on because the muxer is chosen from it too. .m4a is in the family: it is the
-/// same muxer wearing its audio-only extension, and it wants +faststart for the
-/// same streaming reason .mp4 does.
+/// -movflags is private to that muxer, so ffmpeg aborts with "Option movflags not found" on a
+/// .mkv or .webm - after the user has been through the save dialog. .m4a is in the family.
 fn is_mp4_family(output: &str) -> bool {
     let lower = output.to_ascii_lowercase();
     lower.ends_with(".mp4")
@@ -485,12 +409,8 @@ fn is_mp4_family(output: &str) -> bool {
         || lower.ends_with(".m4a")
 }
 
-/// Byte budget for the size-target preset, from the job's own number.
-///
-/// Discord's attachment limit is 10 MiB (10485760 bytes), but plenty of other
-/// places mean 10 x 10^6 when they write "10 MB". Targeting the decimal value
-/// undershoots both readings, which is the only number that is safe wherever
-/// the clip ends up.
+/// Discord's limit is 10 MiB, but plenty of places mean 10 x 10^6 by "10 MB". Targeting the
+/// decimal value undershoots both readings.
 fn target_bytes_for(job: &ExportJob) -> Option<u64> {
     if job.quality != QualityPreset::Fit {
         return None;
@@ -502,12 +422,8 @@ fn target_bytes_for(job: &ExportJob) -> Option<u64> {
     Some((mb * 1_000_000.0).round() as u64)
 }
 
-/// Fit hands the entire byte budget to the audio stream - there is no video to
-/// share it with. The 0.93 is the same container-overhead margin the video
-/// arithmetic uses. The floor is 32 kbps because libmp3lame's lowest MPEG-1
-/// Layer III rate is 32k and it rejects anything under it, and a pathological
-/// target (0.5 MB across ten minutes) should degrade to bad audio rather than
-/// to a failed export.
+/// Fit hands the entire budget to the audio - there is no video to share it with. The 32k
+/// floor is libmp3lame's lowest MPEG-1 Layer III rate; it rejects anything under it.
 fn fit_audio_kbps(job: &ExportJob) -> Option<i64> {
     let bytes = target_bytes_for(job)?;
     let duration = output_duration(job);
@@ -517,15 +433,8 @@ fn fit_audio_kbps(job: &ExportJob) -> Option<i64> {
     Some(((bytes as f64 * 8.0 * 0.93) / duration / 1000.0).max(32.0).round() as i64)
 }
 
-/// The rate an audio-only export runs at.
-///
-/// The bitrates step [high, balanced, small] per codec rather than sharing one
-/// table because the codecs are not equally efficient: 96k opus is comparable
-/// to 128k mp3, so giving them the same numbers would make "small" mean
-/// different things depending on which format happened to be picked. For wav
-/// and flac nothing is asked of the encoder at all, so those two are what the
-/// codec produces rather than what it is told: 16-bit stereo at 48 kHz, and
-/// flac's usual ~60% of that.
+/// Stepped per codec rather than sharing one table: 96k opus is comparable to 128k mp3, so
+/// shared numbers would make "small" mean different things. wav and flac are told nothing.
 fn audio_only_kbps(job: &ExportJob) -> i64 {
     let fit = fit_audio_kbps(job);
     let by_quality = |high: i64, balanced: i64, small: i64| -> i64 {
@@ -546,9 +455,7 @@ fn audio_only_kbps(job: &ExportJob) -> i64 {
     }
 }
 
-/// The audio allowance on the video path. webm carries opus at a flat 128k -
-/// transparent for opus at any preset - while the aac path keeps its per-quality
-/// dial.
+/// webm carries opus at a flat 128k - transparent at any preset - while aac keeps its dial.
 fn video_path_audio_kbps(job: &ExportJob) -> i64 {
     if job.format == ExportFormat::Webm {
         128
@@ -557,10 +464,8 @@ fn video_path_audio_kbps(job: &ExportJob) -> i64 {
     }
 }
 
-/// The video bitrate a size target works out to, or None when this is not a fit
-/// job. The 0.93 is container overhead headroom: MP4 boxes, per-packet headers
-/// and the encoder overshooting its own target all come out of the same budget,
-/// and landing at 10.2 MB fails just as hard as landing at 20 MB would.
+/// The 0.93 is container-overhead headroom: MP4 boxes, packet headers and the encoder
+/// overshooting its own target come out of the same budget, and 10.2 MB fails as hard as 20.
 fn fit_video_kbps(job: &ExportJob, keep_audio: bool) -> Option<i64> {
     let target_bytes = target_bytes_for(job)?;
     let duration = output_duration(job);
@@ -599,9 +504,7 @@ fn push_audio_codec(args: &mut Vec<String>, job: &ExportJob) {
         ExportFormat::Ogg => {
             push_all(args, &["-c:a", "libvorbis"]);
             match fit_audio_kbps(job) {
-                // Vorbis is natively VBR and sounds best driven by its own
-                // quality scale, but a size target needs a rate the arithmetic
-                // can hold it to, so fit alone switches to ABR.
+                // Vorbis is natively VBR, but a size target needs a rate the arithmetic can hold it to.
                 Some(_) => {
                     args.push("-b:a".to_string());
                     args.push(format!("{}k", kbps));
@@ -619,11 +522,8 @@ fn push_audio_codec(args: &mut Vec<String>, job: &ExportJob) {
                 }
             }
         }
-        // No rate to set for these two: pcm_s16le's rate is a fixed function
-        // of the sample rate, and flac is lossless so a bitrate would be a
-        // lie. That also means the quality dial - and a fit target, which
-        // export.rs refuses for both formats anyway - is deliberately ignored
-        // rather than mapped onto compression levels nobody can hear.
+        // No rate for these two: pcm_s16le's is a fixed function of the sample rate and flac is
+        // lossless, so the quality dial is ignored rather than mapped onto inaudible levels.
         ExportFormat::Wav => push_all(args, &["-c:a", "pcm_s16le"]),
         ExportFormat::Flac => push_all(args, &["-c:a", "flac"]),
         // The caller branched on is_audio() before getting here.
@@ -631,16 +531,11 @@ fn push_audio_codec(args: &mut Vec<String>, job: &ExportJob) {
     }
 }
 
-// ---------------------------------------------------------------------------
-// The command matrix
-// ---------------------------------------------------------------------------
+// --- The command matrix ---
 
-/// Builds the full ffmpeg argument vector for one export.
-///
-/// `width`, `height` and `fps` are the *display-orientation* source dimensions
-/// from `probe`; they are needed because the crop clamp and the size-target
-/// auto-downscale both depend on them, and neither belongs in ExportJob (they
-/// describe the file, not the edit).
+/// `width`, `height` and `fps` are the display-orientation source dimensions from `probe`.
+/// The crop clamp and the auto-downscale both depend on them, and neither belongs in
+/// ExportJob - they describe the file, not the edit.
 pub fn build_args(
     job: &ExportJob,
     encoder: &str,
@@ -653,25 +548,14 @@ pub fn build_args(
     let keep_audio = has_audio && !job.mute;
 
     push_all(&mut args, &["-y"]);
-    // Progress goes to stdout as key=value lines that the export task parses;
-    // -nostats suppresses the carriage-return status line on stderr that would
-    // otherwise interleave with real error text and make the failure message we
-    // show the user unreadable.
+    // -nostats suppresses the carriage-return status line that would otherwise interleave with
+    // real error text and make the failure message unreadable.
     push_all(&mut args, &["-progress", "pipe:1", "-nostats"]);
 
-    // -ss in front of -i is the fast path: ffmpeg seeks to the nearest keyframe
-    // and then decodes forward, discarding frames before the target, so it is
-    // both quick on a long file and still frame-accurate when re-encoding.
-    //
-    // The companion flag is -t and deliberately not -to. ffmpeg accepts -to as
-    // both an input and an output option and the two mean different things: as
-    // an output option it is measured on the *output* timeline, which setpts
-    // has already stretched or compressed, so a 2x export of [10s, 20s] with
-    // "-to 20" keeps writing until it has produced 20 seconds of a 5 second
-    // clip. Input-side -t is measured on the source's own timestamps before any
-    // filter runs, so (out - in) is exactly the window we decode regardless of
-    // speed. Getting this backwards truncates or over-runs every export while
-    // still exiting zero.
+    // -ss in front of -i seeks to the nearest keyframe and decodes forward: quick on a long file
+    // and still frame-accurate. Its companion is -t and deliberately not -to - an output-side -to
+    // is measured on the setpts-scaled timeline, so a 2x export of [10s, 20s] with "-to 20" keeps
+    // writing until it has produced 20 seconds. Getting this backwards still exits zero.
     args.push("-ss".to_string());
     args.push(fmt_time(job.in_point));
     args.push("-t".to_string());
@@ -680,13 +564,9 @@ pub fn build_args(
     args.push(job.input.clone());
 
     if job.lossless {
-        // Only reachable when trim is the sole edit, so there is nothing to
-        // filter and no quality to choose. The output container can be the
-        // source's own or mkv - stream copy cannot change codecs, but Matroska
-        // holds anything, which is why the frontend offers it as the one
-        // cross-container lossless target. make_zero rebases the timestamps
-        // after the keyframe seek; without it the first packet carries a
-        // negative PTS and some players show a frozen frame at the start.
+        // Only reachable when trim is the sole edit. mkv is the cross-container lossless target -
+        // stream copy cannot change codecs, but Matroska holds anything. make_zero rebases the
+        // timestamps after the keyframe seek, or the first packet carries a negative PTS.
         push_all(&mut args, &["-map", "0:v:0"]);
         if keep_audio {
             push_all(&mut args, &["-map", "0:a:0?"]);
@@ -703,14 +583,9 @@ pub fn build_args(
     }
 
     if job.format.is_audio() {
-        // Explicitly the first audio track and nothing else. -vn looks
-        // redundant next to an audio-only -map, but it is what keeps an
-        // embedded cover art stream (an attached_pic is a video stream) from
-        // being copied into a container that then reports two streams.
-        // job.mute is ignored rather than honoured on this path: the UI cannot
-        // produce an audio-only job with mute set, and emitting -an beside -vn
-        // would ask ffmpeg for a file with no streams at all, which it refuses
-        // after the user has already picked a filename.
+        // -vn beside an audio-only -map is what keeps an embedded cover art stream (an attached_pic
+        // is a video stream) out of the container. job.mute is ignored here: -an beside -vn would ask
+        // ffmpeg for a file with no streams at all.
         push_all(&mut args, &["-vn", "-map", "0:a:0"]);
 
         let afilters = audio_filters(job);
@@ -729,26 +604,12 @@ pub fn build_args(
     }
 
     if job.format == ExportFormat::Gif {
-        // palettegen/paletteuse is a two-branch graph - the stream has to be
-        // split, one copy analysed for a 256-colour palette, the other painted
-        // with it - and a branching graph cannot be expressed with -vf. So the
-        // whole gif pipeline lives in one -filter_complex, and crop, setpts
-        // and reverse are prepended into that chain instead of using the -vf
-        // path the other formats share. stats_mode=diff weights the palette
-        // toward pixels that change between frames, which is where a screen
-        // recording spends its colours; bayer dithering at scale 5 hides the
-        // banding a 256-colour quantisation otherwise paints across gradients.
-        //
-        // 'min(iw,N)' caps the width without ever upscaling a source that is
-        // already smaller - a 360-wide clip blown up to 640 would cost bytes
-        // to look worse. The fps cap matters more than the width: gif has no
-        // interframe compression, so frames are the dominant size term.
-        //
-        // No -map and no -an: with a filter_complex, ffmpeg maps the graph's
-        // output and nothing else, so the audio never reaches the muxer (which
-        // would reject it - gif holds exactly one video stream). No -pix_fmt
-        // either: paletteuse emits pal8 and forcing yuv420p over it would make
-        // the gif encoder reject the format.
+        // palettegen/paletteuse is a two-branch graph, which -vf cannot express, so the whole gif
+        // pipeline lives in one -filter_complex with crop, setpts and reverse prepended into it.
+        // stats_mode=diff weights the palette toward the pixels that change. 'min(iw,N)' caps the
+        // width without upscaling; the fps cap matters more, since gif has no interframe compression.
+        // No -map, -an or -pix_fmt: with a filter_complex the graph's output is the only mapped
+        // stream, and paletteuse emits pal8 that forcing yuv420p would break.
         let crop = job
             .crop
             .as_ref()
@@ -774,9 +635,8 @@ pub fn build_args(
 
         args.push("-filter_complex".to_string());
         args.push(chain.join(","));
-        // Loop forever. It is the muxer's default today, but the default is a
-        // muxer detail and "a gif that plays once and freezes" is exactly the
-        // kind of report that takes a day to trace back to a dropped flag.
+        // Loop forever. It is the muxer's default today, but a default is a muxer detail and "a gif
+        // that plays once and freezes" takes a day to trace back to a dropped flag.
         push_all(&mut args, &["-loop", "0"]);
         args.push(job.output.clone());
         return args;
@@ -784,11 +644,9 @@ pub fn build_args(
 
     // ---- the video containers: mp4 / mov / mkv / webm ----------------------
 
-    // Explicit maps rather than ffmpeg's default stream selection. A phone or
-    // GoPro file often carries a timecode data stream or a subtitle track that
-    // MP4 cannot hold in its source format, and the mux fails at the very end
-    // of an otherwise finished encode. The `?` makes the audio map optional so
-    // the same vector works on a file that turns out to have no audio.
+    // Explicit maps rather than default stream selection: a phone or GoPro file often carries a
+    // timecode or subtitle stream MP4 cannot hold, and the mux fails at the end of a finished
+    // encode. The `?` makes the audio map optional, for a file that turns out to have none.
     push_all(&mut args, &["-map", "0:v:0"]);
     if keep_audio {
         push_all(&mut args, &["-map", "0:a:0?"]);
@@ -807,10 +665,7 @@ pub fn build_args(
     let is_webm = job.format == ExportFormat::Webm;
     let audio_kbps = video_path_audio_kbps(job);
 
-    // The bitrate has to be settled before the filter chain because the
-    // auto-downscale decision is a function of it. A size target overrides an
-    // explicit rate rather than fighting it - export.rs refuses that pair up
-    // front, so this only decides what a job that skipped validation does.
+    // Settled before the filter chain, because the auto-downscale decision is a function of it.
     let fit_kbps = fit_video_kbps(job, keep_audio);
     let video_kbps = fit_kbps.or_else(|| job.video_kbps.filter(|kbps| *kbps > 0));
 
@@ -818,9 +673,8 @@ pub fn build_args(
 
     let mut vfilters: Vec<String> = Vec::new();
     if let Some(r) = crop {
-        // Crop first so setpts and scale only ever see the pixels that survive,
-        // and so the crop coordinates stay in the source pixel space the UI
-        // overlay measured them in.
+        // Crop first, so setpts and scale only see the surviving pixels and the coordinates stay in
+        // the source pixel space the overlay measured them in.
         vfilters.push(format!("crop={}:{}:{}:{}", r.w, r.h, r.x, r.y));
     }
     if (job.speed - 1.0).abs() > 1e-9 {
@@ -830,10 +684,8 @@ pub fn build_args(
         vfilters.push(filter);
     }
     if job.reverse {
-        // Last on purpose: reverse holds every frame it will ever emit in
-        // memory before producing the first one, so it should be handed the
-        // cropped and downscaled frames, not full-size source frames it would
-        // then throw most of away.
+        // Last on purpose: reverse holds every frame it will emit in memory before producing the
+        // first, so it should be handed cropped and downscaled frames.
         vfilters.push("reverse".to_string());
     }
     if !vfilters.is_empty() {
@@ -850,11 +702,9 @@ pub fn build_args(
     }
 
     if is_webm {
-        // Always software VP9: none of the detected h264_* hardware encoders
-        // can produce it, so the `encoder` argument does not apply here. VP9
-        // measured ~19x slower than x264 veryfast on FinFetcher's test clips
-        // at libvpx defaults; -row-mt 1 and -cpu-used 4 are what pull that
-        // back to usable, at a quality cost smaller than one CRF step.
+        // Always software VP9: none of the detected h264_* hardware encoders can produce it. Measured
+        // ~19x slower than x264 veryfast; -row-mt 1 and -cpu-used 4 pull that back to usable for less
+        // than one CRF step of quality.
         push_all(&mut args, &["-c:v", "libvpx-vp9"]);
         match video_kbps {
             Some(kbps) => {
@@ -866,9 +716,8 @@ pub fn build_args(
                 args.push(format!("{}k", kbps * 2));
             }
             None => {
-                // -b:v 0 is load-bearing: with a -crf alone libvpx runs in
-                // constrained-quality mode and caps the stream at its default
-                // bitrate, quietly ignoring the quality the user picked.
+                // -b:v 0 is load-bearing: with a -crf alone libvpx runs constrained-quality and caps the
+                // stream at its default bitrate, quietly ignoring the quality the user picked.
                 push_all(&mut args, &["-b:v", "0"]);
                 args.push("-crf".to_string());
                 args.push(vp9_crf_for(job.quality).to_string());
@@ -882,10 +731,8 @@ pub fn build_args(
         let family = encoder_family(encoder);
         match video_kbps {
             Some(kbps) => {
-                // One-pass constrained VBR. maxrate pins the peak so a busy
-                // scene late in the clip cannot blow the budget, and the usual
-                // 2x bufsize gives the rate controller a second of slack to
-                // spend on a cut.
+                // One-pass constrained VBR: maxrate pins the peak so a busy scene cannot blow the budget,
+                // and the usual 2x bufsize gives the rate controller a second of slack.
                 args.push("-b:v".to_string());
                 args.push(format!("{}k", kbps));
                 args.push("-maxrate".to_string());
@@ -897,16 +744,10 @@ pub fn build_args(
                 }
             }
             None => {
-                // The three hardware encoders each spell "constant quality"
-                // differently because each wraps a different vendor SDK rather
-                // than a shared ffmpeg abstraction. NVENC exposes NVIDIA's CQ
-                // level and needs -b:v 0 beside it, or its VBR rate controller
-                // quietly caps the stream at the 2 Mbit default and the
-                // quality setting does nothing. QSV routes through Intel's ICQ
-                // mode, which ffmpeg surfaces via the generic AVCodecContext
-                // global_quality field. AMF has no constant-quality concept at
-                // all, only the per-frame-type quantisers of its CQP rate
-                // controller. There is no single flag that reaches all three.
+                // Each hardware encoder wraps a different vendor SDK, so "constant quality" is spelled three
+                // ways: NVENC's CQ level needs -b:v 0 beside it or its VBR controller caps the stream at the
+                // 2 Mbit default; QSV routes through Intel's ICQ via global_quality; AMF has no constant
+                // quality at all, only the per-frame-type quantisers of its CQP controller.
                 match family {
                     EncoderFamily::X264 => {
                         push_all(&mut args, &["-preset", "veryfast"]);
@@ -948,12 +789,9 @@ pub fn build_args(
         args.push(format!("{}k", audio_kbps));
     }
 
-    // yuv420p because WebView2, Discord's inline player and every phone decoder
-    // reject 4:2:2 or 10-bit H.264, and a screen recording or a phone HDR clip
-    // will hand us exactly that. VP9 takes it happily too, so webm shares the
-    // flag. +faststart moves the moov atom to the front so the embed starts
-    // playing before the whole file has downloaded, which is the normal case:
-    // the save dialog offers .mp4 first.
+    // yuv420p because WebView2, Discord's inline player and every phone decoder reject 4:2:2 or
+    // 10-bit H.264, which a screen recording or an HDR phone clip will hand us. +faststart moves
+    // the moov atom to the front so an embed plays before the whole file has downloaded.
     push_all(&mut args, &["-pix_fmt", "yuv420p"]);
     if is_mp4_family(&job.output) {
         push_all(&mut args, &["-movflags", "+faststart"]);
@@ -963,19 +801,13 @@ pub fn build_args(
     args
 }
 
-// ---------------------------------------------------------------------------
-// Size estimation
-// ---------------------------------------------------------------------------
+// --- Size estimation ---
 
-/// Bits per pixel per frame for the constant-quality presets, which is the only
-/// term in the estimate that is a guess rather than arithmetic.
-///
-/// Measured on the integration suite's own 1080p30 fixture: x264 veryfast lands
-/// at 0.115 / 0.079 / 0.036 bpp for crf 18 / 23 / 28, and VP9 at 0.117 / 0.092 /
-/// 0.067 for crf 30 / 34 / 38. The numbers below sit a little under the x264
-/// measurements because testsrc2 carries more fine detail than ordinary footage,
-/// and VP9 gets its own row rather than a multiplier of the x264 one because it
-/// measured no cheaper here at all - the two CRF ladders are not the same curve.
+/// The only term in the estimate that is a guess rather than arithmetic. Measured on the
+/// integration suite's own 1080p30 fixture: x264 veryfast lands at 0.115 / 0.079 / 0.036 bpp
+/// for crf 18 / 23 / 28, VP9 at 0.117 / 0.092 / 0.067 for crf 30 / 34 / 38. These sit a little
+/// under the x264 measurements because testsrc2 carries more fine detail than real footage,
+/// and VP9 gets its own row because it measured no cheaper at all.
 fn bpp_for(format: ExportFormat, quality: QualityPreset) -> f64 {
     if format == ExportFormat::Webm {
         return match quality {
@@ -991,24 +823,18 @@ fn bpp_for(format: ExportFormat, quality: QualityPreset) -> f64 {
     }
 }
 
-/// A gif frame after palette quantisation, in bytes per pixel. Gif has no
-/// interframe compression worth the name, so its size is content-bound to a
-/// degree no constant can follow: the same 480x270 chain measured 0.10 on a
-/// mostly-static source and 1.01 on one where every pixel changes every frame.
+/// Gif has no interframe compression worth the name, so its size is content-bound to a degree
+/// no constant can follow: the same 480x270 chain measured 0.10 mostly-static and 1.01 when
+/// every pixel changes every frame.
 const GIF_BYTES_PER_PIXEL: f64 = 0.35;
 
 fn bytes_from_kbps(kbps: i64, seconds: f64) -> f64 {
     kbps as f64 * 1000.0 * seconds / 8.0
 }
 
-/// How large the finished export is likely to be, for the "about N MB" line the
-/// UI shows beside the export button.
-///
-/// `width`, `height` and `fps` are the display-orientation source values from
-/// `probe`, the same ones `build_args` is given. Where the job names a rate -
-/// an explicit bitrate, or a size target - the answer is arithmetic and close to
-/// exact; the constant-quality presets can only be estimated, so treat the
-/// result as the order of magnitude it is.
+/// Where the job names a rate - an explicit bitrate, or a size target - the answer is
+/// arithmetic and close to exact. The constant-quality presets can only be estimated, so treat
+/// the result as the order of magnitude it is.
 pub fn estimate_output_bytes(
     job: &ExportJob,
     width: i64,
@@ -1028,9 +854,8 @@ pub fn estimate_output_bytes(
     }
 
     if job.lossless {
-        // A stream copy keeps the source's own rate, which is not one of the
-        // arguments here, so the high-quality figure is the closest guess. The
-        // speed dial cannot reach this path, and neither crop nor scale does.
+        // A stream copy keeps the source's own rate, which is not one of the arguments here, so the
+        // high-quality figure is the closest guess.
         let seconds = (job.out_point - job.in_point).max(0.0);
         let video = bpp_for(job.format, QualityPreset::High) * width as f64 * height as f64 * fps;
         let audio = if keep_audio { 128_000.0 } else { 0.0 };
@@ -1095,9 +920,7 @@ pub fn estimate_export_size(
     estimate_output_bytes(&job, width, height, fps, has_audio)
 }
 
-// ---------------------------------------------------------------------------
-// ffprobe JSON
-// ---------------------------------------------------------------------------
+// --- ffprobe JSON ---
 
 /// ffprobe writes most numbers as JSON strings but not all of them, and which
 /// is which changes between fields and between builds.
@@ -1113,9 +936,8 @@ fn as_i64(value: Option<&Value>) -> Option<i64> {
     as_f64(value).map(|v| v.round() as i64)
 }
 
-/// Parses "30000/1001" style rationals. Defaults to 30 rather than failing
-/// because fps is only used for the progress estimate and the bits-per-pixel
-/// test, and a still image or a broken container reports "0/0" here.
+/// Defaults to 30 rather than failing: fps only feeds the progress estimate and the
+/// bits-per-pixel test, and a still image or a broken container reports "0/0" here.
 fn parse_rational(text: Option<&Value>) -> Option<f64> {
     let s = text?.as_str()?;
     let (num, den) = s.split_once('/')?;
@@ -1132,13 +954,9 @@ fn parse_rational(text: Option<&Value>) -> Option<f64> {
     }
 }
 
-/// Reads the rotation a player would apply, from either place ffprobe puts it.
-///
-/// Modern files carry it in the video stream's Display Matrix side data;
-/// older MOV files only have the `rotate` stream tag. The two use opposite
-/// signs for the same physical rotation (an upright iPhone clip reports
-/// side-data -90 and tag 90), which does not matter here because the only
-/// consumer is the 90/270 dimension swap and both normalise into that set.
+/// Modern files carry it in the video stream's Display Matrix side data, older MOV files only
+/// in the `rotate` tag. The two use opposite signs for the same physical rotation, which does
+/// not matter here: the only consumer is the 90/270 dimension swap.
 fn read_rotation(stream: &Value) -> i64 {
     let raw = stream
         .get("side_data_list")
@@ -1149,9 +967,7 @@ fn read_rotation(stream: &Value) -> i64 {
 
     let degrees = raw.round() as i64;
     let normalised = ((degrees % 360) + 360) % 360;
-    // Snap anything that is not a right angle (some cameras write 89 or 271)
-    // onto the nearest quarter turn, because a swap decision has no third
-    // answer.
+    // Some cameras write 89 or 271, and a swap decision has no third answer.
     match (normalised + 45) / 90 % 4 {
         1 => 90,
         2 => 180,
@@ -1169,9 +985,8 @@ pub fn parse_probe(json: &str, path: &str, size_bytes: u64) -> Result<MediaInfo,
         .and_then(|v| v.as_array())
         .ok_or_else(|| "ffprobe reported no streams for this file".to_string())?;
 
-    // An MP3 with cover art has a video stream that is a single still JPEG.
-    // Picking it would report a 600x600 "video" and produce an export that is
-    // one frame long, so attached pictures are skipped explicitly.
+    // An MP3 with cover art has a video stream that is a single still JPEG, which would report a
+    // 600x600 "video" and export one frame.
     let video = streams
         .iter()
         .find(|s| {
@@ -1188,14 +1003,10 @@ pub fn parse_probe(json: &str, path: &str, size_bytes: u64) -> Result<MediaInfo,
         .iter()
         .find(|s| s.get("codec_type").and_then(|v| v.as_str()) == Some("audio"));
 
-    // The format-level duration is the one the container advertises and the one
-    // a player's seek bar uses. A stream-level duration only exists on some
-    // containers, so it is the fallback rather than the first choice.
-    // Each candidate is checked for usability before the next one is consulted,
-    // because a remuxed MKV/TS or a screen recorder will happily advertise
-    // "duration": "0.000000" at the format level while the video stream carries
-    // the real length. Filtering only the final answer would accept that zero,
-    // never reach the stream, and leave the whole UI with a zero-length clip.
+    // The format-level duration is the one a player's seek bar uses; a stream-level one only
+    // exists on some containers. Each candidate is checked for usability before the next is
+    // consulted, because a remuxed MKV/TS or a screen recorder will advertise "0.000000" at the
+    // format level while the video stream carries the real length.
     let usable = |d: f64| d.is_finite() && d > 0.0;
     let duration = as_f64(root.get("format").and_then(|f| f.get("duration")))
         .filter(|d| usable(*d))
@@ -1209,11 +1020,8 @@ pub fn parse_probe(json: &str, path: &str, size_bytes: u64) -> Result<MediaInfo,
     let rotation = read_rotation(video);
     let stored_width = as_i64(video.get("width")).unwrap_or(0);
     let stored_height = as_i64(video.get("height")).unwrap_or(0);
-    // Report display dimensions, not stored ones. Both WebView2 and ffmpeg
-    // apply the rotation on decode, so the crop overlay and the crop filter
-    // both work in this orientation; reporting the stored size would put the
-    // crop rectangle on its side and the user would get a wrong region with no
-    // error anywhere.
+    // Display dimensions, not stored ones: both WebView2 and ffmpeg apply the rotation on decode,
+    // so the overlay and the crop filter agree. Stored size would put the rectangle on its side.
     let (width, height) = if rotation == 90 || rotation == 270 {
         (stored_height, stored_width)
     } else {
@@ -1241,20 +1049,11 @@ pub fn parse_probe(json: &str, path: &str, size_bytes: u64) -> Result<MediaInfo,
     })
 }
 
-// ---------------------------------------------------------------------------
-// Process spawning
-// ---------------------------------------------------------------------------
+// --- Process spawning ---
 
-/// Builds a Command that will not flash a console window.
-///
-/// The app is a windows_subsystem="windows" binary, so any child console
-/// process allocates its own window: without CREATE_NO_WINDOW a black box pops
-/// up and steals focus for every filmstrip thumbnail and every probe, which on
-/// opening a file is a dozen flashes in a row.
-///
-/// "ffmpeg" and "ffprobe" are spawned from the absolute path `resolve_tool`
-/// found rather than by bare name; anything else (winget, powershell) is left
-/// to the inherited PATH.
+/// The app is a windows_subsystem="windows" binary, so any child console process allocates its
+/// own window: without CREATE_NO_WINDOW a black box steals focus for every thumbnail and every
+/// probe. "ffmpeg" and "ffprobe" are spawned from the absolute path `resolve_tool` found.
 pub fn hidden_command(program: &str) -> std::process::Command {
     match program {
         "ffmpeg" | "ffprobe" => match resolve_tool(program) {
@@ -1277,9 +1076,7 @@ fn hidden_command_at(program: &std::ffi::OsStr) -> std::process::Command {
     cmd
 }
 
-// ---------------------------------------------------------------------------
-// Tool resolution
-// ---------------------------------------------------------------------------
+// --- Tool resolution ---
 
 /// The Path values these two scopes hold are the current, authoritative ones
 /// even when the environment block this process inherited is stale.
@@ -1297,13 +1094,9 @@ pub fn forget_resolved_tools() {
     }
 }
 
-/// The absolute path to spawn "ffmpeg" or "ffprobe" from.
-///
-/// Resolution through the inherited PATH is not reliable here - a launch from
-/// the installer and a launch from the shell do not see the same environment -
-/// so the search runs over the inherited PATH, then the registry's Path values,
-/// then the usual install folders. Only a candidate that actually runs is
-/// accepted, so a stub that cannot launch never wins. Misses are not cached.
+/// A launch from the installer and a launch from the shell do not see the same environment, so
+/// the search runs the inherited PATH, then the registry's Path values, then the usual install
+/// folders. Only a candidate that actually runs is accepted. Misses are not cached.
 pub fn resolve_tool(name: &str) -> Option<PathBuf> {
     match cached_tool(name) {
         Some(hit) => Some(hit),
@@ -1351,13 +1144,9 @@ fn candidate_exists(path: &Path) -> bool {
     std::fs::symlink_metadata(path).is_ok()
 }
 
-/// Where a reparse-point candidate points, so the real binary can be tried too.
-///
-/// The winget shims are symlinks, and a process the installer launched is
-/// refused permission to traverse one: measured as os error 448, "the path
-/// cannot be traversed because it contains an untrusted mount point", on the
-/// launch that raised the missing-FFmpeg banner. read_link reads the link
-/// itself rather than following it, so it answers where a spawn could not go.
+/// The winget shims are symlinks, and a process the installer launched is refused permission
+/// to traverse one - os error 448, "the path cannot be traversed because it contains an
+/// untrusted mount point". read_link answers where a spawn could not go.
 fn link_target(path: &Path) -> Option<PathBuf> {
     let meta = std::fs::symlink_metadata(path).ok()?;
     if !meta.file_type().is_symlink() {
@@ -1428,10 +1217,8 @@ fn known_install_dirs() -> Vec<PathBuf> {
     dirs
 }
 
-/// A missing value or a non-zero exit is simply "no candidates from here".
-///
-/// Not reg.exe: it writes stdout in the console's OEM codepage, which turns any
-/// non-ASCII directory into replacement characters.
+/// Not reg.exe: it writes stdout in the console's OEM codepage, which turns any non-ASCII
+/// directory into replacement characters.
 fn registry_path_value(scope: &str) -> Option<String> {
     let script = format!(
         "[Console]::OutputEncoding=[Text.Encoding]::UTF8; \
@@ -1511,7 +1298,7 @@ fn dedupe_dirs(dirs: impl Iterator<Item = PathBuf>) -> impl Iterator<Item = Path
     })
 }
 
-// ---------------------------------------------------------------------------
+// --- Tests ---
 
 #[cfg(test)]
 mod tests {
@@ -1568,9 +1355,8 @@ mod tests {
 
     #[test]
     fn export_job_deserialises_the_camel_case_ipc_shape() {
-        // This JSON is what the frontend's invoke() actually sends. If a serde
-        // rename drifts, every export fails at the boundary with a deserialise
-        // error, and this test is the one that names the field.
+        // This JSON is what the frontend's invoke() actually sends: a drifted serde rename fails
+        // every export at the boundary, and this test is what names the field.
         let json = r#"{
             "input": "a.mp4", "output": "b.m4a",
             "inPoint": 0.0, "outPoint": 2.0,
@@ -1703,10 +1489,8 @@ mod tests {
 
     #[test]
     fn atempo_chains_the_full_widened_range() {
-        // 0.05 and 20 are the extremes the number input allows. Four halving
-        // stages bring 0.05 up to 0.8; four doubling stages bring 20 down to
-        // 1.25 - and in both directions every stage is inside atempo's native
-        // 0.5..2.0 window.
+        // 0.05 and 20 are the extremes the number input allows: four halving stages bring 0.05 up to
+        // 0.8, four doubling stages bring 20 down to 1.25, every one inside atempo's 0.5..2.0 window.
         assert_eq!(
             atempo_chain(0.05),
             vec![
@@ -1881,10 +1665,9 @@ mod tests {
     #[test]
     fn crop_is_clamped_inside_the_frame() {
         let mut j = job(QualityPreset::Balanced);
-        // A drag that ran off the right and bottom edges of the overlay. The
-        // width and height are deliberately smaller than the frame so that an
-        // implementation carrying the original w/h across the clamp cannot pass
-        // by landing on the frame size anyway.
+        // A drag that ran off the right and bottom edges. The width and height are deliberately
+        // smaller than the frame, so an implementation carrying the original w/h across the clamp
+        // cannot pass by landing on the frame size anyway.
         j.crop = Some(Rect {
             x: 1800,
             y: 1000,
@@ -1898,11 +1681,9 @@ mod tests {
     #[test]
     fn a_negative_crop_origin_keeps_the_region_the_user_dragged() {
         let mut j = job(QualityPreset::Balanced);
-        // The overlay produces this when the pointer leaves the window mid-drag.
-        // The visible selection is 0..370 across and 0..390 down, so those are
-        // the extents that have to survive; taking the width from the rect
-        // instead of from its right edge would emit 400x400 and shift the whole
-        // region 30px left and 10px up.
+        // The pointer left the window mid-drag. The visible selection is 0..370 across and 0..390
+        // down, so taking the width from the rect instead of its right edge would emit 400x400 and
+        // shift the whole region.
         j.crop = Some(Rect {
             x: -30,
             y: -10,
@@ -2364,9 +2145,8 @@ mod tests {
 
     #[test]
     fn a_fit_without_a_target_falls_back_to_constant_quality() {
-        // export.rs validates target_mb whenever quality is Fit, so this pair
-        // should never arrive - but if it does, a balanced CRF beats a panic
-        // or a 100 kbps slideshow.
+        // export.rs validates target_mb whenever quality is Fit, so this pair should never arrive -
+        // but a balanced CRF beats a panic or a 100 kbps slideshow.
         let mut j = job(QualityPreset::Fit);
         j.target_mb = None;
         let args = build_args(&j, "libx264", true, 1920, 1080, 30.0);
@@ -2534,9 +2314,8 @@ mod tests {
 
     #[test]
     fn faststart_covers_m4a_but_no_other_audio_container() {
-        // .m4a is the mov/mp4 muxer wearing another extension, so it both
-        // tolerates and wants +faststart; every other audio container's muxer
-        // would abort on the unknown option.
+        // .m4a is the mov/mp4 muxer wearing another extension, so it wants +faststart; every other
+        // audio container's muxer would abort on the unknown option.
         let mut j = job(QualityPreset::Balanced);
         j.format = ExportFormat::M4a;
         j.output = "C:\\clips\\out.m4a".to_string();
@@ -2918,12 +2697,8 @@ mod tests {
         assert_eq!(estimate_output_bytes(&j, 1920, 1080, 30.0, true), 7_936_000);
     }
 
-    /// The estimate against a real encode, which is the only thing that can
-    /// tell a wrong constant from a plausible one.
-    ///
-    /// #[ignore] and living here rather than in tests/real_export.rs because
-    /// that file belongs to another change this round. Run it with:
-    ///     cargo test -- --ignored estimate_lands
+    /// The estimate against a real encode, which is the only thing that can tell a wrong constant
+    /// from a plausible one. #[ignore]: `cargo test -- --ignored estimate_lands`.
     #[test]
     #[ignore]
     fn the_estimate_lands_within_a_factor_of_two_of_a_real_export() {
@@ -3147,10 +2922,9 @@ mod tests {
 
     #[test]
     fn parse_probe_falls_back_when_the_container_advertises_a_zero_duration() {
-        // Remuxed MKV/TS files and several screen recorders write a literal
-        // zero at the format level rather than omitting the key, so a fallback
-        // that only triggers on a missing key never runs on the files that need
-        // it most.
+        // Remuxed MKV/TS files and several screen recorders write a literal zero at the format level
+        // rather than omitting the key, so a fallback that only triggers on a missing key never runs
+        // on the files that need it most.
         let json = r#"{
           "streams": [
             { "codec_name": "h264", "codec_type": "video",
@@ -3237,14 +3011,10 @@ mod tests {
         );
     }
 
-    /// The bug this whole resolver exists for: the app launched by the installer
-    /// inherited an environment that could not find ffmpeg, and a restart fixed
-    /// it. Strip PATH to the point where the inherited tier cannot answer and
-    /// assert the later tiers still do.
-    ///
-    /// #[ignore] because it mutates process-wide environment (so it must not run
-    /// beside other tests) and because it needs a real FFmpeg on the machine:
-    ///     cargo test -- --ignored --test-threads=1
+    /// The bug this whole resolver exists for: the app the installer launched inherited an
+    /// environment that could not find ffmpeg, and a restart fixed it. Strip PATH to where the
+    /// inherited tier cannot answer and assert the later tiers still do. #[ignore] because it
+    /// mutates process-wide environment: `cargo test -- --ignored --test-threads=1`.
     #[test]
     #[ignore]
     fn ffmpeg_is_found_with_the_inherited_path_stripped() {

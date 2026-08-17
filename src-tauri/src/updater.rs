@@ -1,11 +1,4 @@
-//! Self-update against the GitHub Releases API.
-//!
-//! This is a port of FinFetcher's `UpdateManager` (mkiera/FinFetcher,
-//! main.pyw) with the same flow: check the release list, pick the release's
-//! `-Setup.exe`, download it into a cache directory that startup clears,
-//! verify its length, hand it to Windows and get out of the way. The
-//! reasoning that made that version work is repeated on the individual steps
-//! below, because most of it is not recoverable from reading the code.
+//! Self-update against the GitHub Releases API, ported from FinFetcher's UpdateManager.
 
 use std::fs;
 use std::io::Write;
@@ -60,37 +53,29 @@ pub struct AlphaBuild {
 
 const RELEASES_URL: &str = "https://api.github.com/repos/mkiera/FlipperClipper/releases";
 
-/// Scoped to the one workflow: an unscoped /actions/runs page mixes in release
-/// runs, and thirty of those would hide every branch build behind them.
+/// Scoped to the one workflow: an unscoped /actions/runs page buries branch builds under
+/// thirty release runs.
 const ALPHA_RUNS_URL: &str =
     "https://api.github.com/repos/mkiera/FlipperClipper/actions/workflows/build-test.yml/runs";
 const ALPHA_RUNS_URL_BASE: &str = "https://api.github.com/repos/mkiera/FlipperClipper/actions/runs";
 
-/// The `name` a workflow run reports is its workflow's name, and only this one
-/// builds an installer from a branch.
+/// A run reports its workflow's name, and only this one builds an installer from a branch.
 const ALPHA_WORKFLOW_NAME: &str = "Build Test";
 
 /// One artifacts call each, against a 60-per-hour anonymous budget.
 const ALPHA_MAX_BRANCHES: usize = 8;
 
-/// GitHub's own artifact download needs a token even on a public repository;
-/// nightly.link proxies the same zip anonymously.
+/// GitHub's own artifact download needs a token even on a public repository; nightly.link
+/// proxies the same zip anonymously.
 const NIGHTLY_LINK_URL: &str = "https://nightly.link/mkiera/FlipperClipper/actions/runs";
 
-/// The tail of the one asset a release carries that can update an installed
-/// copy. FinFetcher matched on "an .exe with 'setup' in the name" because its
-/// older releases also shipped a bare stand-alone exe that would merely start
-/// an unpacked old version out of the cache directory. FlipperClipper has shipped
-/// the installer and nothing else from its first release, so the name the CI
-/// job writes can be matched exactly.
+/// The CI job writes this name exactly, so it can be matched exactly.
 const INSTALLER_SUFFIX: &str = "-setup.exe";
 
 /// Event name from `EVENT.updateProgress` in src/types.ts.
 const UPDATE_PROGRESS_EVENT: &str = "update-progress";
 
-/// GitHub answers an unauthenticated request with no `User-Agent` with a 403
-/// and no release list at all, so the header is not decoration — see the
-/// "User agent required" section of the GitHub REST API docs.
+/// GitHub answers 403 to an unauthenticated request that carries no `User-Agent`.
 fn user_agent(version: &semver::Version) -> String {
     format!("FlipperClipper/{version} (+https://github.com/mkiera/FlipperClipper)")
 }
@@ -117,7 +102,6 @@ struct GhRelease {
     assets: Vec<GhAsset>,
 }
 
-/// The one directory an update may be downloaded to and run from.
 fn updates_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     app.path()
         .app_config_dir()
@@ -125,17 +109,8 @@ fn updates_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
         .map_err(|e| format!("Could not find the app data directory: {e}"))
 }
 
-/// Delete the installers earlier update attempts left behind.
-///
-/// They cannot be cleaned up at the point they are used: `apply_update` hands
-/// the file to Windows and the app exits immediately so the installer can
-/// replace it, which otherwise leaves one installer per update sitting in
-/// AppData forever. Startup is the next moment at which they are provably
-/// finished with. Everything in here was put there by this app, so nothing
-/// else can be caught by it.
-///
-/// Best effort throughout: the obvious failure is the installer that just ran
-/// us still holding its own exe open, and the next launch clears it.
+/// Startup is the next moment these are provably finished with: apply_update hands the file
+/// to Windows and exits, so it cannot delete its own installer. Best effort throughout.
 pub fn clear_updates_dir(app: &tauri::AppHandle) {
     let Ok(dir) = updates_dir(app) else {
         return;
@@ -160,10 +135,8 @@ fn api_client() -> Result<reqwest::Client, String> {
         .map_err(|e| format!("Could not start the update check: {e}"))
 }
 
-/// GitHub allows 60 unauthenticated requests an hour per address and answers
-/// 403 (occasionally 429) once that is spent. It is worth naming separately
-/// because it is the one failure that is neither the network nor this app being
-/// wrong, and it clears itself.
+/// 60 unauthenticated requests an hour per address, then 403 (occasionally 429). Worth naming
+/// separately: it is the one failure that is neither the network nor this app, and it clears itself.
 fn github_error(status: reqwest::StatusCode) -> String {
     if status.as_u16() == 403 || status.as_u16() == 429 {
         "GitHub is rate limiting update checks right now.".to_string()
@@ -206,9 +179,7 @@ pub async fn check_for_update(app: tauri::AppHandle) -> Result<Option<UpdateInfo
         return Ok(None);
     }
 
-    // package_info().version is the version Tauri compiled in from
-    // package.json, so the check compares against the same single source the
-    // release tag is written from.
+    // package_info().version is compiled in from package.json, the same source the tag is written from.
     let current = app.package_info().version.clone();
     let releases = fetch_releases(&current).await?;
 
@@ -309,17 +280,13 @@ struct GhArtifact {
     expired: bool,
 }
 
-/// Rows are reused until the user presses refresh: one listing costs an API call
-/// per run on top of the run list, out of 60 an hour for an anonymous client.
+/// Rows are reused until the user presses refresh: one listing costs an API call per run.
 static ALPHA_CACHE: std::sync::Mutex<Option<(Vec<AlphaBuild>, Instant)>> =
     std::sync::Mutex::new(None);
 const ALPHA_CACHE_TTL: Duration = Duration::from_secs(300);
 
-/// The newest successful Build Test run per branch, newest run first.
-///
-/// `current_sha` is the commit this build was stamped with. It lives in
-/// src/generated/build-info.json, which only the frontend can read, so it
-/// arrives as a parameter rather than becoming a second source of truth here.
+/// `current_sha` lives in src/generated/build-info.json, which only the frontend can read, so
+/// it arrives as a parameter rather than becoming a second source of truth here.
 #[tauri::command]
 pub async fn list_alpha_builds(
     app: tauri::AppHandle,
@@ -337,8 +304,7 @@ pub async fn list_alpha_builds(
     Ok(mark_current(builds, current_sha.as_deref()))
 }
 
-/// A panic cannot leave this half-written - it is a list and an instant - so a
-/// poisoned lock is read through.
+/// A list and an instant, neither observable half-written, so a poisoned lock is read through.
 fn alpha_cache() -> std::sync::MutexGuard<'static, Option<(Vec<AlphaBuild>, Instant)>> {
     ALPHA_CACHE
         .lock()
@@ -363,14 +329,13 @@ async fn fetch_alpha_builds(current: &semver::Version) -> Result<Vec<AlphaBuild>
     .await?;
 
     let mut builds = Vec::new();
-    // Bounded because each branch costs another of the 60 anonymous requests an
-    // hour, and that budget is shared with the release checks.
+    // Bounded because each branch costs another of the 60 anonymous requests an hour.
     for run in newest_run_per_branch(runs.workflow_runs)
         .into_iter()
         .take(ALPHA_MAX_BRANCHES)
     {
-        // The artifact name is asked for rather than guessed from the branch: a
-        // workflow_dispatch run is named after the dispatch input instead.
+        // The artifact name is asked for rather than guessed: a workflow_dispatch run is named
+        // after the dispatch input instead of the branch.
         let artifacts: Result<GhArtifactList, String> = github_json(
             &client,
             &format!("{ALPHA_RUNS_URL_BASE}/{}/artifacts", run.id),
@@ -378,8 +343,7 @@ async fn fetch_alpha_builds(current: &semver::Version) -> Result<Vec<AlphaBuild>
         )
         .await;
 
-        // One refused call keeps the rows already gathered rather than throwing
-        // the listing away and re-spending the quota on the next attempt.
+        // One refused call keeps the rows already gathered instead of re-spending the quota.
         let Ok(artifacts) = artifacts else { break };
 
         if let Some(artifact) = artifacts
@@ -424,9 +388,8 @@ fn newest_run_per_branch(runs: Vec<GhRun>) -> Vec<GhRun> {
 }
 
 fn alpha_build(run: &GhRun, artifact_name: String) -> Option<AlphaBuild> {
-    // The name is a path segment of the download URL, so anything that could
-    // steer that URL somewhere else is dropped rather than escaped. The workflow
-    // already reduces branch names and dispatch input to this alphabet.
+    // The name is a path segment of the download URL, so anything that could steer that URL
+    // somewhere else is dropped rather than escaped.
     if artifact_name.is_empty()
         || !artifact_name
             .chars()
@@ -464,13 +427,9 @@ fn mark_current(builds: Vec<AlphaBuild>, running_sha: Option<&str>) -> Vec<Alpha
         .collect()
 }
 
-/// Which release, if any, the running version should be offered.
-///
-/// Split out from the command so it can be tested: everything that decides
-/// whether a person is interrupted lives here, and none of it needs a network
-/// or an AppHandle. Getting it wrong is quiet in both directions - offering a
-/// downgrade walks somebody backwards, and offering nothing means a fix never
-/// reaches them - so it is the part of the updater worth pinning down.
+/// Split out from the command so it can be tested: none of it needs a network or an AppHandle.
+/// Wrong in either direction is quiet - a downgrade walks somebody backwards, nothing at all
+/// means a fix never reaches them.
 fn pick_update(
     releases: Vec<GhRelease>,
     current: &semver::Version,
@@ -483,9 +442,8 @@ fn pick_update(
             continue;
         }
 
-        // Tags are written `v0.2.0`; anything that is not semver after that
-        // is not something this updater can order against the running
-        // version, so it is skipped rather than guessed at.
+        // Tags are written `v0.2.0`; anything that is not semver after that cannot be ordered against
+        // the running version, so it is skipped rather than guessed at.
         let Ok(version) = semver::Version::parse(release.tag_name.trim_start_matches('v')) else {
             continue;
         };
@@ -495,8 +453,8 @@ fn pick_update(
             continue;
         }
 
-        // semver's ordering already puts 0.2.0-beta.1 below 0.2.0, so the
-        // stable release of a version correctly updates a pre-release of it.
+        // semver's ordering puts 0.2.0-beta.1 below 0.2.0, so the stable release of a version
+        // correctly updates a pre-release of it.
         if version <= *current {
             continue;
         }
@@ -506,10 +464,8 @@ fn pick_update(
             .iter()
             .find(|asset| asset.name.to_ascii_lowercase().ends_with(INSTALLER_SUFFIX))
         else {
-            // A release whose upload has not finished yet has a tag and no
-            // asset. Skipping it and offering the newest release that does
-            // have one keeps a half-published release from hiding a usable
-            // update; the next check picks the newer one up once it lands.
+            // A release whose upload has not finished has a tag and no asset. Skipping it keeps a
+            // half-published release from hiding a usable update.
             continue;
         };
 
@@ -549,8 +505,7 @@ pub async fn install_alpha_build(app: tauri::AppHandle, build: AlphaBuild) -> Re
     refuse_while_exporting(&app, EXPORT_RUNNING)?;
 
     let dir = updates_dir(&app)?.join(format!("alpha-{}", build.run_id));
-    // Removed first, so a half-extracted earlier attempt at this run cannot be
-    // mistaken for this one's output.
+    // Removed first, so a half-extracted earlier attempt cannot be mistaken for this one's output.
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).map_err(|e| format!("Could not create the updates folder: {e}"))?;
 
@@ -582,8 +537,8 @@ async fn unpack_alpha_build(
     })
 }
 
-/// Expand-Archive rather than a zip crate, and the path travels in an
-/// environment variable because PowerShell re-parses everything after -Command.
+/// Expand-Archive rather than a zip crate, and the path travels in an environment variable
+/// because PowerShell re-parses everything after -Command.
 fn extract_zip(zip: &Path, dir: &Path) -> Result<(), String> {
     let status = crate::ffmpeg::hidden_command("powershell")
         .args([
@@ -605,8 +560,7 @@ fn extract_zip(zip: &Path, dir: &Path) -> Result<(), String> {
         })?;
 
     if !status.success() {
-        // Expand-Archive reads the central directory at the end of the file, so
-        // a truncated download fails here rather than producing half an exe.
+        // Expand-Archive reads the central directory at the end, so a truncated download fails here.
         return Err("That build's download could not be unpacked.".to_string());
     }
     Ok(())
@@ -639,9 +593,7 @@ const EXPORT_RUNNING: &str =
 const EXPORT_STARTED_MEANWHILE: &str = "FlipperClipper started exporting a clip while the update was downloading. Let it finish, then update.";
 const ARTIFACT_GONE: &str = "That build's installer is no longer downloadable: CI artifacts are kept for 30 days, so this run's has expired, or the run predates the artifact.";
 
-/// A panic in an export thread must not make updating impossible, and the slot
-/// behind this lock is a process handle and a bool, neither of which can be
-/// observed half-written, so a poisoned lock is read through.
+/// A process handle and a bool, neither observable half-written, so a poisoned lock is read through.
 fn refuse_while_exporting(app: &tauri::AppHandle, message: &str) -> Result<(), String> {
     let export_running = app
         .state::<crate::AppState>()
@@ -662,19 +614,14 @@ async fn download_and_install(
     download_url: &str,
     size_bytes: u64,
 ) -> Result<(), String> {
-    // An update ends in app.exit(0), which tears this process down without ever
-    // reaching the ffmpeg handle in AppState. Windows does not reap
-    // grandchildren, so an export that is still running would be left detached,
-    // writing to a file the user has every reason to think was abandoned, while
-    // the installer replaces the app around it — and installer.iss's
-    // CloseApplications filter only covers files under {app}, so it does not
-    // catch ffmpeg either. Refuse here rather than at the spawn, because there
-    // is nothing to be gained from downloading eight megabytes first.
+    // app.exit(0) never reaches the ffmpeg handle in AppState, Windows does not reap grandchildren,
+    // and installer.iss's CloseApplications only covers files under {app} - so a running export
+    // would be left detached, writing to a file the user thinks was abandoned. Refused before the
+    // download, since there is nothing to gain from fetching eight megabytes first.
     refuse_while_exporting(&app, EXPORT_RUNNING)?;
 
-    // Nothing downstream can tell a truncated installer from a complete one
-    // without a length to check against, and a truncated installer that still
-    // runs is the worst outcome available here, so refuse before downloading.
+    // Nothing downstream can tell a truncated installer from a complete one without a length
+    // to check against, and a truncated installer that still runs is the worst outcome here.
     if size_bytes == 0 {
         return Err(format!(
             "The release does not list a size for {}, so the download cannot be verified.",
@@ -685,9 +632,7 @@ async fn download_and_install(
     let dir = updates_dir(&app)?;
     fs::create_dir_all(&dir).map_err(|e| format!("Could not create the updates folder: {e}"))?;
 
-    // The asset name comes from the network, so only its last path component
-    // is ever used — a name containing separators must not be able to steer
-    // the write, or the file that gets executed below, out of this folder.
+    // The asset name comes from the network, so only its last path component is ever used.
     let file_name = Path::new(asset_name)
         .file_name()
         .ok_or_else(|| format!("{} is not a usable file name.", asset_name))?;
@@ -697,8 +642,7 @@ async fn download_and_install(
     spawn_installer(&app, &dest, &dir)
 }
 
-/// Streams one file to disk, emitting progress, and deletes anything short of
-/// the length it was promised.
+/// Streams one file to disk, emitting progress, and deletes anything short of its promised length.
 async fn stream_download(
     app: &tauri::AppHandle,
     download_url: &str,
@@ -707,9 +651,7 @@ async fn stream_download(
     gone_message: Option<&str>,
 ) -> Result<(), String> {
     let client = reqwest::Client::builder()
-        // No overall timeout: this body is the whole installer and a slow
-        // connection is not an error. The connect timeout still catches the
-        // case where the host cannot be reached at all.
+        // No overall timeout: this body is the whole installer and a slow connection is not an error.
         .connect_timeout(Duration::from_secs(15))
         .build()
         .map_err(|e| format!("Could not start the download: {e}"))?;
@@ -734,8 +676,7 @@ async fn stream_download(
         ));
     }
 
-    // The releases API states a length; nightly.link only sends one back, and a
-    // body cut short is worth catching either way.
+    // The releases API states a length; nightly.link only sends one back.
     let expected = size_bytes.or_else(|| response.content_length());
 
     let mut file =
@@ -759,10 +700,7 @@ async fn stream_download(
         }
         written += chunk.len() as u64;
 
-        // Every chunk is a few tens of kilobytes, so emitting per chunk would
-        // put hundreds of events a second through the IPC bridge to move a
-        // progress bar by less than a pixel. One percent or 100 ms, whichever
-        // comes first, keeps it smooth on both a fast and a slow connection.
+        // Per chunk would be hundreds of IPC events a second to move the bar by less than a pixel.
         let Some(total) = expected.filter(|total| *total > 0) else {
             continue;
         };
@@ -781,11 +719,8 @@ async fn stream_download(
     }
     drop(file);
 
-    // A stream that ends is indistinguishable from a connection that was cut,
-    // and this file is about to be *executed* as an installer, or unpacked into
-    // one. Compare it with the length that was promised and delete anything
-    // short, rather than running a half-written setup exe over a working
-    // installation.
+    // A stream that ends is indistinguishable from a connection that was cut, and this file is
+    // about to be executed as an installer.
     if let Some(total) = expected {
         if written != total {
             let _ = fs::remove_file(dest);
@@ -801,63 +736,37 @@ async fn stream_download(
     Ok(())
 }
 
-/// Hands one installer to Windows and gets out of the way. Never returns to a
-/// caller that can carry on: on success this process is already exiting.
+/// Hands one installer to Windows and gets out of the way. On success this process is exiting.
 fn spawn_installer(app: &tauri::AppHandle, installer: &Path, cwd: &Path) -> Result<(), String> {
-    // Switch semantics are from the Inno Setup help, "Setup Command Line
-    // Parameters":
-    //   /SILENT  hides the wizard but keeps the progress window, so the user
-    //            sees the update happening after this window disappears.
-    //            /VERYSILENT would leave a blank screen that reads as a crash.
-    //   /CLOSEAPPLICATIONS  we exit immediately below, but losing that race
-    //            would otherwise leave the installed exe locked against the
-    //            copy that is replacing it.
-    //   /NORESTARTAPPLICATIONS  Setup only restarts applications that called
-    //            RegisterApplicationRestart, which this app does not, so
-    //            saying "no" explicitly keeps the relaunch owned by exactly
-    //            one thing — installer.iss's [Run] entry.
-    // Deliberately not passed: /DIR and /TASKS, because UsePreviousAppDir and
-    // UsePreviousTasks both default to yes and passing them would reset the
-    // user's install location and desktop-shortcut choice; and /NORESTART,
-    // which would suppress the [Run] entry that is the only thing bringing
-    // the app back.
+    // Inno switches: /SILENT keeps the progress window (/VERYSILENT reads as a crash),
+    // /CLOSEAPPLICATIONS covers losing the race with the exit below, /NORESTARTAPPLICATIONS keeps
+    // the relaunch owned by installer.iss's [Run] entry. Never /DIR or /TASKS - UsePreviousAppDir
+    // and UsePreviousTasks would be reset - and never /NORESTART, which suppresses [Run].
     let mut command = std::process::Command::new(installer);
     command.args(["/SILENT", "/CLOSEAPPLICATIONS", "/NORESTARTAPPLICATIONS"]);
-    // The working directory stays in AppData. A cwd inside the install folder
-    // would lock that folder against the very files the installer replaces.
+    // The cwd stays in AppData: one inside the install folder would lock the files being replaced.
     command.current_dir(cwd);
 
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
-        // DETACHED_PROCESS and CREATE_NEW_PROCESS_GROUP so the installer
-        // outlives the app.exit(0) two lines down — it cannot replace these
-        // files until this process is gone. CREATE_NO_WINDOW because every
-        // process this app spawns is spawned without a console flashing up.
+        // DETACHED_PROCESS and CREATE_NEW_PROCESS_GROUP so the installer outlives the app.exit(0)
+        // below; CREATE_NO_WINDOW because no process this app spawns flashes a console.
         const DETACHED_PROCESS: u32 = 0x0000_0008;
         const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         command.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW);
     }
 
-    // Asked again, because the check before the download only covered the moment
-    // the user clicked Update. Downloading the installer takes long enough on a
-    // slow connection for them to have opened a clip and started an export in
-    // the meantime, and it is the exit below - not the click - that would orphan
-    // the ffmpeg writing it.
+    // Asked again: the download is long enough for an export to have been started since the click,
+    // and it is the exit below, not the click, that would orphan its ffmpeg.
     refuse_while_exporting(app, EXPORT_STARTED_MEANWHILE)?;
 
-    // Blocked by antivirus or policy, not an executable at all, gone from
-    // under us — whatever it was, this app is still running and the caller
-    // needs to be told so it can leave the pill in a failed state instead of
-    // waiting forever for an exit that is not coming.
     command
         .spawn()
         .map_err(|e| format!("Could not start the installer: {e}"))?;
 
-    // Nothing to wait for and nothing to relaunch: the installer needs this
-    // process gone before it reaches the file copy, and its [Run] entry is
-    // what starts the new version.
+    // The installer needs this process gone before it reaches the file copy.
     app.exit(0);
     Ok(())
 }
@@ -877,10 +786,8 @@ mod tests {
     const STABLE: UpdateChannel = UpdateChannel::Stable;
     const PRERELEASE: UpdateChannel = UpdateChannel::Prerelease;
 
-    /// Trimmed from what api.github.com actually returned for this repo, so the
-    /// field names and types are the real ones rather than what we assume they
-    /// are. A response GitHub can send and serde cannot read would fail here
-    /// rather than silently becoming "no update available" for everybody.
+    /// Trimmed from what api.github.com actually returned, so the field names and types are the
+    /// real ones. A response serde cannot read fails here rather than becoming "no update".
     const REAL_PAYLOAD: &str = r#"[
       {
         "html_url": "https://github.com/mkiera/FlipperClipper/releases/tag/v0.1.0-beta",
@@ -911,16 +818,15 @@ mod tests {
 
     #[test]
     fn the_stable_channel_is_never_pulled_onto_a_prerelease() {
-        // The channel decides this, not the running version: somebody on a
-        // pre-release build who switches to Stable stops being offered betas.
+        // The channel decides this, not the running version.
         assert!(pick_update(releases(REAL_PAYLOAD), &version("0.0.1"), STABLE).is_none());
         assert!(pick_update(releases(REAL_PAYLOAD), &version("0.0.9-beta"), STABLE).is_none());
     }
 
     #[test]
     fn the_running_version_is_not_offered_to_itself() {
-        // The bug FinFetcher hit: ship a build whose version does not match its
-        // tag and it is offered its own release forever.
+        // The bug FinFetcher hit: ship a build whose version does not match its tag and it is offered
+        // its own release forever.
         assert!(pick_update(releases(REAL_PAYLOAD), &version("0.1.0-beta"), PRERELEASE).is_none());
         assert!(pick_update(releases(REAL_PAYLOAD), &version("0.2.0-beta"), PRERELEASE).is_none());
     }
@@ -967,10 +873,7 @@ mod tests {
 
     #[test]
     fn a_release_still_uploading_does_not_hide_an_older_usable_one() {
-        // A tag exists the moment the workflow starts; the asset appears
-        // minutes later. Treating the newest release as authoritative when it
-        // has no installer would mean nobody is offered anything until the
-        // upload finishes.
+        // A tag exists the moment the workflow starts; the asset appears minutes later.
         let payload = r#"[
           {"html_url":"h","tag_name":"v0.4.0","draft":false,"prerelease":false,"assets":[]},
           {"html_url":"h","tag_name":"v0.2.0","draft":false,"prerelease":false,
@@ -982,9 +885,6 @@ mod tests {
 
     #[test]
     fn only_the_setup_exe_is_ever_offered() {
-        // Whatever else a release carries - a portable build, a zip, checksums -
-        // the updater must hand the installer to Setup, because that is the
-        // thing that understands /SILENT and the [Run] relaunch.
         let payload = r#"[
           {"html_url":"h","tag_name":"v0.2.0","draft":false,"prerelease":false,
            "assets":[
@@ -1040,8 +940,8 @@ mod tests {
 
     #[test]
     fn the_listing_keeps_releases_older_than_the_running_build() {
-        // The listing is what makes downgrading possible, so unlike pick_update
-        // it must not compare anything against the running version.
+        // The listing is what makes downgrading possible, so unlike pick_update it compares nothing
+        // against the running version.
         let listed = releases_for_channel(releases(LISTING_PAYLOAD), STABLE);
         assert!(listed.iter().any(|info| info.version == "0.2.0"));
     }
@@ -1097,9 +997,8 @@ mod tests {
         list.workflow_runs
     }
 
-    /// Trimmed from a real /actions/runs page, so the field names are GitHub's.
-    /// Two runs of one branch, a run of another workflow, and a run with no
-    /// branch are all in here because all three reach this code in practice.
+    /// Trimmed from a real /actions/runs page. Two runs of one branch, a run of another workflow,
+    /// and a run with no branch, because all three reach this code in practice.
     const RUNS_PAYLOAD: &str = r#"{
       "total_count": 4,
       "workflow_runs": [
@@ -1142,8 +1041,7 @@ mod tests {
     #[test]
     fn a_row_carries_the_nightly_link_url_for_the_artifact_the_run_actually_uploaded() {
         let run = newest_run_per_branch(runs(RUNS_PAYLOAD)).remove(0);
-        // Named after the dispatch input, not the branch - which is why the
-        // artifact name is asked for rather than derived.
+        // Named after the dispatch input, not the branch - which is why the artifact name is asked for.
         let build = alpha_build(&run, "FlipperClipper-Setup_handles-retry".to_string())
             .expect("a sane artifact name is usable");
         assert_eq!(build.run_id, 501);
@@ -1192,8 +1090,7 @@ mod tests {
 
     #[test]
     fn an_unstamped_build_marks_nothing_as_current() {
-        // build-info.json is not committed, so a dev run has no sha to send and
-        // must not light up an unrelated row.
+        // build-info.json is not committed, so a dev run has no sha to send.
         let rows = vec![built("a1b2c3d4e5f6")];
         assert!(!mark_current(rows.clone(), None)[0].is_current);
         assert!(!mark_current(rows.clone(), Some(""))[0].is_current);
@@ -1225,22 +1122,11 @@ mod tests {
         );
     }
 
-    /// Hits the real GitHub API. #[ignore] so an offline machine, or one that
-    /// has spent its 60 unauthenticated requests for the hour, does not fail
-    /// the suite for a reason that has nothing to do with the code:
+    /// Hits the real GitHub API. #[ignore] so an offline machine, or one that has spent its 60
+    /// requests for the hour, does not fail the suite: `cargo test -- --ignored`.
     ///
-    ///     cargo test -- --ignored
-    ///
-    /// What it covers that the fixtures above cannot: that RELEASES_URL names
-    /// the right repository, and that GitHub accepts the User-Agent. GitHub
-    /// answers 403 to a request without one, and the app would report that as
-    /// "could not check" forever without anybody noticing an update existed.
-    ///
-    /// A 404 is reported rather than failed, because it is not a defect: it is
-    /// what an anonymous request to a PRIVATE repository gets. GitHub answers
-    /// 404 instead of 403 there so as not to confirm the repository exists.
-    /// While the repository is private this test cannot run, and — the part
-    /// that matters — neither can the updater, for anyone.
+    /// A 404 is reported rather than failed - that is what an anonymous request to a PRIVATE
+    /// repository gets, and while the repo is private neither this test nor the updater can run.
     #[tokio::test]
     #[ignore]
     async fn the_live_release_feed_is_reachable_and_parses() {
@@ -1274,8 +1160,7 @@ mod tests {
             .await
             .expect("the live payload did not match GhRelease");
 
-        // Every published release must carry the installer the updater knows
-        // how to run, or a client would reach it and find nothing to install.
+        // Every published release must carry the installer the updater knows how to run.
         for release in &releases {
             if release.draft {
                 continue;
@@ -1296,10 +1181,7 @@ mod tests {
             "a 0.0.1-alpha build should be offered the newest published release"
         );
 
-        // The shipping case, asked of the live feed rather than a fixture:
-        // somebody running the second-newest published build must be offered
-        // the newest one. Derived from the feed instead of naming versions, so
-        // it keeps testing the real thing as releases come and go.
+        // Derived from the feed rather than naming versions, so it keeps testing the real thing.
         let mut published: Vec<semver::Version> = releases
             .iter()
             .filter(|r| !r.draft)
@@ -1322,10 +1204,8 @@ mod tests {
         }
     }
 
-    /// The alpha half of the live test above, and #[ignore] for the same
-    /// reasons. An empty result is reported rather than failed: build-test.yml
-    /// only runs on feature/** and bugfix/** pushes, so until one happens there
-    /// is nothing to list, and that is what the Alpha tab is meant to show.
+    /// The alpha half of the live test, #[ignore] for the same reasons. An empty result is reported
+    /// rather than failed: build-test.yml only runs on feature/** and bugfix/** pushes.
     #[tokio::test]
     #[ignore]
     async fn the_live_run_feed_is_reachable_and_parses() {

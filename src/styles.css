@@ -1,24 +1,10 @@
-/*
- * FlipperClipper 🦭 — FinFetcher's ocean-glass look on a clip editor.
- *
- * Dark only, on purpose. FinFetcher defines the family look and it has exactly
- * one palette, so the light @media block this file used to carry is gone
- * rather than half-maintained: a light theme that exists in only one of the
- * two sibling apps would read as a bug in whichever one the user opened
- * second.
- *
- * Transitions are capped at 120ms on purpose: this is a utility someone opens
- * to make one cut, and anything slower reads as the app thinking.
- */
+/* FlipperClipper - FinFetcher's ocean-glass look on a clip editor. Dark only: a light theme
+   present in one of two sibling apps would read as a bug in whichever opened second. */
 
 /* === Fonts ===
-   Shipped with the app rather than fetched from fonts.googleapis.com, for the
-   same reason FinFetcher does it: a render-blocking request to Google on every
-   launch of a desktop app means the offline machine that most needs the UI to
-   come up is the one left waiting on a stylesheet that will never arrive.
-
-   One variable file per subset covers the 400/500/600 this stylesheet uses.
-   Outfit is under the SIL Open Font License; see fonts/OFL.txt. */
+   Shipped with the app rather than fetched from Google: a render-blocking request on every
+   launch leaves the offline machine waiting on a stylesheet that never arrives.
+   Outfit, SIL Open Font License, see fonts/OFL.txt. */
 @font-face {
   font-family: 'Outfit';
   font-style: normal;
@@ -43,18 +29,15 @@
 }
 
 :root {
-  /* Measured off FinFetcher's stylesheet: deep navy ground, 5%-white glass
-     with 10%-white edges, teal accent with a #6BC5D2 glow, and a purple that
-     appears rarely enough to stay special. */
+  /* Measured off FinFetcher's stylesheet: deep navy ground, 5%-white glass, teal accent. */
   --bg: #0d1b2a;
   --panel: rgba(255, 255, 255, 0.05);
   --stage: #071120;
   --fg: #ffffff;
   --fg-dim: rgba(255, 255, 255, 0.6);
   --line: rgba(255, 255, 255, 0.1);
-  /* The updater pill builds its own stylesheet in updater.ts and asks for
-     --border, so without this alias its edge falls back to a grey that belongs
-     to neither app. */
+  /* The updater pill builds its own stylesheet in updater.ts and asks for --border; without
+     this alias its edge falls back to a grey that belongs to neither app. */
   --border: rgba(255, 255, 255, 0.1);
   --hover: rgba(255, 255, 255, 0.1);
   --sunken: rgba(0, 0, 0, 0.3);
@@ -66,10 +49,8 @@
   --shade: rgba(5, 10, 17, 0.66);
   --glow: 0 0 20px rgba(74, 144, 164, 0.4);
 
-  /* Floating surfaces (popover, toast, crop bar) sit over moving video, where
-     FinFetcher's 5%-white glass would put white text on whatever the frame
-     happens to be. This is the same navy with most of the video blurred away
-     behind it. */
+  /* Floating surfaces sit over moving video, where 5%-white glass would put white text on
+     whatever the frame happens to be. */
   --float: rgba(13, 27, 42, 0.82);
 
   --radius: 10px;
@@ -92,9 +73,7 @@ body {
 }
 
 body {
-  /* The soft glows FinFetcher gets from its animated blobs, minus the blobs:
-     a video editor repaints the stage constantly and does not need a 80px-blur
-     animation compositing behind it as well. */
+  /* FinFetcher's glows without its animated blobs: the stage repaints constantly as it is. */
   background:
     radial-gradient(1100px 700px at 75% -10%, rgba(74, 144, 164, 0.22), transparent 60%),
     radial-gradient(800px 600px at 5% 110%, rgba(157, 78, 221, 0.1), transparent 60%),
@@ -290,9 +269,7 @@ select:focus {
   border-color: var(--accent-glow);
 }
 
-/* The number inputs next to the sliders. type="number" gets none of the
-   styling type="text" would, so left alone these would be white system boxes
-   punched into the glass. */
+/* type="number" gets none of the styling type="text" would, so these would be white boxes. */
 input[type='number'] {
   height: 30px;
   padding: 0 6px;
@@ -373,8 +350,7 @@ input[type='range']:disabled::-webkit-slider-thumb {
   width: 82px;
 }
 
-/* Auto is the resting state, so neither of these advertises itself: they read
-   as the format and quality selects beside them until one is changed. */
+/* Auto is the resting state, so neither of these advertises itself until it is changed. */
 #res-select,
 #bitrate-mode {
   flex: none;
@@ -448,8 +424,7 @@ select option:disabled {
   color: var(--fg-dim);
 }
 
-/* The FinFetcher-style identity block: seal, gradient wordmark with a teal
-   glow, quiet letter-spaced tagline, then the version line. */
+/* The FinFetcher identity block: seal, gradient wordmark, letter-spaced tagline, version. */
 .wordmark-row {
   display: flex;
   align-items: center;
@@ -480,10 +455,7 @@ select option:disabled {
   color: var(--fg-dim);
 }
 
-/* Under the tagline like FinFetcher's "v1.1.0 · Made by Kiera" line, no longer
-   pinned to a corner: the empty state is now an identity screen, and the build
-   line is part of the identity. Still selectable so it can be pasted into a
-   bug report along with the commit its tooltip carries. */
+/* Selectable, so it can be pasted into a bug report with the commit its tooltip carries. */
 .about {
   margin: 0 0 18px;
   font-size: 0.75rem;
@@ -524,8 +496,7 @@ select option:disabled {
 #crop-rect {
   position: absolute;
   border: 1px solid rgba(255, 255, 255, 0.9);
-  /* One huge shadow dims everything outside the rectangle without needing four
-     panels kept in sync with it. */
+  /* One huge shadow dims everything outside the rectangle, with no panels to keep in sync. */
   box-shadow: 0 0 0 9999px var(--shade);
   cursor: move;
   touch-action: none;
@@ -541,12 +512,9 @@ select option:disabled {
   margin: 0;
 }
 
-/* The thirds guides are placed with inset, never percentage margins: a
-   percentage in margin-top/bottom resolves against the containing block's
-   WIDTH (CSS 2.1 §8.3), so "margin: 33.33% 0" on a 16:9 rect pushed both
-   horizontal lines a third of the WIDTH down — past centre, stacked on each
-   other as one line. inset percentages resolve vertically against height,
-   which is the geometry the guides actually want. */
+/* The thirds guides are placed with inset, never percentage margins: a percentage in
+   margin-top/bottom resolves against the containing block's WIDTH (CSS 2.1 8.3), which pushed
+   both 16:9 horizontal lines past centre and stacked them into one. inset resolves vertically. */
 #crop-rect::before {
   border-width: 0 1px;
   inset: 0 33.33%;
@@ -654,8 +622,7 @@ select option:disabled {
   display: block;
 }
 
-/* The labels are the first thing to go when the window is near its 800px
-   minimum, because the icons stay unambiguous without them. */
+/* The labels are the first thing to go near the 800px minimum; the icons stay unambiguous. */
 @media (max-width: 900px) {
   .btn-label {
     display: none;
@@ -758,8 +725,7 @@ select option:disabled {
   -webkit-backdrop-filter: blur(10px);
 }
 
-/* The zoomable viewport. timeline.ts widens #tl-track past this container
-   when zoomed in, and this is the element that scrolls it. */
+/* The zoomable viewport: timeline.ts widens #tl-track past this container when zoomed in. */
 #tl-scroll {
   flex: 1;
   min-width: 0;
@@ -833,8 +799,7 @@ select option:disabled {
   right: 0;
 }
 
-/* The bracket is drawn 3px wide but grabbed through a 20px box, because a 3px
-   target is a coin flip with a mouse and impossible with a trackpad. */
+/* The bracket is drawn 3px wide but grabbed through a 20px box: 3px is a coin flip. */
 .tl-handle {
   position: absolute;
   top: 0;
@@ -883,9 +848,7 @@ select option:disabled {
 
 /* ------------------------------------------------------------------ toast */
 
-/* Anchored to the stage, not the viewport: the control row wraps to two lines
-   at narrow widths, so any fixed offset measured from the bottom eventually
-   sits on top of it. */
+/* Anchored to the stage, not the viewport: the control row wraps to two lines when narrow. */
 #toast {
   position: absolute;
   right: 14px;
@@ -962,8 +925,7 @@ select option:disabled {
   border-radius: 3px;
 }
 
-/* Opaque, not glass: WebView2 does not blur content scrolling under a sticky
-   element, so a translucent header shows the list straight through it. */
+/* Opaque, not glass: WebView2 does not blur content scrolling under a sticky element. */
 .settings-top {
   position: sticky;
   top: 0;

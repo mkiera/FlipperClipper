@@ -1,11 +1,5 @@
 /// <reference types="vite/client" />
 
-/**
- * The settings modal: update channel and release list on one tab, the editing
- * defaults on the other. Settings live on the Rust side as JSON; every control
- * saves the moment it changes, so the panel has no OK button.
- */
-
 import {
   appVersion,
   checkForUpdate,
@@ -31,11 +25,6 @@ import {
   type UpdateChannel,
 } from './types';
 
-/**
- * What scripts/build_info.mjs stamps into src/generated/build-info.json. Every
- * field is optional there - a working copy without git on PATH gets nulls - so
- * nothing here may be treated as present.
- */
 export interface BuildInfo {
   sha: string | null;
   branch: string | null;
@@ -43,18 +32,13 @@ export interface BuildInfo {
   builtAt: string | null;
 }
 
-/**
- * That file is generated on every build path but never committed, so a fresh
- * clone that runs `npm run dev` before the stamp script has none. A glob is the
- * one import form that resolves to an empty set instead of failing the bundle
- * when the file is not there.
- */
+// The stamp file is generated on every build path but never committed. A glob is the one
+// import form that resolves to an empty set instead of failing the bundle when it is absent.
 const BUILD_INFO = import.meta.glob<{ default: Partial<BuildInfo> }>(
   './generated/build-info.json',
   { eager: true },
 );
 
-/** The stamped build, or an empty object when nothing was stamped. */
 export function buildInfo(): Partial<BuildInfo> {
   return Object.values(BUILD_INFO)[0]?.default ?? {};
 }
@@ -70,7 +54,6 @@ interface CachedAlpha {
 }
 
 let runningVersion = '';
-/** Cleared once appVersion() settles either way; Install stays disabled until then. */
 let versionPending = true;
 let selectedVersion: string | null = null;
 let installing = false;
@@ -78,7 +61,7 @@ let loadingReleases = false;
 let listError: string | null = null;
 let downgradeArmed = false;
 
-/** Which list is on screen. Alpha is a view, not a saved channel - see selectChannel(). */
+// Which list is on screen. Alpha is a view, not a saved channel - see selectChannel().
 let activeChannel: UpdateChannel = DEFAULT_SETTINGS.updateChannel;
 let selectedRunId: number | null = null;
 let loadingAlpha = false;
@@ -86,7 +69,7 @@ let alphaError: string | null = null;
 let alphaArmed = false;
 
 const cache = new Map<UpdateChannel, Cached>();
-/** Anonymous GitHub allows 60 requests an hour, so this only refills on refresh. */
+// Anonymous GitHub allows 60 requests an hour, so this only refills on refresh.
 let alphaCache: CachedAlpha | null = null;
 
 let modal!: HTMLElement;
@@ -126,7 +109,7 @@ function el<T extends HTMLElement>(id: string): T {
   return found as T;
 }
 
-/** Resolves once the saved settings are in state, which openLaunchFile() waits on. */
+// Resolves once the saved settings are in state, which openLaunchFile() waits on.
 export function initSettings(): Promise<void> {
   modal = el('settings-modal');
   openBtn = el<HTMLButtonElement>('settings-btn');
@@ -223,8 +206,6 @@ export function initSettings(): Promise<void> {
 
   restoreBtn.addEventListener('click', () => {
     setSettings({ ...DEFAULT_SETTINGS });
-    // The channel can have changed with it, so the list and the selection go
-    // the same way they do in selectChannel().
     selectedVersion = null;
     downgradeArmed = false;
     clearAlphaSelection();
@@ -234,8 +215,7 @@ export function initSettings(): Promise<void> {
     void loadActiveChannel(false);
   });
 
-  // Capture, so the modal answers Escape before shortcuts.ts cancels a crop or
-  // dismisses a toast behind it.
+  // Capture, so the modal answers Escape before shortcuts.ts cancels a crop behind it.
   document.addEventListener(
     'keydown',
     (e) => {
@@ -254,14 +234,11 @@ export function initSettings(): Promise<void> {
   return loadSettings();
 }
 
-/** What the rest of the app reads; defaults until the Rust side answers. */
 export function appSettings(): AppSettings {
   return settings;
 }
 
-/* --------------------------------------------------------------------------
- * Panel
- * ----------------------------------------------------------------------- */
+/* --- Panel --- */
 
 function open(): void {
   modal.hidden = false;
@@ -290,13 +267,10 @@ async function loadSettings(): Promise<void> {
     const loaded = await getSettings();
     const merged: AppSettings = { ...DEFAULT_SETTINGS, ...loaded };
     merged.defaultTargetMb = clamp(merged.defaultTargetMb, 0.5, 10_000);
-    // A height the dropdown has no entry for would leave the select blank and
-    // be refused at export time.
     const height = merged.defaultOutputHeight;
     if (height !== null && !OUTPUT_HEIGHTS.includes(height)) merged.defaultOutputHeight = null;
     setSettings(merged);
   } catch {
-    // No command on the other side, or an unreadable file. Defaults still work.
     return;
   }
   applySettings();
@@ -304,8 +278,7 @@ async function loadSettings(): Promise<void> {
 }
 
 async function persist(): Promise<void> {
-  // The controls mutate the shared object in place; this is what tells the rest
-  // of the app to re-read it.
+  // The controls mutate the shared object in place; this is what tells the app to re-read it.
   setSettings(settings);
   try {
     await saveSettings(settings);
@@ -351,9 +324,7 @@ function formatOption(format: string): HTMLOptionElement {
   return option;
 }
 
-/* --------------------------------------------------------------------------
- * Releases
- * ----------------------------------------------------------------------- */
+/* --- Releases --- */
 
 function renderChannelTabs(): void {
   channelStable.classList.toggle('active', activeChannel === 'stable');
@@ -372,8 +343,7 @@ function selectChannel(channel: UpdateChannel): void {
   note.textContent = '';
   renderChannelTabs();
 
-  // Looking at branch builds is not subscribing to them, so the saved channel -
-  // the one the update check follows - only moves for the two release trains.
+  // Looking at branch builds is not subscribing to them: the saved channel only moves for releases.
   if (channel !== 'alpha') {
     settings.updateChannel = channel;
     void persist();
@@ -386,10 +356,6 @@ function loadActiveChannel(force: boolean): Promise<void> {
   return activeChannel === 'alpha' ? loadAlpha(force) : loadReleases(force);
 }
 
-/**
- * The button answers the question it asks: the release list alone never says
- * whether anything on it is newer than what is running.
- */
 async function checkNow(): Promise<void> {
   checkBtn.disabled = true;
   note.textContent = 'Checking…';
@@ -403,7 +369,6 @@ async function checkNow(): Promise<void> {
   }
   checkBtn.disabled = false;
 
-  // Last word, so the refreshed list cannot leave the answer off screen.
   await loadReleases(true);
   note.textContent = outcome;
 }
@@ -535,8 +500,6 @@ async function install(): Promise<void> {
   const info = selectedRelease();
   if (!info || installing) return;
 
-  // An unreadable running version is not a licence to skip the gate: it could be
-  // anything, including newer than the release about to replace it.
   const confirmFirst =
     runningVersion === '' || compareVersions(info.version, runningVersion) < 0;
   if (confirmFirst && !downgradeArmed) {
@@ -568,7 +531,6 @@ async function loadBuildLine(): Promise<void> {
   try {
     runningVersion = normalise(await appVersion());
   } catch {
-    /* Left unknown; install() asks before replacing a version it cannot read. */
   } finally {
     versionPending = false;
   }
@@ -588,9 +550,7 @@ async function loadBuildLine(): Promise<void> {
   renderActiveChannel();
 }
 
-/* --------------------------------------------------------------------------
- * Alpha
- * ----------------------------------------------------------------------- */
+/* --- Alpha --- */
 
 async function loadAlpha(force: boolean): Promise<void> {
   if (alphaCache && !force) {
@@ -698,7 +658,6 @@ async function installAlpha(): Promise<void> {
   const build = selectedAlpha();
   if (!build || installing) return;
 
-  // A branch build is not a release, so it always asks before replacing the app.
   if (!alphaArmed) {
     alphaArmed = true;
     note.textContent = `${build.branch} at ${build.sha} is a test build, not a release. Press Install this build again to replace the running app.`;
@@ -726,9 +685,7 @@ function renderActiveChannel(): void {
   else renderReleases();
 }
 
-/* --------------------------------------------------------------------------
- * Helpers
- * ----------------------------------------------------------------------- */
+/* --- Helpers --- */
 
 function publishedText(iso: string | null): string {
   if (!iso) return 'no publish date';
@@ -737,7 +694,6 @@ function publishedText(iso: string | null): string {
   return date.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
 }
 
-/** Age of a CI run: recent ones are minutes or hours old, old ones get a date. */
 function builtText(iso: string | null): string {
   if (!iso) return 'no run date';
   const at = new Date(iso).getTime();
@@ -767,10 +723,7 @@ function normalise(version: string): string {
   return version.trim().replace(/^v/i, '');
 }
 
-/**
- * Semver precedence, not string order: 0.10.0 is above 0.9.0, and a pre-release
- * ranks below the plain version it leads to.
- */
+// Semver precedence, not string order: 0.10.0 is above 0.9.0, and a pre-release ranks below.
 function compareVersions(a: string, b: string): number {
   const [aCore, aPre] = splitVersion(a);
   const [bCore, bPre] = splitVersion(b);

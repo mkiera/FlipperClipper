@@ -1,16 +1,8 @@
-//! Runs the argument vectors `build_args` produces through a real ffmpeg and
-//! checks the file that comes out with ffprobe.
-//!
-//! The unit tests inside `ffmpeg.rs` are pure: they prove which flags are
-//! emitted, which is exactly the wrong thing to trust on its own. A vector can
-//! be word-for-word what was intended and still produce a clip of the wrong
-//! length, because the meaning of `-to` depends on which side of `-i` it sits
-//! and the meaning of `crop` depends on whether the decoder rotated the frame
-//! first. Only ffmpeg can settle those, so this suite asks it.
-//!
-//! The fixtures are generated on demand into the OS temp directory rather than
-//! committed, so the repository stays free of binaries. Encoding them costs a
-//! few seconds once per machine.
+//! Runs the argument vectors `build_args` produces through a real ffmpeg and checks the file
+//! that comes out with ffprobe. The unit tests in ffmpeg.rs are pure - a vector can be
+//! word-for-word what was intended and still produce a clip of the wrong length, because the
+//! meaning of `-to` depends on which side of `-i` it sits. Fixtures are generated on demand
+//! into the OS temp directory rather than committed.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -19,9 +11,7 @@ use flipperclipper_lib::ffmpeg::{
     build_args, output_duration, ExportFormat, ExportJob, QualityPreset, Rect,
 };
 
-// ---------------------------------------------------------------------------
-// Fixtures
-// ---------------------------------------------------------------------------
+// --- Fixtures ---
 
 fn fixture_dir() -> PathBuf {
     let dir = std::env::temp_dir().join("flipperclipper-test-clips");
@@ -76,9 +66,8 @@ fn silent() -> PathBuf {
     )
 }
 
-/// Stored 1280x720 but flagged to display rotated, so its display size is
-/// 720x1280. The case where working in stored rather than display coordinates
-/// puts the crop rectangle on its side.
+/// Stored 1280x720 but flagged to display rotated, so its display size is 720x1280: the case
+/// where working in stored rather than display coordinates puts the crop rectangle on its side.
 fn rotated() -> PathBuf {
     let path = fixture_dir().join("rotated-90.mp4");
     if path.exists() {
@@ -93,8 +82,8 @@ fn rotated() -> PathBuf {
             "-c:a", "aac", "-b:a", "128k", "-shortest",
         ],
     );
-    // ffmpeg 7 dropped the old `-metadata:s:v:0 rotate=` form; the display
-    // matrix is written by re-muxing with -display_rotation on the input.
+    // ffmpeg 7 dropped the old `-metadata:s:v:0 rotate=` form; the display matrix is written by
+    // re-muxing with -display_rotation on the input.
     let status = Command::new("ffmpeg")
         .args(["-hide_banner", "-loglevel", "error", "-y", "-display_rotation", "90", "-i"])
         .arg(&flat)
@@ -106,9 +95,7 @@ fn rotated() -> PathBuf {
     path
 }
 
-// ---------------------------------------------------------------------------
-// Probing the result
-// ---------------------------------------------------------------------------
+// --- Probing the result ---
 
 fn ffprobe(args: &[&str], path: &Path) -> String {
     let out = Command::new("ffprobe")
@@ -180,9 +167,7 @@ fn stream_count_of(path: &Path) -> i64 {
     .unwrap_or(-1)
 }
 
-/// Decode the first frame of a finished export into an uncompressed BMP and
-/// hand back its bytes. BMP rather than PNG so the comparison is over raw
-/// pixels with no encoder freedom in between.
+/// BMP rather than PNG, so the comparison is over raw pixels with no encoder freedom between.
 fn first_frame_bytes(path: &Path, frame_name: &str) -> Vec<u8> {
     let frame = fixture_dir().join(frame_name);
     let status = Command::new("ffmpeg")
@@ -198,8 +183,7 @@ fn first_frame_bytes(path: &Path, frame_name: &str) -> Vec<u8> {
 
 /// Build the argv the app would build, run it, and hand back the output path.
 fn run_export(job: &ExportJob, width: i64, height: i64, fps: f64, has_source_audio: bool) -> PathBuf {
-    // libx264 throughout: a hardware encoder would make these assertions depend
-    // on which GPU the test happens to run against.
+    // libx264 throughout: a hardware encoder would tie these assertions to whichever GPU ran them.
     let args = build_args(job, "libx264", has_source_audio, width, height, fps);
     let out = Command::new("ffmpeg")
         .args(&args)
@@ -233,9 +217,7 @@ fn job(input: &Path, name: &str) -> ExportJob {
     }
 }
 
-// ---------------------------------------------------------------------------
-// The tests
-// ---------------------------------------------------------------------------
+// --- The tests ---
 
 #[test]
 fn a_plain_trim_produces_exactly_the_requested_span() {
@@ -249,9 +231,8 @@ fn a_plain_trim_produces_exactly_the_requested_span() {
 
     let out = run_export(&j, 1920, 1080, 30.0, true);
     let actual = duration_of(&out);
-    // The whole point of putting -ss and -t on the input side: three seconds
-    // means three seconds, not "three seconds measured from wherever the seek
-    // landed" and not the eight the source timeline would give.
+    // The whole point of putting -ss and -t on the input side: three seconds means three seconds,
+    // not three measured from wherever the seek landed.
     assert!(
         (actual - 3.0).abs() < 0.2,
         "expected ~3.0 s, got {actual} s"
@@ -275,8 +256,7 @@ fn speed_shortens_the_clip_and_the_prediction_matches() {
     let actual = duration_of(&out);
 
     assert!((predicted - 4.0).abs() < 1e-9, "predicted {predicted}");
-    // If this drifts, the progress bar drifts with it - percent is out_time
-    // measured against exactly this prediction.
+    // If this drifts the progress bar drifts with it: percent is out_time against this prediction.
     assert!(
         (actual - predicted).abs() < 0.2,
         "predicted {predicted} s, ffmpeg produced {actual} s"
@@ -296,9 +276,7 @@ fn quarter_speed_chains_atempo_without_losing_the_audio() {
 
     let out = run_export(&j, 1920, 1080, 30.0, true);
     let actual = duration_of(&out);
-    // atempo refuses anything below 0.5, so 0.25 only works if the filter was
-    // chained. A single atempo=0.25 would have made ffmpeg exit non-zero and
-    // run_export would already have failed.
+    // atempo refuses anything below 0.5, so 0.25 only works if the filter was chained.
     assert!((actual - 8.0).abs() < 0.3, "expected ~8.0 s, got {actual} s");
     assert!(has_audio(&out), "the audio track was dropped");
 }
@@ -318,11 +296,8 @@ fn reverse_actually_reverses_the_video() {
     let a = run_export(&forward, 1920, 1080, 30.0, true);
     let b = run_export(&backward, 1920, 1080, 30.0, true);
 
-    // testsrc2 paints a moving pattern with a burnt-in counter, so the frame
-    // at t=0 and the frame at t=2 look nothing alike. If reverse worked, the
-    // reversed file opens on what used to be the last frame; comparing the two
-    // decoded first frames is a cheap proxy for "the clip plays backwards"
-    // that does not need every frame decoded and matched.
+    // testsrc2 paints a moving pattern with a burnt-in counter, so t=0 and t=2 look nothing alike.
+    // Comparing the two decoded first frames is a cheap proxy for "the clip plays backwards".
     assert_ne!(
         first_frame_bytes(&a, "rev-forward.bmp"),
         first_frame_bytes(&b, "rev-backward.bmp"),
@@ -343,9 +318,8 @@ fn doubled_volume_still_carries_an_audio_stream() {
     j.out_point = 3.0;
     j.volume = 2.0;
 
-    // The risk is not the maths of the gain, it is the filter string: a typo
-    // in "volume=" fails the whole export, and run_export already asserts the
-    // exit code. What is left to check is that the stream survived the chain.
+    // The risk is the filter string, not the maths of the gain: what is left to check is that the
+    // stream survived the chain.
     let out = run_export(&j, 1920, 1080, 30.0, true);
     assert!(has_audio(&out), "the volume filter lost the audio stream");
     assert!((duration_of(&out) - 3.0).abs() < 0.2);
@@ -363,9 +337,8 @@ fn gif_export_is_one_animated_video_stream_and_nothing_else() {
 
     let out = run_export(&j, 1920, 1080, 30.0, true);
     assert_eq!(video_codec_of(&out), "gif");
-    // Exactly one stream: the source's audio must not have been mapped, and
-    // the palette must have been consumed by paletteuse rather than muxed as a
-    // second video stream.
+    // Exactly one stream: the source's audio must not have been mapped, and the palette must have
+    // been consumed by paletteuse rather than muxed as a second video stream.
     assert_eq!(stream_count_of(&out), 1);
     assert!(!has_audio(&out));
     // Balanced caps the width at 480.
@@ -382,8 +355,7 @@ fn webm_export_is_vp9_with_opus() {
     let mut j = job(&src, "out-container.webm");
     j.out_point = 2.0;
     j.format = ExportFormat::Webm;
-    // Small keeps the VP9 encode short; the codec pair is the same at every
-    // quality and VP9 is the slowest encoder in the whole matrix.
+    // Small keeps the VP9 encode short; the codec pair is the same at every quality.
     j.quality = QualityPreset::Small;
 
     let out = run_export(&j, 1920, 1080, 30.0, true);
@@ -406,9 +378,8 @@ fn mp3_export_drops_the_video_and_tracks_the_speed_maths() {
     let out = run_export(&j, 1920, 1080, 30.0, true);
     assert!(has_audio(&out));
     assert!(!has_video(&out), "the mp3 export still carries a video stream");
-    // (10 - 2) / 2 = 4 s. If atempo were missing from this path the file
-    // would come out at 8 s and the progress bar's prediction would be wrong
-    // for every sped-up audio export.
+    // (10 - 2) / 2 = 4 s. Without atempo on this path the file would come out at 8 s and the
+    // progress bar would be wrong for every sped-up audio export.
     let actual = duration_of(&out);
     assert!((actual - 4.0).abs() < 0.3, "expected ~4.0 s, got {actual} s");
 }
@@ -422,10 +393,9 @@ fn a_custom_two_megabyte_audio_fit_lands_under_two_megabytes() {
     let mut j = job(&src, "out-fit-audio.mp3");
     j.in_point = 0.0;
     j.out_point = 20.0;
-    // Quarter speed stretches the 20 s source to 80 s of output, which pushes
-    // the computed rate (186 kbps) under lame's 320k ceiling; at 1x the budget
-    // would ask for 744k and lame would round it down to 320k anyway, making
-    // the test pass without exercising the arithmetic.
+    // Quarter speed stretches the 20 s source to 80 s of output, pushing the computed rate
+    // (186 kbps) under lame's 320k ceiling; at 1x the budget would ask for 744k and lame would
+    // round it down anyway, passing the test without exercising the arithmetic.
     j.speed = 0.25;
     j.format = ExportFormat::Mp3;
     j.quality = QualityPreset::Fit;
@@ -434,8 +404,8 @@ fn a_custom_two_megabyte_audio_fit_lands_under_two_megabytes() {
     let out = run_export(&j, 1920, 1080, 30.0, true);
     let size = std::fs::metadata(&out).expect("no output file").len();
     assert!(size <= 2_000_000, "{size} bytes exceeds the 2 MB target");
-    // lame snaps the requested rate to the nearest valid MPEG-1 rate (192k),
-    // so the file should still land close to the budget, not miles under it.
+    // lame snaps the requested rate to the nearest valid MPEG-1 rate (192k), so the file should
+    // still land close to the budget rather than miles under it.
     assert!(size > 1_000_000, "{size} bytes is suspiciously far under target");
 }
 
@@ -447,9 +417,8 @@ fn crop_is_applied_in_display_orientation_on_a_rotated_clip() {
     let src = rotated();
     let mut j = job(&src, "out-crop-rotated.mp4");
     j.out_point = 3.0;
-    // y = 900 is outside the STORED height of 720 and inside the DISPLAY
-    // height of 1280. It only survives if ffmpeg rotated before cropping,
-    // which is the assumption the crop overlay is built on.
+    // y = 900 is outside the STORED height of 720 and inside the DISPLAY height of 1280. It only
+    // survives if ffmpeg rotated before cropping, which is the assumption the overlay is built on.
     j.crop = Some(Rect { x: 100, y: 900, w: 400, h: 300 });
 
     let out = run_export(&j, 720, 1280, 30.0, true);
@@ -464,9 +433,8 @@ fn an_out_of_frame_crop_is_trimmed_rather_than_shifted() {
     let src = landscape();
     let mut j = job(&src, "out-crop-clamped.mp4");
     j.out_point = 2.0;
-    // Dragged off the left and past the bottom. The visible selection is
-    // 0..370 wide, so a clamp that kept the original width would emit 400 and
-    // silently include 30 px the user never selected.
+    // Dragged off the left and past the bottom. The visible selection is 0..370 wide, so a clamp
+    // that kept the original width would emit 400 and include 30 px the user never selected.
     j.crop = Some(Rect { x: -30, y: 900, w: 400, h: 400 });
 
     let out = run_export(&j, 1920, 1080, 30.0, true);
@@ -485,8 +453,7 @@ fn crop_dimensions_always_come_out_even() {
 
     let out = run_export(&j, 1920, 1080, 30.0, true);
     let (w, h) = dimensions_of(&out);
-    // yuv420p subsamples chroma by two, so an odd dimension is rejected
-    // outright by the encoder rather than rounded for us.
+    // yuv420p subsamples chroma by two, so an odd dimension is rejected rather than rounded for us.
     assert_eq!((w % 2, h % 2), (0, 0), "got {w}x{h}");
 }
 
@@ -514,8 +481,7 @@ fn a_source_without_audio_exports_cleanly() {
     j.out_point = 3.0;
     j.speed = 2.0;
 
-    // The real risk here is an atempo filter or an `-map 0:a:0` built for a
-    // track that does not exist, either of which makes ffmpeg exit non-zero.
+    // The real risk here is an atempo filter or an `-map 0:a:0` built for a track that is absent.
     let out = run_export(&j, 1280, 720, 30.0, false);
     assert!(!has_audio(&out));
     assert!((duration_of(&out) - 1.5).abs() < 0.2);
@@ -535,9 +501,8 @@ fn the_ten_megabyte_target_is_actually_met() {
 
     let out = run_export(&j, 1920, 1080, 30.0, true);
     let size = std::fs::metadata(&out).expect("no output file").len();
-    // The budget deliberately undershoots so the file clears the limit however
-    // the receiving service reads "10 MB". Also assert it is not absurdly
-    // small, which would mean the bitrate maths collapsed rather than aimed.
+    // The budget deliberately undershoots, so the file clears the limit however the receiving
+    // service reads "10 MB". Also not absurdly small, which would mean the maths collapsed.
     assert!(size <= 10_000_000, "{size} bytes exceeds the 10 MB target");
     assert!(size > 2_000_000, "{size} bytes is suspiciously far under target");
 }
@@ -556,11 +521,9 @@ fn a_lossless_trim_copies_the_stream_instead_of_re_encoding() {
     let before = video_codec_of(&src);
     let out = run_export(&j, 1920, 1080, 30.0, true);
     assert_eq!(video_codec_of(&out), before, "the stream was re-encoded");
-    // Deliberately no duration assertion. Stream copy can only start on a
-    // keyframe, so it snaps backwards - measured at 8.09 s for this 5..8 s
-    // request against a fixture whose keyframes are ~8.3 s apart. That is the
-    // documented cost of the lossless checkbox, not a bug, and asserting an
-    // exact span here would encode a promise the feature does not make.
+    // Deliberately no duration assertion: stream copy can only start on a keyframe, so it snaps
+    // backwards - 8.09 s for this 5..8 s request. That is the cost of the lossless checkbox, and
+    // asserting an exact span would encode a promise the feature does not make.
     assert!(duration_of(&out) > 0.0);
 }
 
@@ -574,9 +537,8 @@ fn a_non_mp4_container_does_not_get_mp4_only_flags() {
     j.out_point = 2.0;
     j.format = ExportFormat::Mkv;
 
-    // -movflags belongs to the mov/mp4 muxer; leaving it on a Matroska output
-    // makes ffmpeg abort with "Option movflags not found" after the user has
-    // already picked the filename.
+    // -movflags belongs to the mov/mp4 muxer; on a Matroska output ffmpeg aborts with "Option
+    // movflags not found" after the user has already picked the filename.
     let out = run_export(&j, 1920, 1080, 30.0, true);
     assert!(out.exists());
 }

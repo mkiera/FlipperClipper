@@ -19,20 +19,14 @@ pub struct FfmpegStatus {
 
 #[tauri::command(async)]
 pub fn ffmpeg_status(app: AppHandle) -> FfmpegStatus {
-    // Every call is a real re-check, so a "missing" verdict cannot outlive the
-    // conditions that produced it.
+    // Every call is a real re-check, so a "missing" verdict cannot outlive its conditions.
     ffmpeg::forget_resolved_tools();
 
-    // The resolver only accepts a candidate whose -version exits zero, so its
-    // captured output is both the verdict and the version string.
     match ffmpeg::resolve_tool_with_version("ffmpeg") {
         Some((_, text)) => FfmpegStatus {
             available: true,
             version: parse_version_line(&text),
         },
-        // Anything else - not on PATH, not executable, a stub that exits non-zero
-        // - is the same thing as far as the install banner is concerned: this
-        // machine cannot export until FFmpeg is dealt with.
         None => {
             write_check_log(&app);
             FfmpegStatus {
@@ -43,9 +37,7 @@ pub fn ffmpeg_status(app: AppHandle) -> FfmpegStatus {
     }
 }
 
-// ---------------------------------------------------------------------------
-// The "why did it say missing?" log
-// ---------------------------------------------------------------------------
+// --- The "why did it say missing?" log ---
 
 const CHECK_LOG_NAME: &str = "ffmpeg-check.log";
 
@@ -62,8 +54,7 @@ fn check_log_path(app: &AppHandle) -> Option<PathBuf> {
         .map(|dir| dir.join(CHECK_LOG_NAME))
 }
 
-/// A snapshot of one failed check, not a history: the file is replaced every
-/// time, so what is in it always describes the banner currently on screen.
+/// A snapshot of one failed check, not a history: the file is replaced every time.
 fn write_check_log(app: &AppHandle) {
     let Some(path) = check_log_path(app) else {
         return;
@@ -98,9 +89,8 @@ fn render_check_log(
     out
 }
 
-/// Walks the same tiers `ffmpeg::resolve_tool` walks, recording what each one
-/// did. It is a second implementation rather than a hook into the resolver,
-/// which reports nothing but its final answer.
+/// A second implementation rather than a hook into the resolver, which reports nothing
+/// but its final answer.
 fn probe_candidates(name: &str) -> Vec<(&'static str, PathBuf, String)> {
     let file_name = format!("{}{}", name, std::env::consts::EXE_SUFFIX);
     let mut seen: HashSet<String> = HashSet::new();
@@ -119,9 +109,8 @@ fn probe_candidates(name: &str) -> Vec<(&'static str, PathBuf, String)> {
             rows.push((tier, candidate, "no such file".to_string()));
             continue;
         }
-        // Every tier is probed, never stopping at the first that runs: this log
-        // exists for the case where the resolver said missing and a second look
-        // says otherwise, and stopping early would hide exactly that.
+        // Every tier is probed, never stopping at the first that runs: the case this log exists for
+        // is the resolver saying missing while a second look says otherwise.
         let (_, outcome) = version_outcome(&candidate);
         rows.push((tier, candidate, outcome));
     }
@@ -130,9 +119,7 @@ fn probe_candidates(name: &str) -> Vec<(&'static str, PathBuf, String)> {
     let (_, outcome) = version_outcome(&bare);
     rows.push(("bare", bare, outcome));
 
-    // The resolver's own answer, taken after the walk above, so "the check
-    // failed but everything here runs" is a printed fact rather than something
-    // the reader has to infer.
+    // The resolver's own answer, taken after the walk, so a disagreement is printed as a fact.
     let second = match ffmpeg::resolve_tool_with_version(name) {
         Some((path, _)) => format!("found at {}", path.display()),
         None => "still not found".to_string(),
@@ -141,9 +128,7 @@ fn probe_candidates(name: &str) -> Vec<(&'static str, PathBuf, String)> {
     rows
 }
 
-/// The dirs the resolver would try, tagged with which tier produced them. The
-/// registry values are expanded by PowerShell rather than here because the
-/// Path of HKCU\Environment is REG_EXPAND_SZ and can hold %VAR% references.
+/// Expanded by PowerShell rather than here: the Path of HKCU\Environment is REG_EXPAND_SZ.
 fn diagnostic_dirs() -> Vec<(&'static str, PathBuf)> {
     let mut dirs: Vec<(&'static str, PathBuf)> = Vec::new();
 
@@ -217,8 +202,7 @@ fn split_path_list(value: &str) -> Vec<PathBuf> {
         .collect()
 }
 
-/// Runs `-version` exactly the way the resolver validates a candidate, and says
-/// what happened. The bool is "this one would have been accepted".
+/// Runs `-version` the way the resolver validates a candidate. The bool is "would have been accepted".
 fn version_outcome(path: &Path) -> (bool, String) {
     let result = ffmpeg::hidden_command(path.to_string_lossy().as_ref())
         .arg("-version")
@@ -246,8 +230,7 @@ fn clip_to(text: &str, max_chars: usize) -> String {
     }
 }
 
-/// Hinnant's civil-from-days, so the log carries a readable UTC time without a
-/// date crate. Its era starts in March, which is why the month is rotated back.
+/// Hinnant's civil-from-days. Its era starts in March, which is why the month is rotated back.
 fn utc_stamp(now: SystemTime) -> String {
     let secs = now
         .duration_since(UNIX_EPOCH)
@@ -274,9 +257,7 @@ fn utc_stamp(now: SystemTime) -> String {
     )
 }
 
-/// "ffmpeg version 7.1-full_build-www.gyan.dev Copyright (c) 2000-2024 ..." from
-/// the winget build, "ffmpeg version n7.1 Copyright ..." from others. The third
-/// whitespace-separated token is the version in every build FFmpeg has shipped.
+/// The third whitespace-separated token is the version in every build FFmpeg has shipped.
 fn parse_version_line(text: &str) -> Option<String> {
     let mut parts = text.lines().next()?.split_whitespace();
     if parts.next()? != "ffmpeg" || parts.next()? != "version" {
@@ -314,10 +295,8 @@ pub fn install_ffmpeg() -> Result<(), String> {
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
-        // winget exits non-zero when the package is already present. That is not
-        // a failure from where the user is standing - they pressed a button
-        // because export said FFmpeg was missing, and the honest outcome is that
-        // it is installed after all and only the PATH was stale.
+        // winget exits non-zero when the package is already present, which is not a failure here:
+        // the honest outcome is that it was installed and only the PATH was stale.
         if !text.to_lowercase().contains("already installed") {
             return Err(last_meaningful_line(&text).unwrap_or_else(|| {
                 "The FFmpeg install did not finish. Try running it from a terminal to see why: \
@@ -332,10 +311,8 @@ pub fn install_ffmpeg() -> Result<(), String> {
     Ok(())
 }
 
-/// winget drops its shims in %LOCALAPPDATA%\Microsoft\WinGet\Links and adds that
-/// folder to the *user's* PATH, which this already-running process's inherited
-/// environment does not have. The resolver finds that folder on its own; this
-/// keeps the PATH children inherit honest too.
+/// winget adds its Links folder to the *user's* PATH, which this already-running process
+/// did not inherit. Keeps the PATH children inherit honest too.
 fn add_winget_links_to_path() {
     let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") else {
         return;
@@ -371,11 +348,8 @@ fn last_meaningful_line(text: &str) -> Option<String> {
 pub fn probe(app: AppHandle, path: String) -> Result<MediaInfo, String> {
     let info = probe_media(&path)?;
 
-    // The <video> element reads the file through Tauri's asset protocol, which
-    // serves nothing outside its scope. tauri.conf.json ships that scope empty on
-    // purpose - a tool that opens whatever the user drags onto it has no folder
-    // it could name up front - so each file earns its entry at the moment it is
-    // opened, and nothing else on the disk is reachable from the webview.
+    // The asset protocol serves nothing outside its scope, and tauri.conf.json ships that scope
+    // empty on purpose, so each file earns its entry at the moment it is opened.
     app.asset_protocol_scope().allow_file(&path).map_err(|_| {
         "FlipperClipper could not give itself permission to play that file.".to_string()
     })?;
@@ -383,8 +357,8 @@ pub fn probe(app: AppHandle, path: String) -> Result<MediaInfo, String> {
     Ok(info)
 }
 
-/// The probe without the scope side effect, so the export path can ask what is in
-/// a file without also handing the webview access to it.
+/// The probe without the scope side effect, so the export path can ask what is in a file
+/// without handing the webview access to it.
 pub fn probe_media(path: &str) -> Result<MediaInfo, String> {
     let size_bytes = std::fs::metadata(path)
         .map_err(|_| "That file could not be opened. It may have been moved or deleted.".to_string())?
@@ -415,9 +389,6 @@ pub fn probe_media(path: &str) -> Result<MediaInfo, String> {
 
 #[tauri::command(async)]
 pub fn make_filmstrip(path: String, count: u32, height: u32) -> Result<Vec<String>, String> {
-    // The filmstrip is decoration behind the timeline. Clamping here means a
-    // frontend bug can waste at most a few hundred milliseconds of decoding
-    // rather than asking for ten thousand thumbnails of a two-hour recording.
     let count = count.clamp(1, 64);
     let height = height.clamp(16, 240);
 
@@ -439,10 +410,7 @@ fn render_filmstrip(
     height: u32,
     duration: f64,
 ) -> Result<Vec<String>, String> {
-    // One frame every duration/count seconds, from a single decode pass. The
-    // obvious alternative - one -ss invocation per thumbnail - costs a process
-    // start and a seek each, and that is what makes a filmstrip take long enough
-    // for the user to notice it arriving.
+    // One decode pass: an -ss invocation per thumbnail costs a process start and a seek each.
     let rate = format!("{:.6}", (count as f64) / duration);
     let filter = format!("fps={rate},scale=-2:{height}");
     let frames = count.to_string();
@@ -473,8 +441,7 @@ fn render_filmstrip(
         .map(|entry| entry.path())
         .filter(|file| file.extension().and_then(|ext| ext.to_str()) == Some("jpg"))
         .collect();
-    // read_dir order is whatever NTFS feels like; the zero-padded names sort into
-    // playback order, which is the whole point of a filmstrip.
+    // read_dir order is whatever NTFS feels like; the zero-padded names sort into playback order.
     files.sort();
 
     let mut strip = Vec::with_capacity(files.len());
@@ -492,16 +459,13 @@ pub fn make_preview_proxy(app: AppHandle, path: String) -> Result<String, String
         return Err("That file is no longer there.".to_string());
     }
 
-    // Named after the source path rather than the clock, so opening the same
-    // HEVC clip twice in one session overwrites one temp file instead of leaving
-    // a new 40 MB proxy behind on every attempt.
+    // Named after the source path rather than the clock, so reopening the same clip overwrites
+    // one temp file instead of leaving a new proxy behind each time.
     let output = std::env::temp_dir().join(format!("flipperclipper-proxy-{}.mp4", path_key(&path)));
 
     let status = ffmpeg::hidden_command("ffmpeg")
         .args(["-hide_banner", "-loglevel", "error", "-y", "-i", path.as_str()])
-        // The quotes keep libavfilter from reading the comma in min(960,iw) as
-        // the end of the scale filter. Capping instead of forcing 960 avoids
-        // upscaling a phone clip that was already smaller than the preview.
+        // The quotes keep libavfilter from reading the comma in min(960,iw) as the end of the filter.
         .args(["-vf", "scale=w='min(960,iw)':h=-2"])
         .args(["-c:v", "libx264", "-preset", "ultrafast", "-crf", "28"])
         .args(["-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "128k"])
@@ -526,8 +490,7 @@ pub fn make_preview_proxy(app: AppHandle, path: String) -> Result<String, String
     Ok(output)
 }
 
-/// A stable name per source path. Case-folded because Windows treats two spellings
-/// of the same path as the same file and would otherwise build two proxies for it.
+/// Case-folded: Windows treats two spellings of a path as one file and would build two proxies.
 fn path_key(path: &str) -> String {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     path.to_lowercase().hash(&mut hasher);
@@ -540,15 +503,9 @@ pub fn copy_file_to_clipboard(path: String) -> Result<(), String> {
         return Err("That file is no longer there.".to_string());
     }
 
-    // Set-Clipboard -LiteralPath puts the *file* on the clipboard as a file drop,
-    // which is what makes Ctrl+V in Discord attach the clip instead of typing out
-    // its path.
-    //
-    // The path travels in an environment variable rather than inside the command
-    // text because PowerShell re-parses everything after -Command as a script:
-    // C:\Users\Kiera\My Clips\it's done.mp4 breaks twice over there, once on the
-    // space and once on the apostrophe, and those are exactly the paths people
-    // have. An $env: lookup is resolved at runtime and never re-parsed.
+    // Set-Clipboard -LiteralPath puts the *file* on the clipboard, which is what makes Ctrl+V
+    // attach the clip. The path travels in an environment variable because PowerShell re-parses
+    // everything after -Command, and a space or an apostrophe in the path breaks that.
     let status = ffmpeg::hidden_command("powershell")
         .args([
             "-NoProfile",
@@ -578,13 +535,8 @@ pub fn reveal_in_explorer(path: String) -> Result<(), String> {
         return Err("That file is no longer there.".to_string());
     }
 
-    // The obvious spelling, explorer.exe /select,"<path>", has to be handed over
-    // as one raw command line: Explorer parses the line itself instead of going
-    // through CommandLineToArgvW, and the quoting Rust applies around an argument
-    // containing a space produces a form Explorer answers by opening Documents.
-    // The opener plugin is already a dependency and already carries the shell-API
-    // version of this (SHOpenFolderAndSelectItems), which has no command line to
-    // get wrong.
+    // explorer.exe /select,"<path>" has to be handed over as one raw command line - Explorer
+    // parses it itself, and Rust's quoting produces a form it answers by opening Documents.
     tauri_plugin_opener::reveal_item_in_dir(&path)
         .map_err(|_| "Windows could not open Explorer for that file.".to_string())
 }
@@ -594,20 +546,11 @@ pub fn app_version(app: AppHandle) -> String {
     app.package_info().version.to_string()
 }
 
-/// The file a "Open with -> FlipperClipper" or a drag onto the exe was launched for.
-///
-/// Windows passes it as a plain command-line argument, and the frontend asks for
-/// it once on boot, so double-clicking a video lands in the editor with the clip
-/// already open instead of on an empty window.
 #[tauri::command]
 pub fn cli_file_path() -> Option<String> {
-    // The path is not at a fixed position: argument 0 is the executable, and a
-    // dev launch adds flags of its own ahead of anything the user supplied, so
-    // taking the second argument would pick up "--no-default-features" as often
-    // as a video. The first argument that names a file already on disk is the
-    // only reliable identification. args_os rather than args because args panics
-    // on a path Windows stores as bytes that are not valid UTF-8, and that would
-    // take the whole app down before the window appeared.
+    // The path is not at a fixed position: a dev launch adds flags ahead of the user's argument,
+    // so the first argument naming a file on disk is the only reliable identification. args_os
+    // because args panics on a path Windows stores as bytes that are not valid UTF-8.
     std::env::args_os()
         .skip(1)
         .map(PathBuf::from)
@@ -629,9 +572,8 @@ fn temp_subdir(kind: &str) -> Result<PathBuf, String> {
     Ok(dir)
 }
 
-/// Twenty lines against another crate in the tree, in a project whose whole pitch
-/// is that it downloads in a few seconds. The filmstrip is the only caller and it
-/// needs plain standard base64 for a data: URI, with no line wrapping.
+/// Twenty lines against another crate in the tree. The filmstrip is the only caller and needs
+/// plain standard base64 for a data: URI, with no line wrapping.
 fn base64_encode(bytes: &[u8]) -> String {
     const ALPHABET: &[u8; 64] =
         b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -670,8 +612,7 @@ mod tests {
     #[test]
     fn the_stamp_is_utc_and_survives_leap_years() {
         assert_eq!(at(0), "1970-01-01T00:00:00Z");
-        // 2000 is a leap year under the 400 rule that the era arithmetic exists
-        // to get right; 1900 and 2100 are not.
+        // 2000 is a leap year under the 400 rule the era arithmetic exists to get right.
         assert_eq!(at(951_782_400), "2000-02-29T00:00:00Z");
         assert_eq!(at(1_700_000_000), "2023-11-14T22:13:20Z");
     }
@@ -718,8 +659,6 @@ mod tests {
 
     #[test]
     fn the_winget_links_dir_is_the_first_known_dir_tried() {
-        // It is where Kiera's ffmpeg actually lives, so a diagnostic that never
-        // reached it would be describing the wrong search.
         if std::env::var_os("LOCALAPPDATA").is_none() {
             return;
         }

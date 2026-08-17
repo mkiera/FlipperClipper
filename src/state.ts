@@ -1,11 +1,5 @@
-/**
- * The whole application state, in two plain objects with a subscribe/notify list
- * around them. No reactivity layer: a module subscribes, reads what it cares
- * about and rewrites its own corner of the DOM.
- *
- * Playhead position is deliberately NOT here - it changes every presented frame
- * and would re-render the control row 60 times a second. player.ts owns it.
- */
+// Playhead position is deliberately not here: it changes every presented frame and would
+// re-render the control row with it. player.ts owns it.
 
 import {
   AUDIO_FORMATS,
@@ -19,15 +13,12 @@ import {
   type QualityPreset,
 } from './types';
 
-/** Things the user can see that are not part of the edit. */
 export interface UiState {
   ffmpegAvailable: boolean;
   playing: boolean;
   cropping: boolean;
   exporting: boolean;
-  /** 0 - 1, mirrored from the export-progress event. */
   exportPercent: number;
-  /** Thumbnail data URIs; empty until the filmstrip command returns. */
   filmstrip: string[];
 }
 
@@ -45,7 +36,6 @@ function rememberedTargetMb(): number | null {
   return Number.isFinite(raw) && raw >= 0.5 && raw <= 10_000 ? raw : null;
 }
 
-/** The saved settings. The settings modal owns writing them; everyone else reads. */
 export const settings: AppSettings = { ...DEFAULT_SETTINGS };
 
 export const edit: EditState = {
@@ -87,8 +77,7 @@ export function subscribe(listener: Listener): () => void {
 }
 
 function notify(): void {
-  // A copy, so a listener that unsubscribes itself mid-call (the toast does)
-  // cannot skip the one after it.
+  // A copy, so a listener that unsubscribes itself mid-call cannot skip the one after it.
   for (const listener of [...listeners]) listener();
 }
 
@@ -97,9 +86,8 @@ export function patchEdit(patch: Partial<EditState>): void {
   notify();
 }
 
-// Separate from patchEdit: the app demotes quality itself when a format cannot
-// hit a size target, and persisting that would erase a remembered 'fit' the
-// moment a .gif is opened. Only the two control handlers call these.
+// Separate from patchEdit: the app demotes quality itself when a format cannot hit a size
+// target, and persisting that would erase a remembered 'fit'.
 export function rememberQuality(quality: QualityPreset): void {
   localStorage.setItem(QUALITY_KEY, quality);
 }
@@ -114,7 +102,6 @@ export function patchUi(patch: Partial<UiState>): void {
   notify();
 }
 
-/** Replaces the loaded settings and re-renders everything that reads them. */
 export function setSettings(next: AppSettings): void {
   Object.assign(settings, next);
   if (rememberedQuality() === null) edit.quality = settings.defaultQuality;
@@ -123,21 +110,17 @@ export function setSettings(next: AppSettings): void {
   notify();
 }
 
-// Only when there is something to drop: timeline.ts skips the rebuild by
-// comparing array identity, and a fresh [] every time would defeat that.
+// Only when there is something to drop: timeline.ts compares array identity.
 function dropFilmstrip(): void {
   if (ui.filmstrip.length > 0) ui.filmstrip = [];
 }
 
-/**
- * A new file starts from the saved settings, except where the user changed
- * quality or fit size by hand this session - that choice is remembered and wins.
- */
+// A new file starts from the saved settings, except where the user changed quality or fit
+// size by hand this session.
 export function loadMedia(media: MediaInfo, src: string): void {
   let format: ExportFormat =
     settings.defaultFormat === 'source' ? defaultFormatFor(media.path) : settings.defaultFormat;
   let audioOnly = (AUDIO_FORMATS as string[]).includes(format);
-  // An audio default has nothing to extract from a file with no audio track.
   if (audioOnly && !media.hasAudio) {
     format = defaultFormatFor(media.path);
     audioOnly = false;
@@ -169,17 +152,12 @@ export function loadMedia(media: MediaInfo, src: string): void {
   notify();
 }
 
-/**
- * A default taller than the source becomes Auto rather than a disabled entry:
- * the export would emit no scale filter for it anyway, so the two agree.
- */
 function seedOutputHeight(media: MediaInfo): OutputHeight {
   const wanted = settings.defaultOutputHeight;
   if (wanted === null) return null;
   return wanted > Math.min(media.width, media.height) ? null : wanted;
 }
 
-/** Redraw without changing anything, e.g. after a window resize. */
 export function refresh(): void {
   notify();
 }

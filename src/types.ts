@@ -1,8 +1,5 @@
-/**
- * The contract between the web UI and the Rust side. Every field crosses the
- * IPC boundary, so the Rust structs carry #[serde(rename_all = "camelCase")] to
- * match these names - rename in both places or not at all.
- */
+// The IPC contract. The Rust structs carry #[serde(rename_all = "camelCase")] to match these
+// names - rename in both places or not at all.
 
 /** A rectangle in source pixels, in display orientation. */
 export interface Rect {
@@ -12,12 +9,7 @@ export interface Rect {
   h: number;
 }
 
-/**
- * What ffprobe could tell us. width/height are DISPLAY dimensions - an upright
- * phone video reports 1080x1920 though it is stored 1920x1080 with a rotation
- * flag. Browser and ffmpeg both rotate on decode, so crop coordinates pass
- * straight through with no conversion.
- */
+/** width/height are DISPLAY dimensions: an upright phone video reports 1080x1920. */
 export interface MediaInfo {
   path: string;
   duration: number;
@@ -35,18 +27,13 @@ export type VideoFormat = 'mp4' | 'mkv' | 'mov' | 'webm' | 'gif';
 export type AudioFormat = 'mp3' | 'm4a' | 'wav' | 'flac' | 'ogg' | 'opus';
 export type ExportFormat = VideoFormat | AudioFormat;
 
-/** In dropdown order; also used to validate a stored value. */
 export const VIDEO_FORMATS: VideoFormat[] = ['mp4', 'mkv', 'mov', 'webm', 'gif'];
 export const AUDIO_FORMATS: AudioFormat[] = ['mp3', 'm4a', 'wav', 'flac', 'ogg', 'opus'];
 
 /** 'fit' pairs with a typed size in EditState.targetMb. */
 export type QualityPreset = 'high' | 'balanced' | 'small' | 'fit';
 
-/**
- * null = follow the source (after crop). Otherwise the finished clip's SMALLER
- * dimension in pixels, the way "1080p" names it - so a portrait clip at 1080
- * comes out 1080 wide, not 1080 tall.
- */
+/** null = follow the source. Otherwise the clip's SMALLER dimension, the way "1080p" names it. */
 export type OutputHeight = number | null;
 
 export interface Rendition {
@@ -55,14 +42,12 @@ export interface Rendition {
   videoKbps: number | null;
 }
 
-/** In dropdown order. Also the set the Rust validator accepts. */
 export const OUTPUT_HEIGHTS: number[] = [2160, 1440, 1080, 720, 480, 360];
 
 /** The range the kbps input and the Rust validator agree on. */
 export const VIDEO_KBPS_MIN = 50;
 export const VIDEO_KBPS_MAX = 200_000;
 
-/** Everything the Rust side needs to build one ffmpeg command. */
 export interface ExportJob {
   input: string;
   output: string;
@@ -157,7 +142,6 @@ export const DEFAULT_SETTINGS: AppSettings = {
   autoPreviewProxy: true,
 };
 
-/** One row of the release list. version carries no leading v. */
 export interface ReleaseInfo {
   version: string;
   tagName: string;
@@ -185,7 +169,6 @@ export interface AlphaBuild {
   isCurrent: boolean;
 }
 
-/** Tauri event names, so both sides spell them the same way. */
 export const EVENT = {
   exportProgress: 'export-progress',
   exportDone: 'export-done',
@@ -242,11 +225,7 @@ export function isTrimOnly(state: EditState): boolean {
   );
 }
 
-/**
- * A stream copy cannot change codecs, so the container must be the one the file
- * arrived in - mkv excepted, since it holds anything. gif never qualifies: the
- * palette pass is a re-encode even from a gif source.
- */
+/** A stream copy cannot change codecs, so the container must be the one the file arrived in. */
 export function losslessEligible(state: EditState): boolean {
   if (!isTrimOnly(state) || state.audioOnly || state.format === 'gif') return false;
   if (state.media === null) return false;
