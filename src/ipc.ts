@@ -10,10 +10,14 @@ import { open as openFileDialog, save as saveFileDialog } from '@tauri-apps/plug
 
 import {
   EVENT,
+  type AlphaBuild,
+  type AppSettings,
   type ExportJob,
   type ExportProgress,
   type FfmpegStatus,
   type MediaInfo,
+  type ReleaseInfo,
+  type UpdateChannel,
   type UpdateInfo,
 } from './types';
 
@@ -89,6 +93,40 @@ export function checkForUpdate(): Promise<UpdateInfo | null> {
 
 export function applyUpdate(info: UpdateInfo): Promise<void> {
   return invoke<void>('apply_update', { info });
+}
+
+export function getSettings(): Promise<AppSettings> {
+  return invoke<AppSettings>('get_settings');
+}
+
+export function saveSettings(settings: AppSettings): Promise<void> {
+  return invoke<void>('save_settings', { settings });
+}
+
+export function listReleases(channel: UpdateChannel): Promise<ReleaseInfo[]> {
+  return invoke<ReleaseInfo[]>('list_releases', { channel });
+}
+
+/** Like applyUpdate, this does not return when it succeeds - the app exits. */
+export function installRelease(info: ReleaseInfo): Promise<void> {
+  return invoke<void>('install_release', { info });
+}
+
+/**
+ * Branch builds, not releases: listReleases('alpha') is rejected on purpose.
+ * currentSha comes from the caller because only the frontend can read
+ * build-info.json; without it no row can be marked as the running build.
+ */
+export function listAlphaBuilds(
+  refresh: boolean,
+  currentSha: string | null,
+): Promise<AlphaBuild[]> {
+  return invoke<AlphaBuild[]>('list_alpha_builds', { refresh, currentSha });
+}
+
+/** Like installRelease, this does not return when it succeeds - the app exits. */
+export function installAlphaBuild(build: AlphaBuild): Promise<void> {
+  return invoke<void>('install_alpha_build', { build });
 }
 
 /** argv[1] from a double-click or "Open with"; null keeps drop and dialog working. */

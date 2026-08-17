@@ -1,8 +1,3 @@
-// tsconfig.json lists no "types", so import.meta.glob below is not on
-// ImportMeta as far as tsc is concerned and the file will not compile without
-// this line.
-/// <reference types="vite/client" />
-
 /**
  * Boot and the open flows.
  *
@@ -31,33 +26,11 @@ import { initCrop } from './crop';
 import { describe, hideBanner, initControls, showBanner, showFfmpegBanner, showToast } from './controls';
 import { initShortcuts } from './shortcuts';
 import { initUpdater } from './updater';
+import { appSettings, buildInfo, initSettings } from './settings';
 
 /** How many thumbnails the strip gets. Long files reuse the same budget. */
 const FILMSTRIP_FRAMES = 16;
 const FILMSTRIP_HEIGHT = 64;
-
-/**
- * What scripts/build_info.mjs stamps into src/generated/build-info.json. Every
- * field is optional there - a working copy without git on PATH gets nulls -
- * so nothing here may be treated as present.
- */
-interface BuildInfo {
-  sha: string | null;
-  branch: string | null;
-  runId: number | null;
-  builtAt: string | null;
-}
-
-/**
- * That file is generated on every build path but never committed, so a fresh
- * clone that runs `npm run dev` before the stamp script has none. A glob is
- * the one import form that resolves to an empty set instead of failing the
- * bundle when the file is not there.
- */
-const BUILD_INFO = import.meta.glob<{ default: Partial<BuildInfo> }>(
-  './generated/build-info.json',
-  { eager: true },
-);
 
 let emptyState!: HTMLElement;
 let dropHint!: HTMLElement;
@@ -82,6 +55,7 @@ function boot(): void {
   initCrop();
   initControls({ openFile: () => void openViaDialog() });
   initShortcuts({ openFile: () => void openViaDialog() });
+  const settingsReady = initSettings();
 
   el('empty-open').addEventListener('click', () => void openViaDialog());
 
@@ -96,10 +70,16 @@ function boot(): void {
     dropHint.hidden = true;
   });
 
+  // PATH resolution at launch is unreliable enough that a "missing" verdict can
+  // be wrong; re-asking on focus lets it correct itself without a restart.
+  window.addEventListener('focus', () => void checkFfmpeg(true));
+
   void watchDrops();
   void checkFfmpeg();
   void warmEncoder();
-  void openLaunchFile();
+  // After the settings land: a launch file probed on defaults would build a
+  // filmstrip and offer a proxy the user turned off.
+  void settingsReady.then(openLaunchFile);
   void showBuildIdentity();
 
   initUpdater();
@@ -146,6 +126,7 @@ async function openLaunchFile(): Promise<void> {
  * error the user has to dismiss before trimming.
  */
 async function loadFilmstrip(path: string): Promise<void> {
+  if (!appSettings().showFilmstrip) return;
   try {
     const frames = await makeFilmstrip(path, FILMSTRIP_FRAMES, FILMSTRIP_HEIGHT);
     if (edit.media?.path === path) patchUi({ filmstrip: frames });
@@ -170,14 +151,15 @@ async function watchDrops(): Promise<void> {
  * Startup checks
  * ----------------------------------------------------------------------- */
 
-async function checkFfmpeg(): Promise<void> {
+async function checkFfmpeg(quiet = false): Promise<void> {
   try {
     const status = await ffmpegStatus();
     patchUi({ ffmpegAvailable: status.available });
-    if (!status.available) showFfmpegBanner(() => void warmEncoder());
+    if (status.available) hideBanner('ffmpeg');
+    else showFfmpegBanner(() => void warmEncoder());
   } catch (error) {
     patchUi({ ffmpegAvailable: false });
-    showToast(describe(error), [], true);
+    if (!quiet) showToast(describe(error), [], true);
   }
 }
 
@@ -201,7 +183,7 @@ async function showBuildIdentity(): Promise<void> {
     return;
   }
 
-  const info = Object.values(BUILD_INFO)[0]?.default ?? {};
+  const info = buildInfo();
   const details = [
     info.sha ? `commit ${info.sha.slice(0, 7)}` : null,
     info.builtAt ? `built ${info.builtAt.slice(0, 10)}` : null,
@@ -233,7 +215,7 @@ async function warmEncoder(): Promise<void> {
 
 function offerPreviewProxy(): void {
   const media = edit.media;
-  if (!media) return;
+  if (!media || !appSettings().autoPreviewProxy) return;
 
   showBanner('preview', {
     message: 'This video will not play here. A quick preview copy fixes the preview only - the export still uses the original file.',

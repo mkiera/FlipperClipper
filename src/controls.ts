@@ -7,6 +7,7 @@
 import {
   cancelExport,
   copyFileToClipboard,
+  ffmpegStatus,
   installFfmpeg,
   onExportDone,
   onExportError,
@@ -15,7 +16,16 @@ import {
   revealInExplorer,
   startExport,
 } from './ipc';
-import { edit, patchEdit, patchUi, rememberQuality, rememberTargetMb, subscribe, ui } from './state';
+import {
+  edit,
+  patchEdit,
+  patchUi,
+  rememberQuality,
+  rememberTargetMb,
+  settings,
+  subscribe,
+  ui,
+} from './state';
 import { currentTime, onTime, togglePlay } from './player';
 import { toggleCrop } from './crop';
 import {
@@ -186,7 +196,7 @@ export function initControls(controlsDeps: ControlsDeps): void {
     const raw = Number(fitMbInput.value);
     // Same bounds the Rust side validates, enforced here so a typo is corrected
     // at the input instead of surfacing as a refusal at export time.
-    const clamped = Number.isFinite(raw) ? clamp(raw, 0.5, 10_000) : 10;
+    const clamped = Number.isFinite(raw) ? clamp(raw, 0.5, 10_000) : settings.defaultTargetMb;
     fitMbInput.value = String(clamped);
     rememberTargetMb(clamped);
     patchEdit({ targetMb: clamped });
@@ -289,7 +299,8 @@ function render(): void {
   // patchEdit inside a render re-enters notify once and then the condition is
   // false, so this cannot loop.
   if (edit.quality === 'fit' && !fitAllowed(edit.format)) {
-    patchEdit({ quality: 'balanced' });
+    // The settings default, unless that is 'fit' too - which would loop here.
+    patchEdit({ quality: settings.defaultQuality === 'fit' ? 'balanced' : settings.defaultQuality });
     return;
   }
 
@@ -405,6 +416,8 @@ async function runExport(): Promise<void> {
   const media = edit.media;
   if (!media || ui.exporting) return;
 
+  if (!(await ffmpegReady())) return;
+
   const target = await pickExportTarget(defaultOutputPath(media.path));
   if (!target) return;
 
@@ -434,6 +447,25 @@ async function runExport(): Promise<void> {
     patchUi({ exporting: false, exportPercent: 0 });
     showToast(describe(error), [], true);
   }
+}
+
+// Asked again per export: the startup verdict has been seen to go stale both ways.
+async function ffmpegReady(): Promise<boolean> {
+  let available = false;
+  try {
+    available = (await ffmpegStatus()).available;
+  } catch {
+    available = false;
+  }
+
+  patchUi({ ffmpegAvailable: available });
+  if (available) {
+    hideBanner('ffmpeg');
+    return true;
+  }
+
+  showFfmpegBanner();
+  return false;
 }
 
 /**
@@ -534,8 +566,16 @@ export function hideBanner(key: string): void {
   if (existing) existing.remove();
 }
 
+function bannerShowing(key: string): boolean {
+  return banners.querySelector(`[data-key="${key}"]`) !== null;
+}
+
 /** The FFmpeg banner, with the one-click install the plan calls for. */
-export function showFfmpegBanner(onInstalled: () => void): void {
+export function showFfmpegBanner(onInstalled: () => void = () => {}): void {
+  // Re-raising rebuilds the node, and the rebuilt button has lost the disabled
+  // flag that stops a running install from being started a second time.
+  if (bannerShowing('ffmpeg')) return;
+
   showBanner('ffmpeg', {
     message: 'FFmpeg is required for exporting.',
     actionLabel: 'Install it',

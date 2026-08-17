@@ -16,20 +16,21 @@ pub struct FfmpegStatus {
 
 #[tauri::command(async)]
 pub fn ffmpeg_status() -> FfmpegStatus {
-    let output = ffmpeg::hidden_command("ffmpeg")
-        .args(["-hide_banner", "-version"])
-        .stdin(Stdio::null())
-        .output();
+    // Every call is a real re-check, so a "missing" verdict cannot outlive the
+    // conditions that produced it.
+    ffmpeg::forget_resolved_tools();
 
-    match output {
-        Ok(output) if output.status.success() => FfmpegStatus {
+    // The resolver only accepts a candidate whose -version exits zero, so its
+    // captured output is both the verdict and the version string.
+    match ffmpeg::resolve_tool_with_version("ffmpeg") {
+        Some((_, text)) => FfmpegStatus {
             available: true,
-            version: parse_version_line(&String::from_utf8_lossy(&output.stdout)),
+            version: parse_version_line(&text),
         },
         // Anything else - not on PATH, not executable, a stub that exits non-zero
         // - is the same thing as far as the install banner is concerned: this
         // machine cannot export until FFmpeg is dealt with.
-        _ => FfmpegStatus {
+        None => FfmpegStatus {
             available: false,
             version: None,
         },
@@ -90,15 +91,14 @@ pub fn install_ffmpeg() -> Result<(), String> {
     }
 
     add_winget_links_to_path();
+    ffmpeg::forget_resolved_tools();
     Ok(())
 }
 
 /// winget drops its shims in %LOCALAPPDATA%\Microsoft\WinGet\Links and adds that
-/// folder to the *user's* PATH, but a process only ever sees the copy of the
-/// environment it was launched with. Without this the install banner would stay
-/// up, and every export would keep failing, until FlipperClipper was restarted -
-/// while ffmpeg.exe sat on disk the whole time. Child processes inherit this
-/// process's environment, so patching it here is enough to find the new exe.
+/// folder to the *user's* PATH, which this already-running process's inherited
+/// environment does not have. The resolver finds that folder on its own; this
+/// keeps the PATH children inherit honest too.
 fn add_winget_links_to_path() {
     let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") else {
         return;

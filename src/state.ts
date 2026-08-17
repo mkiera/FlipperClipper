@@ -7,7 +7,16 @@
  * and would re-render the control row 60 times a second. player.ts owns it.
  */
 
-import { defaultFormatFor, type EditState, type MediaInfo, type QualityPreset } from './types';
+import {
+  AUDIO_FORMATS,
+  DEFAULT_SETTINGS,
+  defaultFormatFor,
+  type AppSettings,
+  type EditState,
+  type ExportFormat,
+  type MediaInfo,
+  type QualityPreset,
+} from './types';
 
 /** Things the user can see that are not part of the edit. */
 export interface UiState {
@@ -25,16 +34,18 @@ const QUALITY_KEY = 'flipperclipper.quality';
 const TARGET_MB_KEY = 'flipperclipper.targetMb';
 const QUALITIES: QualityPreset[] = ['high', 'balanced', 'small', 'fit'];
 
-function storedQuality(): QualityPreset {
+function rememberedQuality(): QualityPreset | null {
   const raw = localStorage.getItem(QUALITY_KEY);
-  const match = QUALITIES.find((q) => q === raw);
-  return match ?? 'balanced';
+  return QUALITIES.find((q) => q === raw) ?? null;
 }
 
-function storedTargetMb(): number {
+function rememberedTargetMb(): number | null {
   const raw = Number(localStorage.getItem(TARGET_MB_KEY));
-  return Number.isFinite(raw) && raw >= 0.5 && raw <= 10_000 ? raw : 10;
+  return Number.isFinite(raw) && raw >= 0.5 && raw <= 10_000 ? raw : null;
 }
+
+/** The saved settings. The settings modal owns writing them; everyone else reads. */
+export const settings: AppSettings = { ...DEFAULT_SETTINGS };
 
 export const edit: EditState = {
   media: null,
@@ -48,8 +59,8 @@ export const edit: EditState = {
   volume: 1,
   format: 'mp4',
   audioOnly: false,
-  targetMb: storedTargetMb(),
-  quality: storedQuality(),
+  targetMb: rememberedTargetMb() ?? settings.defaultTargetMb,
+  quality: rememberedQuality() ?? settings.defaultQuality,
   lossless: false,
 };
 
@@ -96,15 +107,39 @@ export function rememberTargetMb(targetMb: number): void {
 
 export function patchUi(patch: Partial<UiState>): void {
   Object.assign(ui, patch);
+  if (!settings.showFilmstrip) dropFilmstrip();
   notify();
 }
 
+/** Replaces the loaded settings and re-renders everything that reads them. */
+export function setSettings(next: AppSettings): void {
+  Object.assign(settings, next);
+  if (rememberedQuality() === null) edit.quality = settings.defaultQuality;
+  if (rememberedTargetMb() === null) edit.targetMb = settings.defaultTargetMb;
+  if (!settings.showFilmstrip) dropFilmstrip();
+  notify();
+}
+
+// Only when there is something to drop: timeline.ts skips the rebuild by
+// comparing array identity, and a fresh [] every time would defeat that.
+function dropFilmstrip(): void {
+  if (ui.filmstrip.length > 0) ui.filmstrip = [];
+}
+
 /**
- * Quality and fit size survive a new file; the format does not - it follows the
- * new file's extension, so a remembered webm cannot silently re-encode every
- * mp4 opened after it.
+ * A new file starts from the saved settings, except where the user changed
+ * quality or fit size by hand this session - that choice is remembered and wins.
  */
 export function loadMedia(media: MediaInfo, src: string): void {
+  let format: ExportFormat =
+    settings.defaultFormat === 'source' ? defaultFormatFor(media.path) : settings.defaultFormat;
+  let audioOnly = (AUDIO_FORMATS as string[]).includes(format);
+  // An audio default has nothing to extract from a file with no audio track.
+  if (audioOnly && !media.hasAudio) {
+    format = defaultFormatFor(media.path);
+    audioOnly = false;
+  }
+
   Object.assign(edit, {
     media,
     src,
@@ -115,8 +150,10 @@ export function loadMedia(media: MediaInfo, src: string): void {
     mute: false,
     reverse: false,
     volume: 1,
-    format: defaultFormatFor(media.path),
-    audioOnly: false,
+    format,
+    audioOnly,
+    quality: rememberedQuality() ?? settings.defaultQuality,
+    targetMb: rememberedTargetMb() ?? settings.defaultTargetMb,
     lossless: false,
   } satisfies Partial<EditState>);
   Object.assign(ui, {

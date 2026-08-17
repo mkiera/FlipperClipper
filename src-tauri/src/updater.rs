@@ -16,6 +16,8 @@ use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use tauri::{Emitter, Manager};
 
+use crate::settings::{self, UpdateChannel};
+
 /// Matches `UpdateInfo` in src/types.ts, which is why the rename is here.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -28,7 +30,52 @@ pub struct UpdateInfo {
     pub prerelease: bool,
 }
 
+/// Matches `ReleaseInfo` in src/types.ts.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReleaseInfo {
+    pub version: String,
+    pub tag_name: String,
+    pub published_at: Option<String>,
+    pub prerelease: bool,
+    pub release_url: String,
+    pub download_url: String,
+    pub asset_name: String,
+    pub size_bytes: u64,
+}
+
+/// Matches `AlphaBuild` in src/types.ts.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AlphaBuild {
+    pub run_id: u64,
+    pub branch: String,
+    pub sha: String,
+    pub run_number: u64,
+    pub created_at: Option<String>,
+    pub artifact_name: String,
+    pub download_url: String,
+    pub is_current: bool,
+}
+
 const RELEASES_URL: &str = "https://api.github.com/repos/mkiera/FlipperClipper/releases";
+
+/// Scoped to the one workflow: an unscoped /actions/runs page mixes in release
+/// runs, and thirty of those would hide every branch build behind them.
+const ALPHA_RUNS_URL: &str =
+    "https://api.github.com/repos/mkiera/FlipperClipper/actions/workflows/build-test.yml/runs";
+const ALPHA_RUNS_URL_BASE: &str = "https://api.github.com/repos/mkiera/FlipperClipper/actions/runs";
+
+/// The `name` a workflow run reports is its workflow's name, and only this one
+/// builds an installer from a branch.
+const ALPHA_WORKFLOW_NAME: &str = "Build Test";
+
+/// One artifacts call each, against a 60-per-hour anonymous budget.
+const ALPHA_MAX_BRANCHES: usize = 8;
+
+/// GitHub's own artifact download needs a token even on a public repository;
+/// nightly.link proxies the same zip anonymously.
+const NIGHTLY_LINK_URL: &str = "https://nightly.link/mkiera/FlipperClipper/actions/runs";
 
 /// The tail of the one asset a release carries that can update an installed
 /// copy. FinFetcher matched on "an .exe with 'setup' in the name" because its
@@ -64,6 +111,8 @@ struct GhRelease {
     draft: bool,
     #[serde(default)]
     prerelease: bool,
+    #[serde(default)]
+    published_at: Option<String>,
     #[serde(default)]
     assets: Vec<GhAsset>,
 }
@@ -104,45 +153,315 @@ pub fn clear_updates_dir(app: &tauri::AppHandle) {
     }
 }
 
-#[tauri::command]
-pub async fn check_for_update(app: tauri::AppHandle) -> Result<Option<UpdateInfo>, String> {
-    // package_info().version is the version Tauri compiled in from
-    // package.json, so the check compares against the same single source the
-    // release tag is written from.
-    let current = app.package_info().version.clone();
-
-    let client = reqwest::Client::builder()
+fn api_client() -> Result<reqwest::Client, String> {
+    reqwest::Client::builder()
         .timeout(Duration::from_secs(20))
         .build()
-        .map_err(|e| format!("Could not start the update check: {e}"))?;
+        .map_err(|e| format!("Could not start the update check: {e}"))
+}
 
+/// GitHub allows 60 unauthenticated requests an hour per address and answers
+/// 403 (occasionally 429) once that is spent. It is worth naming separately
+/// because it is the one failure that is neither the network nor this app being
+/// wrong, and it clears itself.
+fn github_error(status: reqwest::StatusCode) -> String {
+    if status.as_u16() == 403 || status.as_u16() == 429 {
+        "GitHub is rate limiting update checks right now.".to_string()
+    } else {
+        format!("GitHub answered the update check with HTTP {status}.")
+    }
+}
+
+async fn github_json<T: serde::de::DeserializeOwned>(
+    client: &reqwest::Client,
+    url: &str,
+    agent: &str,
+) -> Result<T, String> {
     let response = client
-        .get(RELEASES_URL)
-        .header(reqwest::header::USER_AGENT, user_agent(&current))
+        .get(url)
+        .header(reqwest::header::USER_AGENT, agent)
         .header(reqwest::header::ACCEPT, "application/vnd.github+json")
         .send()
         .await
         .map_err(|e| format!("Could not reach GitHub: {e}"))?;
 
-    let status = response.status();
-    if !status.is_success() {
-        // GitHub allows 60 unauthenticated requests an hour per address and
-        // answers 403 (occasionally 429) once that is spent. It is worth
-        // naming separately because it is the one failure that is neither the
-        // network nor this app being wrong, and it clears itself.
-        return Err(if status.as_u16() == 403 || status.as_u16() == 429 {
-            "GitHub is rate limiting update checks right now.".to_string()
-        } else {
-            format!("GitHub answered the update check with HTTP {status}.")
-        });
+    if !response.status().is_success() {
+        return Err(github_error(response.status()));
     }
 
-    let releases: Vec<GhRelease> = response
+    response
         .json()
         .await
-        .map_err(|e| format!("GitHub's release list could not be read: {e}"))?;
+        .map_err(|e| format!("GitHub's answer could not be read: {e}"))
+}
 
-    Ok(pick_update(releases, &current))
+async fn fetch_releases(current: &semver::Version) -> Result<Vec<GhRelease>, String> {
+    github_json(&api_client()?, RELEASES_URL, &user_agent(current)).await
+}
+
+#[tauri::command]
+pub async fn check_for_update(app: tauri::AppHandle) -> Result<Option<UpdateInfo>, String> {
+    let settings = settings::load(&app);
+    if !settings.auto_check_updates {
+        return Ok(None);
+    }
+
+    // package_info().version is the version Tauri compiled in from
+    // package.json, so the check compares against the same single source the
+    // release tag is written from.
+    let current = app.package_info().version.clone();
+    let releases = fetch_releases(&current).await?;
+
+    Ok(pick_update(releases, &current, settings.update_channel))
+}
+
+/// Every published release on the channel, newest first, downgrades included.
+#[tauri::command]
+pub async fn list_releases(
+    app: tauri::AppHandle,
+    channel: String,
+) -> Result<Vec<ReleaseInfo>, String> {
+    if channel == "alpha" {
+        return Err(
+            "Alpha builds come from CI runs rather than releases, so ask list_alpha_builds for them."
+                .to_string(),
+        );
+    }
+    let channel = UpdateChannel::parse(&channel)
+        .ok_or_else(|| format!("{channel} is not an update channel."))?;
+    let current = app.package_info().version.clone();
+    let releases = fetch_releases(&current).await?;
+    Ok(releases_for_channel(releases, channel))
+}
+
+fn releases_for_channel(releases: Vec<GhRelease>, channel: UpdateChannel) -> Vec<ReleaseInfo> {
+    let mut listed: Vec<(semver::Version, ReleaseInfo)> = Vec::new();
+
+    for release in releases {
+        if release.draft {
+            continue;
+        }
+        let Ok(version) = semver::Version::parse(release.tag_name.trim_start_matches('v')) else {
+            continue;
+        };
+        let is_prerelease = release.prerelease || !version.pre.is_empty();
+        if is_prerelease && channel == UpdateChannel::Stable {
+            continue;
+        }
+        let Some(asset) = release
+            .assets
+            .iter()
+            .find(|asset| asset.name.to_ascii_lowercase().ends_with(INSTALLER_SUFFIX))
+        else {
+            continue;
+        };
+
+        listed.push((
+            version.clone(),
+            ReleaseInfo {
+                version: version.to_string(),
+                tag_name: release.tag_name.clone(),
+                published_at: release.published_at.clone(),
+                prerelease: is_prerelease,
+                release_url: release.html_url.clone(),
+                download_url: asset.browser_download_url.clone(),
+                asset_name: asset.name.clone(),
+                size_bytes: asset.size,
+            },
+        ));
+    }
+
+    listed.sort_by(|(a, _), (b, _)| b.cmp(a));
+    listed.into_iter().map(|(_, info)| info).collect()
+}
+
+#[derive(Deserialize, Clone)]
+struct GhRunList {
+    #[serde(default)]
+    workflow_runs: Vec<GhRun>,
+}
+
+#[derive(Deserialize, Clone)]
+struct GhRun {
+    id: u64,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    head_branch: Option<String>,
+    #[serde(default)]
+    head_sha: String,
+    #[serde(default)]
+    run_number: u64,
+    #[serde(default)]
+    created_at: Option<String>,
+}
+
+#[derive(Deserialize, Clone)]
+struct GhArtifactList {
+    #[serde(default)]
+    artifacts: Vec<GhArtifact>,
+}
+
+#[derive(Deserialize, Clone)]
+struct GhArtifact {
+    name: String,
+    #[serde(default)]
+    expired: bool,
+}
+
+/// Rows are reused until the user presses refresh: one listing costs an API call
+/// per run on top of the run list, out of 60 an hour for an anonymous client.
+static ALPHA_CACHE: std::sync::Mutex<Option<(Vec<AlphaBuild>, Instant)>> =
+    std::sync::Mutex::new(None);
+const ALPHA_CACHE_TTL: Duration = Duration::from_secs(300);
+
+/// The newest successful Build Test run per branch, newest run first.
+///
+/// `current_sha` is the commit this build was stamped with. It lives in
+/// src/generated/build-info.json, which only the frontend can read, so it
+/// arrives as a parameter rather than becoming a second source of truth here.
+#[tauri::command]
+pub async fn list_alpha_builds(
+    app: tauri::AppHandle,
+    refresh: bool,
+    current_sha: Option<String>,
+) -> Result<Vec<AlphaBuild>, String> {
+    if !refresh {
+        if let Some(cached) = cached_alpha_builds() {
+            return Ok(mark_current(cached, current_sha.as_deref()));
+        }
+    }
+
+    let builds = fetch_alpha_builds(&app.package_info().version).await?;
+    *alpha_cache() = Some((builds.clone(), Instant::now()));
+    Ok(mark_current(builds, current_sha.as_deref()))
+}
+
+/// A panic cannot leave this half-written - it is a list and an instant - so a
+/// poisoned lock is read through.
+fn alpha_cache() -> std::sync::MutexGuard<'static, Option<(Vec<AlphaBuild>, Instant)>> {
+    ALPHA_CACHE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn cached_alpha_builds() -> Option<Vec<AlphaBuild>> {
+    let cache = alpha_cache();
+    let (builds, at) = cache.as_ref()?;
+    (at.elapsed() < ALPHA_CACHE_TTL).then(|| builds.clone())
+}
+
+async fn fetch_alpha_builds(current: &semver::Version) -> Result<Vec<AlphaBuild>, String> {
+    let client = api_client()?;
+    let agent = user_agent(current);
+
+    let runs: GhRunList = github_json(
+        &client,
+        &format!("{ALPHA_RUNS_URL}?status=success&per_page=30"),
+        &agent,
+    )
+    .await?;
+
+    let mut builds = Vec::new();
+    // Bounded because each branch costs another of the 60 anonymous requests an
+    // hour, and that budget is shared with the release checks.
+    for run in newest_run_per_branch(runs.workflow_runs)
+        .into_iter()
+        .take(ALPHA_MAX_BRANCHES)
+    {
+        // The artifact name is asked for rather than guessed from the branch: a
+        // workflow_dispatch run is named after the dispatch input instead.
+        let artifacts: Result<GhArtifactList, String> = github_json(
+            &client,
+            &format!("{ALPHA_RUNS_URL_BASE}/{}/artifacts", run.id),
+            &agent,
+        )
+        .await;
+
+        // One refused call keeps the rows already gathered rather than throwing
+        // the listing away and re-spending the quota on the next attempt.
+        let Ok(artifacts) = artifacts else { break };
+
+        if let Some(artifact) = artifacts
+            .artifacts
+            .into_iter()
+            .find(|artifact| !artifact.expired)
+        {
+            if let Some(build) = alpha_build(&run, artifact.name) {
+                builds.push(build);
+            }
+        }
+    }
+    Ok(builds)
+}
+
+fn newest_run_per_branch(runs: Vec<GhRun>) -> Vec<GhRun> {
+    let mut newest: Vec<GhRun> = Vec::new();
+
+    for run in runs {
+        if run.name.as_deref() != Some(ALPHA_WORKFLOW_NAME) {
+            continue;
+        }
+        let Some(branch) = run.head_branch.clone().filter(|name| !name.is_empty()) else {
+            continue;
+        };
+
+        match newest
+            .iter()
+            .position(|kept| kept.head_branch.as_deref() == Some(branch.as_str()))
+        {
+            Some(index) => {
+                if newest[index].run_number < run.run_number {
+                    newest[index] = run;
+                }
+            }
+            None => newest.push(run),
+        }
+    }
+
+    newest.sort_by(|a, b| b.run_number.cmp(&a.run_number));
+    newest
+}
+
+fn alpha_build(run: &GhRun, artifact_name: String) -> Option<AlphaBuild> {
+    // The name is a path segment of the download URL, so anything that could
+    // steer that URL somewhere else is dropped rather than escaped. The workflow
+    // already reduces branch names and dispatch input to this alphabet.
+    if artifact_name.is_empty()
+        || !artifact_name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+    {
+        return None;
+    }
+
+    Some(AlphaBuild {
+        run_id: run.id,
+        branch: run.head_branch.clone().unwrap_or_default(),
+        sha: short_sha(&run.head_sha),
+        run_number: run.run_number,
+        created_at: run.created_at.clone(),
+        download_url: format!("{NIGHTLY_LINK_URL}/{}/{artifact_name}.zip", run.id),
+        artifact_name,
+        is_current: false,
+    })
+}
+
+fn short_sha(sha: &str) -> String {
+    sha.chars().take(7).collect::<String>().to_ascii_lowercase()
+}
+
+fn mark_current(builds: Vec<AlphaBuild>, running_sha: Option<&str>) -> Vec<AlphaBuild> {
+    let running = running_sha
+        .map(short_sha)
+        .filter(|sha| sha.chars().count() == 7);
+    builds
+        .into_iter()
+        .map(|mut build| {
+            build.is_current = running.as_deref() == Some(build.sha.as_str());
+            build
+        })
+        .collect()
 }
 
 /// Which release, if any, the running version should be offered.
@@ -152,13 +471,11 @@ pub async fn check_for_update(app: tauri::AppHandle) -> Result<Option<UpdateInfo
 /// or an AppHandle. Getting it wrong is quiet in both directions - offering a
 /// downgrade walks somebody backwards, and offering nothing means a fix never
 /// reaches them - so it is the part of the updater worth pinning down.
-fn pick_update(releases: Vec<GhRelease>, current: &semver::Version) -> Option<UpdateInfo> {
-    // FinFetcher had a settings toggle for its beta channel. The same
-    // behaviour falls out of the running version here: somebody on
-    // 0.2.0-beta.1 asked for pre-releases by installing one, and somebody on
-    // a stable build did not, so a pre-release must never pull them off it.
-    let running_is_prerelease = !current.pre.is_empty();
-
+fn pick_update(
+    releases: Vec<GhRelease>,
+    current: &semver::Version,
+    channel: UpdateChannel,
+) -> Option<UpdateInfo> {
     let mut best: Option<(semver::Version, UpdateInfo)> = None;
 
     for release in releases {
@@ -174,7 +491,7 @@ fn pick_update(releases: Vec<GhRelease>, current: &semver::Version) -> Option<Up
         };
 
         let is_prerelease = release.prerelease || !version.pre.is_empty();
-        if is_prerelease && !running_is_prerelease {
+        if is_prerelease && channel == UpdateChannel::Stable {
             continue;
         }
 
@@ -214,20 +531,118 @@ fn pick_update(releases: Vec<GhRelease>, current: &semver::Version) -> Option<Up
     best.map(|(_, info)| info)
 }
 
+/// The auto-update entry point.
 #[tauri::command]
 pub async fn apply_update(app: tauri::AppHandle, info: UpdateInfo) -> Result<(), String> {
-    // An update ends in app.exit(0), which tears this process down without ever
-    // reaching the ffmpeg handle in AppState. Windows does not reap
-    // grandchildren, so an export that is still running would be left detached,
-    // writing to a file the user has every reason to think was abandoned, while
-    // the installer replaces the app around it — and installer.iss's
-    // CloseApplications filter only covers files under {app}, so it does not
-    // catch ffmpeg either. Refuse here rather than at the spawn, because there
-    // is nothing to be gained from downloading eight megabytes first.
-    //
-    // A panic in an export thread must not make updating impossible, and the
-    // slot behind this lock is a process handle and a bool, neither of which
-    // can be observed half-written, so a poisoned lock is read through.
+    download_and_install(app, &info.asset_name, &info.download_url, info.size_bytes).await
+}
+
+/// Installing a chosen release, including one older than the running build.
+#[tauri::command]
+pub async fn install_release(app: tauri::AppHandle, info: ReleaseInfo) -> Result<(), String> {
+    download_and_install(app, &info.asset_name, &info.download_url, info.size_bytes).await
+}
+
+/// Installing one branch build. Only ever reached because somebody picked a row.
+#[tauri::command]
+pub async fn install_alpha_build(app: tauri::AppHandle, build: AlphaBuild) -> Result<(), String> {
+    refuse_while_exporting(&app, EXPORT_RUNNING)?;
+
+    let dir = updates_dir(&app)?.join(format!("alpha-{}", build.run_id));
+    // Removed first, so a half-extracted earlier attempt at this run cannot be
+    // mistaken for this one's output.
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).map_err(|e| format!("Could not create the updates folder: {e}"))?;
+
+    let result = match unpack_alpha_build(&app, &build, &dir).await {
+        Ok(installer) => spawn_installer(&app, &installer, &dir),
+        Err(e) => Err(e),
+    };
+    if result.is_err() {
+        let _ = fs::remove_dir_all(&dir);
+    }
+    result
+}
+
+/// The zip nightly.link serves, unpacked down to the one installer inside it.
+async fn unpack_alpha_build(
+    app: &tauri::AppHandle,
+    build: &AlphaBuild,
+    dir: &Path,
+) -> Result<PathBuf, String> {
+    let zip = dir.join("build.zip");
+    stream_download(app, &build.download_url, &zip, None, Some(ARTIFACT_GONE)).await?;
+    extract_zip(&zip, dir)?;
+
+    find_setup_exe(dir, 3).ok_or_else(|| {
+        format!(
+            "{} does not contain an installer, so there is nothing to run.",
+            build.artifact_name
+        )
+    })
+}
+
+/// Expand-Archive rather than a zip crate, and the path travels in an
+/// environment variable because PowerShell re-parses everything after -Command.
+fn extract_zip(zip: &Path, dir: &Path) -> Result<(), String> {
+    let status = crate::ffmpeg::hidden_command("powershell")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "Expand-Archive -LiteralPath $env:FLIPPERCLIPPER_ZIP \
+             -DestinationPath $env:FLIPPERCLIPPER_ZIP_DEST -Force",
+        ])
+        .env("FLIPPERCLIPPER_ZIP", zip)
+        .env("FLIPPERCLIPPER_ZIP_DEST", dir)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map_err(|_| {
+            "Windows PowerShell could not be started, so the build could not be unpacked."
+                .to_string()
+        })?;
+
+    if !status.success() {
+        // Expand-Archive reads the central directory at the end of the file, so
+        // a truncated download fails here rather than producing half an exe.
+        return Err("That build's download could not be unpacked.".to_string());
+    }
+    Ok(())
+}
+
+fn find_setup_exe(dir: &Path, depth: u8) -> Option<PathBuf> {
+    let mut subdirs = Vec::new();
+    for entry in fs::read_dir(dir).ok()?.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            subdirs.push(path);
+        } else if path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.to_ascii_lowercase().ends_with(INSTALLER_SUFFIX))
+        {
+            return Some(path);
+        }
+    }
+    if depth == 0 {
+        return None;
+    }
+    subdirs
+        .into_iter()
+        .find_map(|subdir| find_setup_exe(&subdir, depth - 1))
+}
+
+const EXPORT_RUNNING: &str =
+    "FlipperClipper is still exporting a clip. Let it finish, then update.";
+const EXPORT_STARTED_MEANWHILE: &str = "FlipperClipper started exporting a clip while the update was downloading. Let it finish, then update.";
+const ARTIFACT_GONE: &str = "That build's installer is no longer downloadable: CI artifacts are kept for 30 days, so this run's has expired, or the run predates the artifact.";
+
+/// A panic in an export thread must not make updating impossible, and the slot
+/// behind this lock is a process handle and a bool, neither of which can be
+/// observed half-written, so a poisoned lock is read through.
+fn refuse_while_exporting(app: &tauri::AppHandle, message: &str) -> Result<(), String> {
     let export_running = app
         .state::<crate::AppState>()
         .export
@@ -236,16 +651,34 @@ pub async fn apply_update(app: tauri::AppHandle, info: UpdateInfo) -> Result<(),
         .child
         .is_some();
     if export_running {
-        return Err("FlipperClipper is still exporting a clip. Let it finish, then update.".to_string());
+        return Err(message.to_string());
     }
+    Ok(())
+}
+
+async fn download_and_install(
+    app: tauri::AppHandle,
+    asset_name: &str,
+    download_url: &str,
+    size_bytes: u64,
+) -> Result<(), String> {
+    // An update ends in app.exit(0), which tears this process down without ever
+    // reaching the ffmpeg handle in AppState. Windows does not reap
+    // grandchildren, so an export that is still running would be left detached,
+    // writing to a file the user has every reason to think was abandoned, while
+    // the installer replaces the app around it — and installer.iss's
+    // CloseApplications filter only covers files under {app}, so it does not
+    // catch ffmpeg either. Refuse here rather than at the spawn, because there
+    // is nothing to be gained from downloading eight megabytes first.
+    refuse_while_exporting(&app, EXPORT_RUNNING)?;
 
     // Nothing downstream can tell a truncated installer from a complete one
     // without a length to check against, and a truncated installer that still
     // runs is the worst outcome available here, so refuse before downloading.
-    if info.size_bytes == 0 {
+    if size_bytes == 0 {
         return Err(format!(
             "The release does not list a size for {}, so the download cannot be verified.",
-            info.asset_name
+            asset_name
         ));
     }
 
@@ -255,11 +688,24 @@ pub async fn apply_update(app: tauri::AppHandle, info: UpdateInfo) -> Result<(),
     // The asset name comes from the network, so only its last path component
     // is ever used — a name containing separators must not be able to steer
     // the write, or the file that gets executed below, out of this folder.
-    let file_name = Path::new(&info.asset_name)
+    let file_name = Path::new(asset_name)
         .file_name()
-        .ok_or_else(|| format!("{} is not a usable file name.", info.asset_name))?;
+        .ok_or_else(|| format!("{} is not a usable file name.", asset_name))?;
     let dest = dir.join(file_name);
 
+    stream_download(&app, download_url, &dest, Some(size_bytes), None).await?;
+    spawn_installer(&app, &dest, &dir)
+}
+
+/// Streams one file to disk, emitting progress, and deletes anything short of
+/// the length it was promised.
+async fn stream_download(
+    app: &tauri::AppHandle,
+    download_url: &str,
+    dest: &Path,
+    size_bytes: Option<u64>,
+    gone_message: Option<&str>,
+) -> Result<(), String> {
     let client = reqwest::Client::builder()
         // No overall timeout: this body is the whole installer and a slow
         // connection is not an error. The connect timeout still catches the
@@ -269,7 +715,7 @@ pub async fn apply_update(app: tauri::AppHandle, info: UpdateInfo) -> Result<(),
         .map_err(|e| format!("Could not start the download: {e}"))?;
 
     let response = client
-        .get(&info.download_url)
+        .get(download_url)
         .header(
             reqwest::header::USER_AGENT,
             user_agent(&app.package_info().version),
@@ -279,14 +725,21 @@ pub async fn apply_update(app: tauri::AppHandle, info: UpdateInfo) -> Result<(),
         .map_err(|e| format!("Could not reach the download: {e}"))?;
 
     if !response.status().is_success() {
+        if let (404, Some(gone)) = (response.status().as_u16(), gone_message) {
+            return Err(gone.to_string());
+        }
         return Err(format!(
             "The download answered with HTTP {}.",
             response.status()
         ));
     }
 
+    // The releases API states a length; nightly.link only sends one back, and a
+    // body cut short is worth catching either way.
+    let expected = size_bytes.or_else(|| response.content_length());
+
     let mut file =
-        fs::File::create(&dest).map_err(|e| format!("Could not write the download: {e}"))?;
+        fs::File::create(dest).map_err(|e| format!("Could not write the download: {e}"))?;
     let mut stream = response.bytes_stream();
     let mut written: u64 = 0;
     let mut last_emitted = 0.0_f64;
@@ -296,12 +749,12 @@ pub async fn apply_update(app: tauri::AppHandle, info: UpdateInfo) -> Result<(),
         let chunk = match chunk {
             Ok(chunk) => chunk,
             Err(e) => {
-                let _ = fs::remove_file(&dest);
+                let _ = fs::remove_file(dest);
                 return Err(format!("The download stopped early: {e}"));
             }
         };
         if let Err(e) = file.write_all(&chunk) {
-            let _ = fs::remove_file(&dest);
+            let _ = fs::remove_file(dest);
             return Err(format!("Could not write the download: {e}"));
         }
         written += chunk.len() as u64;
@@ -310,7 +763,10 @@ pub async fn apply_update(app: tauri::AppHandle, info: UpdateInfo) -> Result<(),
         // put hundreds of events a second through the IPC bridge to move a
         // progress bar by less than a pixel. One percent or 100 ms, whichever
         // comes first, keeps it smooth on both a fast and a slow connection.
-        let fraction = (written as f64 / info.size_bytes as f64).min(1.0);
+        let Some(total) = expected.filter(|total| *total > 0) else {
+            continue;
+        };
+        let fraction = (written as f64 / total as f64).min(1.0);
         if fraction - last_emitted >= 0.01 || last_emitted_at.elapsed() >= Duration::from_millis(100)
         {
             last_emitted = fraction;
@@ -320,26 +776,34 @@ pub async fn apply_update(app: tauri::AppHandle, info: UpdateInfo) -> Result<(),
     }
 
     if let Err(e) = file.flush() {
-        let _ = fs::remove_file(&dest);
+        let _ = fs::remove_file(dest);
         return Err(format!("Could not finish writing the download: {e}"));
     }
     drop(file);
 
     // A stream that ends is indistinguishable from a connection that was cut,
-    // and this file is about to be *executed* as an installer. Compare it
-    // with the length the release lists and delete anything short, rather
-    // than running a half-written setup exe over a working installation.
-    if written != info.size_bytes {
-        let _ = fs::remove_file(&dest);
-        return Err(format!(
-            "The download stopped early — got {} bytes of the {} the release lists. \
-             The incomplete file has been deleted; please try again.",
-            written, info.size_bytes
-        ));
+    // and this file is about to be *executed* as an installer, or unpacked into
+    // one. Compare it with the length that was promised and delete anything
+    // short, rather than running a half-written setup exe over a working
+    // installation.
+    if let Some(total) = expected {
+        if written != total {
+            let _ = fs::remove_file(dest);
+            return Err(format!(
+                "The download stopped early — got {} bytes of the {} it should have. \
+                 The incomplete file has been deleted; please try again.",
+                written, total
+            ));
+        }
     }
 
     let _ = app.emit(UPDATE_PROGRESS_EVENT, 1.0_f64);
+    Ok(())
+}
 
+/// Hands one installer to Windows and gets out of the way. Never returns to a
+/// caller that can carry on: on success this process is already exiting.
+fn spawn_installer(app: &tauri::AppHandle, installer: &Path, cwd: &Path) -> Result<(), String> {
     // Switch semantics are from the Inno Setup help, "Setup Command Line
     // Parameters":
     //   /SILENT  hides the wizard but keeps the progress window, so the user
@@ -357,11 +821,11 @@ pub async fn apply_update(app: tauri::AppHandle, info: UpdateInfo) -> Result<(),
     // user's install location and desktop-shortcut choice; and /NORESTART,
     // which would suppress the [Run] entry that is the only thing bringing
     // the app back.
-    let mut command = std::process::Command::new(&dest);
+    let mut command = std::process::Command::new(installer);
     command.args(["/SILENT", "/CLOSEAPPLICATIONS", "/NORESTARTAPPLICATIONS"]);
     // The working directory stays in AppData. A cwd inside the install folder
     // would lock that folder against the very files the installer replaces.
-    command.current_dir(&dir);
+    command.current_dir(cwd);
 
     #[cfg(windows)]
     {
@@ -376,21 +840,12 @@ pub async fn apply_update(app: tauri::AppHandle, info: UpdateInfo) -> Result<(),
         command.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW);
     }
 
-    // Asked again, because the check at the top of this function only covered
-    // the moment the user clicked Update. Downloading the installer takes long
-    // enough on a slow connection for them to have opened a clip and started an
-    // export in the meantime, and it is the exit below - not the click - that
-    // would orphan the ffmpeg writing it.
-    let export_started_meanwhile = app
-        .state::<crate::AppState>()
-        .export
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .child
-        .is_some();
-    if export_started_meanwhile {
-        return Err("FlipperClipper started exporting a clip while the update was downloading. Let it finish, then update.".to_string());
-    }
+    // Asked again, because the check before the download only covered the moment
+    // the user clicked Update. Downloading the installer takes long enough on a
+    // slow connection for them to have opened a clip and started an export in
+    // the meantime, and it is the exit below - not the click - that would orphan
+    // the ffmpeg writing it.
+    refuse_while_exporting(app, EXPORT_STARTED_MEANWHILE)?;
 
     // Blocked by antivirus or policy, not an executable at all, gone from
     // under us — whatever it was, this app is still running and the caller
@@ -419,6 +874,9 @@ mod tests {
         serde_json::from_str(json).expect("test payload should deserialise")
     }
 
+    const STABLE: UpdateChannel = UpdateChannel::Stable;
+    const PRERELEASE: UpdateChannel = UpdateChannel::Prerelease;
+
     /// Trimmed from what api.github.com actually returned for this repo, so the
     /// field names and types are the real ones rather than what we assume they
     /// are. A response GitHub can send and serde cannot read would fail here
@@ -429,6 +887,7 @@ mod tests {
         "tag_name": "v0.1.0-beta",
         "draft": false,
         "prerelease": true,
+        "published_at": "2026-08-14T19:02:11Z",
         "assets": [
           {
             "name": "FlipperClipper-Setup.exe",
@@ -440,9 +899,9 @@ mod tests {
     ]"#;
 
     #[test]
-    fn the_real_github_payload_deserialises_and_is_offered_to_an_older_prerelease() {
-        let picked = pick_update(releases(REAL_PAYLOAD), &version("0.0.9-beta"))
-            .expect("an older pre-release build should be offered this one");
+    fn the_real_github_payload_deserialises_and_is_offered_on_the_prerelease_channel() {
+        let picked = pick_update(releases(REAL_PAYLOAD), &version("0.0.9-beta"), PRERELEASE)
+            .expect("an older build on the pre-release channel should be offered this one");
         assert_eq!(picked.version, "0.1.0-beta");
         assert_eq!(picked.asset_name, "FlipperClipper-Setup.exe");
         assert_eq!(picked.size_bytes, 3309048);
@@ -451,18 +910,19 @@ mod tests {
     }
 
     #[test]
-    fn a_stable_build_is_never_pulled_onto_a_prerelease() {
-        // The whole beta channel, with no settings toggle: a person running a
-        // stable build never asked to be moved onto a beta, even a newer one.
-        assert!(pick_update(releases(REAL_PAYLOAD), &version("0.0.1")).is_none());
+    fn the_stable_channel_is_never_pulled_onto_a_prerelease() {
+        // The channel decides this, not the running version: somebody on a
+        // pre-release build who switches to Stable stops being offered betas.
+        assert!(pick_update(releases(REAL_PAYLOAD), &version("0.0.1"), STABLE).is_none());
+        assert!(pick_update(releases(REAL_PAYLOAD), &version("0.0.9-beta"), STABLE).is_none());
     }
 
     #[test]
     fn the_running_version_is_not_offered_to_itself() {
         // The bug FinFetcher hit: ship a build whose version does not match its
         // tag and it is offered its own release forever.
-        assert!(pick_update(releases(REAL_PAYLOAD), &version("0.1.0-beta")).is_none());
-        assert!(pick_update(releases(REAL_PAYLOAD), &version("0.2.0-beta")).is_none());
+        assert!(pick_update(releases(REAL_PAYLOAD), &version("0.1.0-beta"), PRERELEASE).is_none());
+        assert!(pick_update(releases(REAL_PAYLOAD), &version("0.2.0-beta"), PRERELEASE).is_none());
     }
 
     #[test]
@@ -471,7 +931,7 @@ mod tests {
           {"html_url":"h","tag_name":"v0.1.0","draft":false,"prerelease":false,
            "assets":[{"name":"FlipperClipper-Setup.exe","size":10,"browser_download_url":"u"}]}
         ]"#;
-        let picked = pick_update(releases(payload), &version("0.1.0-beta"))
+        let picked = pick_update(releases(payload), &version("0.1.0-beta"), STABLE)
             .expect("0.1.0 is newer than 0.1.0-beta and stable, so it is offered");
         assert_eq!(picked.version, "0.1.0");
         assert!(!picked.prerelease);
@@ -487,7 +947,7 @@ mod tests {
           {"html_url":"h","tag_name":"v0.5.0","draft":false,"prerelease":false,
            "assets":[{"name":"FlipperClipper-Setup.exe","size":5,"browser_download_url":"u5"}]}
         ]"#;
-        let picked = pick_update(releases(payload), &version("0.1.0")).expect("something is newer");
+        let picked = pick_update(releases(payload), &version("0.1.0"), STABLE).expect("something is newer");
         assert_eq!(picked.version, "0.9.0");
     }
 
@@ -501,7 +961,7 @@ mod tests {
           {"html_url":"h","tag_name":"v0.2.0","draft":false,"prerelease":false,
            "assets":[{"name":"FlipperClipper-Setup.exe","size":2,"browser_download_url":"u2"}]}
         ]"#;
-        let picked = pick_update(releases(payload), &version("0.1.0")).expect("v0.2.0 is usable");
+        let picked = pick_update(releases(payload), &version("0.1.0"), STABLE).expect("v0.2.0 is usable");
         assert_eq!(picked.version, "0.2.0");
     }
 
@@ -516,7 +976,7 @@ mod tests {
           {"html_url":"h","tag_name":"v0.2.0","draft":false,"prerelease":false,
            "assets":[{"name":"FlipperClipper-Setup.exe","size":2,"browser_download_url":"u2"}]}
         ]"#;
-        let picked = pick_update(releases(payload), &version("0.1.0")).expect("v0.2.0 is ready");
+        let picked = pick_update(releases(payload), &version("0.1.0"), STABLE).expect("v0.2.0 is ready");
         assert_eq!(picked.version, "0.2.0");
     }
 
@@ -533,14 +993,236 @@ mod tests {
              {"name":"FlipperClipper-Setup.exe","size":7,"browser_download_url":"good"}
            ]}
         ]"#;
-        let picked = pick_update(releases(payload), &version("0.1.0")).expect("the setup exe");
+        let picked = pick_update(releases(payload), &version("0.1.0"), STABLE).expect("the setup exe");
         assert_eq!(picked.download_url, "good");
         assert_eq!(picked.size_bytes, 7);
     }
 
     #[test]
     fn an_empty_release_list_is_not_an_error() {
-        assert!(pick_update(releases("[]"), &version("0.1.0")).is_none());
+        assert!(pick_update(releases("[]"), &version("0.1.0"), STABLE).is_none());
+    }
+
+    const LISTING_PAYLOAD: &str = r#"[
+      {"html_url":"h2","tag_name":"v0.2.0","draft":false,"prerelease":false,
+       "published_at":"2026-03-02T10:00:00Z",
+       "assets":[{"name":"FlipperClipper-Setup.exe","size":2,"browser_download_url":"u2"}]},
+      {"html_url":"h4","tag_name":"v0.4.0-beta.1","draft":false,"prerelease":true,
+       "published_at":"2026-05-04T10:00:00Z",
+       "assets":[{"name":"FlipperClipper-Setup.exe","size":4,"browser_download_url":"u4"}]},
+      {"html_url":"h9","tag_name":"v0.9.0","draft":true,"prerelease":false,
+       "published_at":null,
+       "assets":[{"name":"FlipperClipper-Setup.exe","size":9,"browser_download_url":"u9"}]},
+      {"html_url":"h5","tag_name":"v0.5.0","draft":false,"prerelease":false,
+       "published_at":null,"assets":[]},
+      {"html_url":"h3","tag_name":"v0.3.0","draft":false,"prerelease":false,
+       "published_at":"2026-04-03T10:00:00Z",
+       "assets":[{"name":"FlipperClipper-Setup.exe","size":3,"browser_download_url":"u3"}]}
+    ]"#;
+
+    fn versions(listed: &[ReleaseInfo]) -> Vec<&str> {
+        listed.iter().map(|info| info.version.as_str()).collect()
+    }
+
+    #[test]
+    fn the_stable_listing_is_newest_first_and_drops_drafts_prereleases_and_assetless_releases() {
+        let listed = releases_for_channel(releases(LISTING_PAYLOAD), STABLE);
+        assert_eq!(versions(&listed), vec!["0.3.0", "0.2.0"]);
+    }
+
+    #[test]
+    fn the_prerelease_listing_carries_both_kinds() {
+        let listed = releases_for_channel(releases(LISTING_PAYLOAD), PRERELEASE);
+        assert_eq!(versions(&listed), vec!["0.4.0-beta.1", "0.3.0", "0.2.0"]);
+        assert!(listed[0].prerelease);
+        assert!(!listed[1].prerelease);
+    }
+
+    #[test]
+    fn the_listing_keeps_releases_older_than_the_running_build() {
+        // The listing is what makes downgrading possible, so unlike pick_update
+        // it must not compare anything against the running version.
+        let listed = releases_for_channel(releases(LISTING_PAYLOAD), STABLE);
+        assert!(listed.iter().any(|info| info.version == "0.2.0"));
+    }
+
+    #[test]
+    fn a_listed_release_carries_everything_the_settings_panel_shows() {
+        let listed = releases_for_channel(releases(REAL_PAYLOAD), PRERELEASE);
+        let only = listed.first().expect("one release");
+        assert_eq!(only.version, "0.1.0-beta");
+        assert_eq!(only.tag_name, "v0.1.0-beta");
+        assert_eq!(only.published_at.as_deref(), Some("2026-08-14T19:02:11Z"));
+        assert_eq!(only.asset_name, "FlipperClipper-Setup.exe");
+        assert_eq!(only.size_bytes, 3309048);
+        assert!(only.prerelease);
+        assert!(only.release_url.ends_with("/tag/v0.1.0-beta"));
+    }
+
+    #[test]
+    fn a_release_with_no_published_date_still_lists() {
+        let payload = r#"[
+          {"html_url":"h","tag_name":"v0.2.0","draft":false,"prerelease":false,
+           "assets":[{"name":"FlipperClipper-Setup.exe","size":2,"browser_download_url":"u2"}]}
+        ]"#;
+        let listed = releases_for_channel(releases(payload), STABLE);
+        assert_eq!(versions(&listed), vec!["0.2.0"]);
+        assert!(listed[0].published_at.is_none());
+    }
+
+    #[test]
+    fn the_release_info_field_names_are_the_ones_the_frontend_reads() {
+        let listed = releases_for_channel(releases(REAL_PAYLOAD), PRERELEASE);
+        let json = serde_json::to_value(&listed[0]).expect("serialises");
+        let object = json.as_object().expect("an object");
+        let mut keys: Vec<&str> = object.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            vec![
+                "assetName",
+                "downloadUrl",
+                "prerelease",
+                "publishedAt",
+                "releaseUrl",
+                "sizeBytes",
+                "tagName",
+                "version"
+            ]
+        );
+    }
+
+    fn runs(json: &str) -> Vec<GhRun> {
+        let list: GhRunList = serde_json::from_str(json).expect("test payload should deserialise");
+        list.workflow_runs
+    }
+
+    /// Trimmed from a real /actions/runs page, so the field names are GitHub's.
+    /// Two runs of one branch, a run of another workflow, and a run with no
+    /// branch are all in here because all three reach this code in practice.
+    const RUNS_PAYLOAD: &str = r#"{
+      "total_count": 4,
+      "workflow_runs": [
+        {"id": 501, "name": "Build Test", "head_branch": "feature/crop-handles",
+         "head_sha": "A1B2C3D4E5F60718293A4B5C6D7E8F9012345678", "run_number": 12,
+         "created_at": "2026-08-16T09:31:02Z", "event": "push", "conclusion": "success"},
+        {"id": 499, "name": "Build Test", "head_branch": "feature/crop-handles",
+         "head_sha": "999999999999999999999999999999999999aaaa", "run_number": 11,
+         "created_at": "2026-08-15T09:31:02Z", "event": "push", "conclusion": "success"},
+        {"id": 498, "name": "Build and Release", "head_branch": "main",
+         "head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "run_number": 40,
+         "created_at": "2026-08-14T09:31:02Z", "event": "push", "conclusion": "success"},
+        {"id": 497, "name": "Build Test", "head_branch": "bugfix/proxy-leak",
+         "head_sha": "cccccccccccccccccccccccccccccccccccccccc", "run_number": 10,
+         "created_at": "2026-08-13T09:31:02Z", "event": "push", "conclusion": "success"}
+      ]
+    }"#;
+
+    #[test]
+    fn only_build_test_runs_are_alpha_builds_and_only_the_newest_per_branch() {
+        let kept = newest_run_per_branch(runs(RUNS_PAYLOAD));
+        let ids: Vec<u64> = kept.iter().map(|run| run.id).collect();
+        // 499 is an older run of the same branch, 498 is the release workflow.
+        assert_eq!(ids, vec![501, 497]);
+    }
+
+    #[test]
+    fn a_run_with_no_branch_is_skipped_rather_than_listed_blank() {
+        let payload = r#"{"workflow_runs":[
+          {"id":1,"name":"Build Test","head_branch":null,"head_sha":"dddddddd","run_number":1}
+        ]}"#;
+        assert!(newest_run_per_branch(runs(payload)).is_empty());
+    }
+
+    #[test]
+    fn no_build_test_runs_yet_is_an_empty_list_rather_than_an_error() {
+        assert!(newest_run_per_branch(runs(r#"{"workflow_runs":[]}"#)).is_empty());
+    }
+
+    #[test]
+    fn a_row_carries_the_nightly_link_url_for_the_artifact_the_run_actually_uploaded() {
+        let run = newest_run_per_branch(runs(RUNS_PAYLOAD)).remove(0);
+        // Named after the dispatch input, not the branch - which is why the
+        // artifact name is asked for rather than derived.
+        let build = alpha_build(&run, "FlipperClipper-Setup_handles-retry".to_string())
+            .expect("a sane artifact name is usable");
+        assert_eq!(build.run_id, 501);
+        assert_eq!(build.branch, "feature/crop-handles");
+        assert_eq!(build.sha, "a1b2c3d");
+        assert_eq!(build.run_number, 12);
+        assert_eq!(build.created_at.as_deref(), Some("2026-08-16T09:31:02Z"));
+        assert_eq!(
+            build.download_url,
+            "https://nightly.link/mkiera/FlipperClipper/actions/runs/501/FlipperClipper-Setup_handles-retry.zip"
+        );
+        assert!(!build.is_current);
+    }
+
+    #[test]
+    fn an_artifact_name_that_could_steer_the_download_url_is_dropped() {
+        let run = newest_run_per_branch(runs(RUNS_PAYLOAD)).remove(0);
+        assert!(alpha_build(&run, "../../evil".to_string()).is_none());
+        assert!(alpha_build(&run, "a/b".to_string()).is_none());
+        assert!(alpha_build(&run, String::new()).is_none());
+        assert!(alpha_build(&run, "FlipperClipper-Setup_ok.1".to_string()).is_some());
+    }
+
+    fn built(sha: &str) -> AlphaBuild {
+        AlphaBuild {
+            run_id: 1,
+            branch: "feature/x".to_string(),
+            sha: short_sha(sha),
+            run_number: 1,
+            created_at: None,
+            artifact_name: "FlipperClipper-Setup_x".to_string(),
+            download_url: "u".to_string(),
+            is_current: false,
+        }
+    }
+
+    #[test]
+    fn the_running_build_is_marked_whether_its_sha_arrives_short_or_full() {
+        let rows = vec![built("a1b2c3d4e5f6"), built("ffffffffffff")];
+        let full = mark_current(rows.clone(), Some("A1B2C3D4E5F60718293A4B5C6D7E8F9012345678"));
+        assert!(full[0].is_current && !full[1].is_current);
+
+        let short = mark_current(rows.clone(), Some("a1b2c3d"));
+        assert!(short[0].is_current && !short[1].is_current);
+    }
+
+    #[test]
+    fn an_unstamped_build_marks_nothing_as_current() {
+        // build-info.json is not committed, so a dev run has no sha to send and
+        // must not light up an unrelated row.
+        let rows = vec![built("a1b2c3d4e5f6")];
+        assert!(!mark_current(rows.clone(), None)[0].is_current);
+        assert!(!mark_current(rows.clone(), Some(""))[0].is_current);
+        assert!(!mark_current(rows, Some("a1b2"))[0].is_current);
+    }
+
+    #[test]
+    fn the_alpha_build_field_names_are_the_ones_the_frontend_reads() {
+        let json = serde_json::to_value(built("a1b2c3d4e5f6")).expect("serialises");
+        let mut keys: Vec<&str> = json
+            .as_object()
+            .expect("an object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            vec![
+                "artifactName",
+                "branch",
+                "createdAt",
+                "downloadUrl",
+                "isCurrent",
+                "runId",
+                "runNumber",
+                "sha"
+            ]
+        );
     }
 
     /// Hits the real GitHub API. #[ignore] so an offline machine, or one that
@@ -608,7 +1290,7 @@ mod tests {
             );
         }
 
-        let picked = pick_update(releases.clone(), &current);
+        let picked = pick_update(releases.clone(), &current, PRERELEASE);
         assert!(
             picked.is_some(),
             "a 0.0.1-alpha build should be offered the newest published release"
@@ -629,7 +1311,7 @@ mod tests {
         if published.len() >= 2 {
             let newest = published.last().expect("checked len").clone();
             let previous = published[published.len() - 2].clone();
-            let offered = pick_update(releases, &previous).unwrap_or_else(|| {
+            let offered = pick_update(releases, &previous, PRERELEASE).unwrap_or_else(|| {
                 panic!("a {previous} build was offered nothing, with {newest} published")
             });
             assert_eq!(
@@ -637,6 +1319,36 @@ mod tests {
                 newest.to_string(),
                 "a {previous} build should be offered {newest}"
             );
+        }
+    }
+
+    /// The alpha half of the live test above, and #[ignore] for the same
+    /// reasons. An empty result is reported rather than failed: build-test.yml
+    /// only runs on feature/** and bugfix/** pushes, so until one happens there
+    /// is nothing to list, and that is what the Alpha tab is meant to show.
+    #[tokio::test]
+    #[ignore]
+    async fn the_live_run_feed_is_reachable_and_parses() {
+        let current = version("0.0.1-alpha");
+        let builds = match fetch_alpha_builds(&current).await {
+            Ok(builds) => builds,
+            Err(e) => panic!("the run feed could not be read: {e}"),
+        };
+
+        if builds.is_empty() {
+            println!(
+                "SKIPPED: no successful \"{ALPHA_WORKFLOW_NAME}\" run has an artifact yet.\n\
+                 That is the expected state until a feature/** or bugfix/** branch is pushed."
+            );
+            return;
+        }
+
+        for build in &builds {
+            assert_eq!(build.sha.len(), 7, "{} has no short sha", build.run_id);
+            assert!(!build.branch.is_empty());
+            assert!(build
+                .download_url
+                .starts_with("https://nightly.link/mkiera/FlipperClipper/actions/runs/"));
         }
     }
 }

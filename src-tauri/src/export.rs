@@ -9,6 +9,7 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager};
 
 use crate::ffmpeg::{self, ExportFormat, ExportJob, QualityPreset};
+use crate::settings::EncoderPreference;
 use crate::{AppState, ExportSlot};
 
 const EVENT_PROGRESS: &str = "export-progress";
@@ -50,6 +51,11 @@ fn lock_slot(slot: &Mutex<ExportSlot>) -> MutexGuard<'_, ExportSlot> {
 
 #[tauri::command(async)]
 pub fn detect_encoder(app: AppHandle) -> String {
+    // "Force software" is usually picked because the probes themselves hang or
+    // wake a discrete GPU, so this startup call has to skip them too.
+    if crate::settings::load(&app).encoder != EncoderPreference::Auto {
+        return "libx264".to_string();
+    }
     resolve_encoder(&app.state::<AppState>())
 }
 
@@ -64,11 +70,12 @@ pub fn resolve_encoder(state: &AppState) -> String {
         }
     }
 
-    let picked = ENCODER_CANDIDATES
-        .iter()
-        .find(|name| test_encode(name))
-        .map(|name| name.to_string())
-        .unwrap_or_else(|| "libx264".to_string());
+    // Not cached when nothing validated: FFmpeg may not be reachable yet at
+    // startup, and a later call has to be free to probe again.
+    let Some(picked) = ENCODER_CANDIDATES.iter().find(|name| test_encode(name)) else {
+        return "libx264".to_string();
+    };
+    let picked = picked.to_string();
 
     let mut cached = state
         .encoder
@@ -139,10 +146,12 @@ pub fn start_export(app: AppHandle, job: ExportJob) -> Result<(), String> {
     // no video stream at all. The first resolve_encoder call test-runs a real
     // ffmpeg process per candidate, so paying that on an mp3 export would add
     // seconds of GPU probing to a job that cannot use the answer.
-    let encoder = if matches!(
-        job.format,
-        ExportFormat::Mp4 | ExportFormat::Mov | ExportFormat::Mkv
-    ) {
+    let hardware_allowed = crate::settings::load(&app).encoder == EncoderPreference::Auto;
+    let encoder = if hardware_allowed
+        && matches!(
+            job.format,
+            ExportFormat::Mp4 | ExportFormat::Mov | ExportFormat::Mkv
+        ) {
         resolve_encoder(&state)
     } else {
         "libx264".to_string()

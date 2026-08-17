@@ -1,8 +1,8 @@
 //! Pure command-building and probe-parsing logic.
 //!
-//! Everything in here except `hidden_command` is a pure function of its
-//! arguments so the whole export matrix can be unit-tested without ffmpeg
-//! installed and without writing a file. A wrong argument here produces a
+//! Everything in here except the process helpers at the bottom is a pure
+//! function of its arguments so the whole export matrix can be unit-tested
+//! without ffmpeg installed and without writing a file. A wrong argument here produces a
 //! silently truncated or unwatchable export rather than an error, so the tests
 //! at the bottom of this file are the only thing that catches it.
 //!
@@ -10,6 +10,11 @@
 //! job says, even combinations export.rs would refuse (fit-to-size gif, speed
 //! 50x). Folding the checks in here would mean the tests could no longer reach
 //! the argument builder with edge-case inputs to prove what it emits.
+
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
+use std::process::Stdio;
+use std::sync::{Mutex, OnceLock};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -1007,7 +1012,21 @@ pub fn parse_probe(json: &str, path: &str, size_bytes: u64) -> Result<MediaInfo,
 /// process allocates its own window: without CREATE_NO_WINDOW a black box pops
 /// up and steals focus for every filmstrip thumbnail and every probe, which on
 /// opening a file is a dozen flashes in a row.
+///
+/// "ffmpeg" and "ffprobe" are spawned from the absolute path `resolve_tool`
+/// found rather than by bare name; anything else (winget, powershell) is left
+/// to the inherited PATH.
 pub fn hidden_command(program: &str) -> std::process::Command {
+    match program {
+        "ffmpeg" | "ffprobe" => match resolve_tool(program) {
+            Some(path) => hidden_command_at(path.as_os_str()),
+            None => hidden_command_at(program.as_ref()),
+        },
+        _ => hidden_command_at(program.as_ref()),
+    }
+}
+
+fn hidden_command_at(program: &std::ffi::OsStr) -> std::process::Command {
     #[allow(unused_mut)]
     let mut cmd = std::process::Command::new(program);
     #[cfg(windows)]
@@ -1017,6 +1036,215 @@ pub fn hidden_command(program: &str) -> std::process::Command {
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
     cmd
+}
+
+// ---------------------------------------------------------------------------
+// Tool resolution
+// ---------------------------------------------------------------------------
+
+/// The Path values these two scopes hold are the current, authoritative ones
+/// even when the environment block this process inherited is stale.
+const REGISTRY_PATH_SCOPES: [&str; 2] = ["User", "Machine"];
+
+fn resolved_tools() -> &'static Mutex<HashMap<String, PathBuf>> {
+    static CACHE: OnceLock<Mutex<HashMap<String, PathBuf>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Drops the memoised paths so the next `resolve_tool` searches again.
+pub fn forget_resolved_tools() {
+    if let Ok(mut cache) = resolved_tools().lock() {
+        cache.clear();
+    }
+}
+
+/// The absolute path to spawn "ffmpeg" or "ffprobe" from.
+///
+/// Resolution through the inherited PATH is not reliable here - a launch from
+/// the installer and a launch from the shell do not see the same environment -
+/// so the search runs over the inherited PATH, then the registry's Path values,
+/// then the usual install folders. Only a candidate that actually runs is
+/// accepted, so a stub that cannot launch never wins. Misses are not cached.
+pub fn resolve_tool(name: &str) -> Option<PathBuf> {
+    match cached_tool(name) {
+        Some(hit) => Some(hit),
+        None => search_for_tool(name).map(|(path, _)| path),
+    }
+}
+
+/// `resolve_tool` plus the `-version` stdout its validation run already
+/// captured. Only the path is memoised, so a cache hit still costs one run.
+pub fn resolve_tool_with_version(name: &str) -> Option<(PathBuf, String)> {
+    match cached_tool(name) {
+        Some(hit) => run_version(&hit).map(|text| (hit, text)),
+        None => search_for_tool(name),
+    }
+}
+
+fn cached_tool(name: &str) -> Option<PathBuf> {
+    resolved_tools().lock().ok()?.get(name).cloned()
+}
+
+fn search_for_tool(name: &str) -> Option<(PathBuf, String)> {
+    let file_name = format!("{}{}", name, std::env::consts::EXE_SUFFIX);
+    // Last resort: the bare name, so CreateProcess still gets to apply its own
+    // search (the app's own folder, the system dirs) as it did before.
+    let bare = std::iter::once(PathBuf::from(&file_name));
+    let (path, version) = candidate_dirs()
+        .map(move |dir| dir.join(&file_name))
+        .filter(|candidate| candidate_exists(candidate))
+        .chain(bare)
+        .find_map(|candidate| run_version(&candidate).map(|text| (candidate, text)))?;
+
+    if let Ok(mut cache) = resolved_tools().lock() {
+        cache.insert(name.to_string(), path.clone());
+    }
+    Some((path, version))
+}
+
+/// symlink_metadata rather than is_file: the winget shims are reparse points,
+/// and following one can fail even though CreateProcess would launch it.
+fn candidate_exists(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok()
+}
+
+/// The stdout of a `-version` that exited zero, or None - which is what keeps a
+/// zero-byte WinGet alias from winning the search.
+fn run_version(path: &Path) -> Option<String> {
+    let output = hidden_command_at(path.as_os_str())
+        .arg("-version")
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// Inherited PATH, then the registry, then the usual install folders - as a
+/// lazy stream, so a hit in the first tier costs no PowerShell spawn at all.
+fn candidate_dirs() -> impl Iterator<Item = PathBuf> {
+    let inherited = std::env::var_os("PATH")
+        .map(|path| split_path_list(&path.to_string_lossy()))
+        .unwrap_or_default();
+
+    let registry = REGISTRY_PATH_SCOPES.into_iter().flat_map(|scope| {
+        registry_path_value(scope)
+            .map(|value| {
+                split_path_list(&expand_env_vars(&value, |name| std::env::var(name).ok()))
+            })
+            .unwrap_or_default()
+    });
+
+    dedupe_dirs(
+        inherited
+            .into_iter()
+            .chain(registry)
+            .chain(std::iter::once_with(known_install_dirs).flatten()),
+    )
+}
+
+fn known_install_dirs() -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    let mut push = |var: &str, tail: &[&str]| {
+        if let Some(root) = std::env::var_os(var) {
+            let mut dir = PathBuf::from(root);
+            for part in tail {
+                dir.push(part);
+            }
+            dirs.push(dir);
+        }
+    };
+    push("LOCALAPPDATA", &["Microsoft", "WinGet", "Links"]);
+    push("ProgramFiles", &["ffmpeg", "bin"]);
+    push("ProgramData", &["chocolatey", "bin"]);
+    push("LOCALAPPDATA", &["Programs", "ffmpeg", "bin"]);
+    dirs
+}
+
+/// A missing value or a non-zero exit is simply "no candidates from here".
+///
+/// Not reg.exe: it writes stdout in the console's OEM codepage, which turns any
+/// non-ASCII directory into replacement characters.
+fn registry_path_value(scope: &str) -> Option<String> {
+    let script = format!(
+        "[Console]::OutputEncoding=[Text.Encoding]::UTF8; \
+         [Environment]::GetEnvironmentVariable('Path','{scope}')"
+    );
+    let output = hidden_command("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", script.as_str()])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if value.is_empty() {
+        None
+    } else {
+        Some(value)
+    }
+}
+
+fn split_path_list(value: &str) -> Vec<PathBuf> {
+    value
+        .split(';')
+        .map(|part| part.trim().trim_matches('"'))
+        .filter(|part| !part.is_empty())
+        .map(PathBuf::from)
+        .collect()
+}
+
+/// Expands %VAR% references. The registry holds the Path of HKCU\Environment as
+/// REG_EXPAND_SZ, so it can contain them unexpanded.
+fn expand_env_vars<F>(text: &str, lookup: F) -> String
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find('%') {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + 1..];
+        match after.find('%') {
+            Some(end) => {
+                let name = &after[..end];
+                match lookup(name) {
+                    Some(value) if !name.is_empty() => out.push_str(&value),
+                    _ => {
+                        out.push('%');
+                        out.push_str(name);
+                        out.push('%');
+                    }
+                }
+                rest = &after[end + 1..];
+            }
+            None => {
+                out.push('%');
+                rest = after;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Keeps the first spelling of each directory, so search priority survives.
+/// Filters the stream rather than a finished list, so a later tier is still
+/// only read if the search gets that far.
+fn dedupe_dirs(dirs: impl Iterator<Item = PathBuf>) -> impl Iterator<Item = PathBuf> {
+    let mut seen: HashSet<String> = HashSet::new();
+    dirs.filter(move |dir| {
+        let key = dir
+            .to_string_lossy()
+            .trim_end_matches(['\\', '/'])
+            .to_lowercase();
+        !key.is_empty() && seen.insert(key)
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -2304,5 +2532,68 @@ mod tests {
           "format": { "duration": "60.0" }
         }"#;
         assert!(parse_probe(audio_only, "song.mp3", 0).is_err());
+    }
+
+    // -- tool resolution ----------------------------------------------------
+
+    #[test]
+    fn a_path_string_splits_on_semicolons() {
+        let dirs = split_path_list(
+            "C:\\Windows;;  C:\\Program Files\\ffmpeg\\bin  ;\"C:\\quoted dir\";",
+        );
+        assert_eq!(
+            dirs,
+            vec![
+                PathBuf::from("C:\\Windows"),
+                PathBuf::from("C:\\Program Files\\ffmpeg\\bin"),
+                PathBuf::from("C:\\quoted dir"),
+            ]
+        );
+        assert!(split_path_list("").is_empty());
+        assert!(split_path_list(" ; ; ").is_empty());
+    }
+
+    #[test]
+    fn env_expansion_substitutes_known_names_and_keeps_the_rest_literal() {
+        let lookup = |name: &str| match name {
+            "LOCALAPPDATA" => Some("C:\\Users\\Kiera\\AppData\\Local".to_string()),
+            "SystemRoot" => Some("C:\\Windows".to_string()),
+            _ => None,
+        };
+        assert_eq!(
+            expand_env_vars("%LOCALAPPDATA%\\Microsoft\\WinGet\\Links", lookup),
+            "C:\\Users\\Kiera\\AppData\\Local\\Microsoft\\WinGet\\Links"
+        );
+        assert_eq!(
+            expand_env_vars("%SystemRoot%\\system32;%NOPE%\\bin", lookup),
+            "C:\\Windows\\system32;%NOPE%\\bin"
+        );
+        // An unpaired % is data, not the start of a reference.
+        assert_eq!(expand_env_vars("C:\\100% done", lookup), "C:\\100% done");
+        assert_eq!(expand_env_vars("plain", lookup), "plain");
+    }
+
+    #[test]
+    fn candidate_directories_dedupe_without_losing_priority_order() {
+        let dirs: Vec<PathBuf> = dedupe_dirs(
+            vec![
+                PathBuf::from("C:\\Windows"),
+                PathBuf::from("C:\\ffmpeg\\bin"),
+                // Same folder, three spellings Windows treats as one.
+                PathBuf::from("c:\\windows"),
+                PathBuf::from("C:\\Windows\\"),
+                PathBuf::from("C:\\choco\\bin"),
+            ]
+            .into_iter(),
+        )
+        .collect();
+        assert_eq!(
+            dirs,
+            vec![
+                PathBuf::from("C:\\Windows"),
+                PathBuf::from("C:\\ffmpeg\\bin"),
+                PathBuf::from("C:\\choco\\bin"),
+            ]
+        );
     }
 }

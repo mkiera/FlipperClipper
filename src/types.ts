@@ -103,6 +103,61 @@ export interface UpdateInfo {
   prerelease: boolean;
 }
 
+export type UpdateChannel = 'stable' | 'prerelease' | 'alpha';
+export type EncoderPreference = 'auto' | 'software';
+/** 'source' keeps the opened file's own container. */
+export type DefaultFormat = ExportFormat | 'source';
+
+export interface AppSettings {
+  updateChannel: UpdateChannel;
+  autoCheckUpdates: boolean;
+  defaultFormat: DefaultFormat;
+  defaultQuality: QualityPreset;
+  defaultTargetMb: number;
+  showFilmstrip: boolean;
+  encoder: EncoderPreference;
+  autoPreviewProxy: boolean;
+}
+
+export const DEFAULT_SETTINGS: AppSettings = {
+  updateChannel: 'stable',
+  autoCheckUpdates: true,
+  defaultFormat: 'source',
+  defaultQuality: 'balanced',
+  defaultTargetMb: 10,
+  showFilmstrip: true,
+  encoder: 'auto',
+  autoPreviewProxy: true,
+};
+
+/** One row of the release list. version carries no leading v. */
+export interface ReleaseInfo {
+  version: string;
+  tagName: string;
+  publishedAt: string | null;
+  prerelease: boolean;
+  releaseUrl: string;
+  downloadUrl: string;
+  assetName: string;
+  sizeBytes: number;
+}
+
+/** One row of the alpha list: the newest successful CI build of a branch. */
+export interface AlphaBuild {
+  runId: number;
+  branch: string;
+  /** Short, 7 chars. */
+  sha: string;
+  runNumber: number;
+  /** ISO 8601 from the API. */
+  createdAt: string | null;
+  artifactName: string;
+  /** The nightly.link zip URL. */
+  downloadUrl: string;
+  /** Head sha matches build-info.json's sha for the running build. */
+  isCurrent: boolean;
+}
+
 /** Tauri event names, so both sides spell them the same way. */
 export const EVENT = {
   exportProgress: 'export-progress',

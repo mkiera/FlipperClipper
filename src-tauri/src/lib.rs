@@ -1,6 +1,7 @@
 // Public so tests/real_export.rs can drive the real command builder.
 pub mod ffmpeg;
 mod export;
+mod settings;
 mod sysutil;
 mod updater;
 
@@ -58,6 +59,12 @@ pub fn run() {
             export::cancel_export,
             updater::check_for_update,
             updater::apply_update,
+            updater::list_releases,
+            updater::install_release,
+            updater::list_alpha_builds,
+            updater::install_alpha_build,
+            settings::get_settings,
+            settings::save_settings,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -110,6 +110,24 @@
 
         <div class="spacer"></div>
 
+        <button id="settings-btn" class="icon-btn" type="button" title="Settings" aria-label="Settings">
+          <svg viewBox="0 0 16 16" aria-hidden="true">
+            <path fill-rule="evenodd" d="M8 3.4a4.6 4.6 0 1 0 0 9.2 4.6 4.6 0 0 0 0-9.2zm0 2.6a2 2 0 1 1 0 4 2 2 0 0 1 0-4z" />
+            <g>
+              <rect x="6.8" y="0.7" width="2.4" height="3.6" rx="0.6" />
+              <rect x="6.8" y="11.7" width="2.4" height="3.6" rx="0.6" />
+              <rect x="0.7" y="6.8" width="3.6" height="2.4" rx="0.6" />
+              <rect x="11.7" y="6.8" width="3.6" height="2.4" rx="0.6" />
+            </g>
+            <g transform="rotate(45 8 8)">
+              <rect x="6.8" y="0.7" width="2.4" height="3.6" rx="0.6" />
+              <rect x="6.8" y="11.7" width="2.4" height="3.6" rx="0.6" />
+              <rect x="0.7" y="6.8" width="3.6" height="2.4" rx="0.6" />
+              <rect x="11.7" y="6.8" width="3.6" height="2.4" rx="0.6" />
+            </g>
+          </svg>
+        </button>
+
         <button id="audio-only-btn" class="icon-btn" type="button" title="Audio only" aria-label="Audio only">
           <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M13.5 1 5 2.7v8a2.4 2.4 0 1 0 1.5 2.2V6.3l5.5-1.1v4.2a2.4 2.4 0 1 0 1.5 2.2z" /></svg>
         </button>
@@ -182,5 +200,139 @@
     </div>
 
     <div id="drop-hint" hidden><span>Drop to open</span></div>
+
+    <div id="settings-modal" class="modal" hidden>
+      <div class="modal-panel" role="dialog" aria-modal="true" aria-labelledby="settings-title">
+        <!-- Sticky: the Editing section is taller than the panel, and the tabs
+             and the close button are the only ways out of it. -->
+        <div class="settings-top">
+          <div class="settings-header">
+            <h2 id="settings-title">Settings</h2>
+            <button id="settings-close" class="icon-btn small" type="button" aria-label="Close settings">
+              <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4.4 3.3 3.6 3.6 3.6-3.6 1.1 1.1L9.1 8l3.6 3.6-1.1 1.1L8 9.1l-3.6 3.6-1.1-1.1L6.9 8 3.3 4.4z" /></svg>
+            </button>
+          </div>
+
+          <div class="tabs section-tabs">
+            <button id="settings-tab-updates" class="tab active" type="button">Updates</button>
+            <button id="settings-tab-editing" class="tab" type="button">Editing</button>
+          </div>
+        </div>
+
+        <div id="settings-section-updates" class="settings-section">
+          <div class="set-row">
+            <div class="set-label">
+              <span id="auto-check-label">Auto-check for updates</span>
+              <span class="set-hint">Looks once an hour, and only shows a pill when there is something newer.</span>
+            </div>
+            <label class="switch">
+              <input type="checkbox" id="auto-check-toggle" aria-labelledby="auto-check-label" />
+              <span class="switch-track"></span>
+            </label>
+          </div>
+
+          <div class="settings-divider"></div>
+
+          <div class="tabs">
+            <button id="channel-stable" class="tab active" type="button">Stable</button>
+            <button id="channel-prerelease" class="tab" type="button">Pre-release</button>
+            <button id="channel-alpha" class="tab" type="button">Alpha</button>
+            <button id="refresh-releases" class="refresh-btn" type="button" title="Fetch the list again now" aria-label="Refresh the list">
+              <svg viewBox="0 0 16 16" aria-hidden="true"><path transform="scale(-1,1) translate(-16,0)" d="M8 3V.8L4.2 3.9 8 7V4.5a3.9 3.9 0 1 1-3.9 4.4l-1.5.2A5.4 5.4 0 1 0 8 3z" /></svg>
+            </button>
+          </div>
+
+          <div id="releases-checked-at" class="checked-at"></div>
+          <div id="current-build-line" class="build-line"></div>
+
+          <div id="channel-pane-releases" class="channel-pane">
+            <div id="releases-list" class="releases-list"></div>
+
+            <div class="settings-actions">
+              <button id="check-updates-btn" class="btn" type="button">Check for updates</button>
+              <button id="install-release-btn" class="btn primary" type="button" disabled>Install</button>
+            </div>
+          </div>
+
+          <div id="channel-pane-alpha" class="channel-pane" hidden>
+            <p class="channel-hint">Test builds straight from a CI branch run, never offered automatically - the update check only ever looks at Stable and Pre-release.</p>
+            <div id="alpha-list" class="releases-list"></div>
+
+            <div class="settings-actions">
+              <button id="install-alpha-btn" class="btn primary" type="button" disabled>Install this build</button>
+            </div>
+          </div>
+
+          <div id="settings-note" class="settings-note"></div>
+        </div>
+
+        <div id="settings-section-editing" class="settings-section" hidden>
+          <div class="set-row">
+            <div class="set-label">
+              <span id="set-format-label">Default export format</span>
+              <span class="set-hint">What a newly opened clip starts on.</span>
+            </div>
+            <select id="set-format" aria-labelledby="set-format-label"></select>
+          </div>
+
+          <div class="set-row">
+            <div class="set-label"><span id="set-quality-label">Default quality</span></div>
+            <select id="set-quality" aria-labelledby="set-quality-label">
+              <option value="high">High</option>
+              <option value="balanced">Balanced</option>
+              <option value="small">Small</option>
+              <option value="fit">Fit under…</option>
+            </select>
+          </div>
+
+          <div class="set-row">
+            <div class="set-label">
+              <span>Default fit size</span>
+              <span class="set-hint">Megabytes the "Fit under…" quality aims at.</span>
+            </div>
+            <input id="set-target-mb" class="set-number" type="number" min="0.5" max="10000" step="0.5" aria-label="Default fit size in MB" />
+          </div>
+
+          <div class="settings-divider"></div>
+
+          <div class="set-row">
+            <div class="set-label">
+              <span id="set-filmstrip-label">Show the filmstrip</span>
+              <span class="set-hint">Thumbnails along the timeline.</span>
+            </div>
+            <label class="switch">
+              <input type="checkbox" id="set-filmstrip" aria-labelledby="set-filmstrip-label" />
+              <span class="switch-track"></span>
+            </label>
+          </div>
+
+          <div class="set-row">
+            <div class="set-label">
+              <span id="set-encoder-label">Encoder</span>
+              <span class="set-hint">Automatic uses the GPU when one is usable; software is slower but the same everywhere.</span>
+            </div>
+            <select id="set-encoder" aria-labelledby="set-encoder-label">
+              <option value="auto">Automatic</option>
+              <option value="software">Force software</option>
+            </select>
+          </div>
+
+          <div class="set-row">
+            <div class="set-label">
+              <span id="set-proxy-label">Offer a preview copy</span>
+              <span class="set-hint">Suggests a quick playable copy when a clip will not play in the window.</span>
+            </div>
+            <label class="switch">
+              <input type="checkbox" id="set-proxy" aria-labelledby="set-proxy-label" />
+              <span class="switch-track"></span>
+            </label>
+          </div>
+
+          <div class="settings-actions">
+            <button id="restore-defaults" class="btn" type="button">Restore defaults</button>
+          </div>
+        </div>
+      </div>
+    </div>
   </body>
 </html>
