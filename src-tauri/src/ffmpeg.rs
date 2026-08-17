@@ -2596,4 +2596,48 @@ mod tests {
             ]
         );
     }
+
+    /// The bug this whole resolver exists for: the app launched by the installer
+    /// inherited an environment that could not find ffmpeg, and a restart fixed
+    /// it. Strip PATH to the point where the inherited tier cannot answer and
+    /// assert the later tiers still do.
+    ///
+    /// #[ignore] because it mutates process-wide environment (so it must not run
+    /// beside other tests) and because it needs a real FFmpeg on the machine:
+    ///     cargo test -- --ignored --test-threads=1
+    #[test]
+    #[ignore]
+    fn ffmpeg_is_found_with_the_inherited_path_stripped() {
+        let real_path = std::env::var_os("PATH");
+
+        forget_resolved_tools();
+        assert!(
+            resolve_tool("ffmpeg").is_some(),
+            "ffmpeg is not installed on this machine, so this test proves nothing"
+        );
+
+        // Only System32 - enough for PowerShell to exist, not enough to find
+        // ffmpeg, which is what a stale inherited environment looks like.
+        let system32 = std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".to_string());
+        std::env::set_var("PATH", format!("{system32}\\System32"));
+        forget_resolved_tools();
+
+        let found = resolve_tool("ffmpeg");
+
+        match real_path {
+            Some(path) => std::env::set_var("PATH", path),
+            None => std::env::remove_var("PATH"),
+        }
+        forget_resolved_tools();
+
+        let found = found.expect("no tier after the inherited PATH could find ffmpeg");
+        assert!(
+            found.is_absolute(),
+            "resolution must yield an absolute path, got {found:?}"
+        );
+        assert!(
+            run_version(&found).is_some(),
+            "the winner must actually run: a zero-byte WinGet alias must never be accepted"
+        );
+    }
 }
