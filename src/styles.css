@@ -588,9 +588,10 @@ select option:disabled {
   flex: none;
   padding: 8px 10px;
   border-top: 1px solid var(--line);
-  background: var(--panel);
-  backdrop-filter: blur(10px);
-  -webkit-backdrop-filter: blur(10px);
+  /* Opaque, and deliberately not backdrop-filtered: a blur here forces the compositor to
+     sample what is behind the row, which drops the video off its hardware overlay and
+     changes the colour matrix it is converted with. Measured on colour bars. */
+  background: #192635;
 }
 
 .spacer {
