@@ -92,7 +92,7 @@ pub struct ExportJob {
     pub crop: Option<Rect>,
     pub mute: bool,
     pub reverse: bool,
-    /// EBU R128 loudness normalisation, which owns the gain while it is on.
+    /// EBU R128 loudness normalisation. Emitted before `volume`, which trims from there.
     pub normalize: bool,
     /// Linear gain, 1.0 = unchanged. export.rs bounds it to [0.0, 10.0].
     pub volume: f64,
@@ -1658,8 +1658,7 @@ mod tests {
             Some("atempo=2.0,loudnorm=I=-16:TP=-1.5:LRA=11")
         );
 
-        // The UI disables the slider while this is on, but a job arriving over IPC can carry
-        // both, and the trim then applies after the target has been hit rather than fighting it.
+        // The pair the UI actually produces: normalise to a known level, then trim from it.
         j.speed = 1.0;
         j.volume = 0.5;
         let args = build_args(&j, "libx264", true, 1920, 1080, 30.0);

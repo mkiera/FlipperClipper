@@ -366,11 +366,10 @@ function render(): void {
   normalizeBtn.classList.toggle('active', edit.normalize);
 
   volumeGroup.hidden = hasMedia && !hasAudio;
-  // Normalising works the gain out from the audio itself, so a multiplier on top of it would
-  // only undo the target it just hit.
-  const gainIsOwned = edit.mute || edit.normalize;
-  volumeSlider.disabled = !hasMedia || gainIsOwned;
-  volumeInput.disabled = !hasMedia || gainIsOwned;
+  // Live beside normalise, not instead of it: normalising sets a known level and the slider
+  // then trims from there, which is the order the filter chain already emits.
+  volumeSlider.disabled = !hasMedia || edit.mute;
+  volumeInput.disabled = !hasMedia || edit.mute;
   const volumePercent = Math.round(edit.volume * 100);
   // The slider covers 0..200; a typed boost above that pins it to the end while the real
   // value stands in the number input beside it.

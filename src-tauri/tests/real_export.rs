@@ -368,6 +368,33 @@ fn normalising_lifts_a_quiet_clip_toward_the_target() {
 }
 
 #[test]
+fn the_volume_trim_applies_on_top_of_the_normalised_level() {
+    if ffmpeg_missing() {
+        return;
+    }
+    let src = quiet();
+
+    let mut j = job(&src, "out-norm-only.mp4");
+    j.out_point = 5.0;
+    j.normalize = true;
+    let normalised = mean_volume(&run_export(&j, 1920, 1080, 30.0, true));
+
+    let mut j = job(&src, "out-norm-trimmed.mp4");
+    j.out_point = 5.0;
+    j.normalize = true;
+    j.volume = 0.5;
+    let trimmed = mean_volume(&run_export(&j, 1920, 1080, 30.0, true));
+
+    // Half the amplitude is 6 dB down from wherever normalising landed, which is what "set the
+    // level, then trim to taste" has to mean.
+    let drop = normalised - trimmed;
+    assert!(
+        (drop - 6.0).abs() < 1.5,
+        "normalised {normalised:.1} dBFS, trimmed {trimmed:.1} dBFS - a {drop:.1} dB drop is not the half the slider asked for"
+    );
+}
+
+#[test]
 fn doubled_volume_still_carries_an_audio_stream() {
     if ffmpeg_missing() {
         return;

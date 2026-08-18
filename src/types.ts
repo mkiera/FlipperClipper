@@ -61,7 +61,7 @@ export interface ExportJob {
   crop: Rect | null;
   mute: boolean;
   reverse: boolean;
-  /** EBU R128 loudness normalisation. Owns the gain, so volume is ignored while it is on. */
+  /** EBU R128 loudness normalisation. Runs before volume, which trims from the level it sets. */
   normalize: boolean;
   /** 0 - 10. Above 1 is a boost the preview cannot show. */
   volume: number;
