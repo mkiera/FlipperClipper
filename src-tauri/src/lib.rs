@@ -63,6 +63,7 @@ pub fn run() {
             sysutil::copy_file_to_clipboard,
             sysutil::reveal_in_explorer,
             sysutil::app_version,
+            sysutil::set_min_window_size,
             sysutil::cli_file_path,
             export::detect_encoder,
             export::start_export,

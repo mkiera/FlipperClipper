@@ -21,6 +21,7 @@ import { describe, hideBanner, initControls, showBanner, showFfmpegBanner, showT
 import { initShortcuts } from './shortcuts';
 import { initUpdater } from './updater';
 import { appSettings, buildInfo, initSettings } from './settings';
+import { applyMinWindowSize } from './windowsize';
 
 const FILMSTRIP_FRAMES = 16;
 const FILMSTRIP_HEIGHT = 64;
@@ -72,6 +73,9 @@ function boot(): void {
   });
   window.addEventListener('pointerdown', recheckIfMissing);
   window.addEventListener('keydown', recheckIfMissing);
+
+  // After the controls exist: the minimum is measured off the row they build.
+  void applyMinWindowSize();
 
   void watchDrops();
   void checkFfmpeg();

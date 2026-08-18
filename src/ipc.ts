@@ -100,6 +100,11 @@ export function appVersion(): Promise<string> {
   return invoke<string>('app_version');
 }
 
+/** Logical pixels. windowsize.ts works the width out from what the control row needs. */
+export function setMinWindowSize(width: number, height: number): Promise<void> {
+  return invoke<void>('set_min_window_size', { width, height });
+}
+
 export function installFfmpeg(): Promise<void> {
   return invoke<void>('install_ffmpeg');
 }

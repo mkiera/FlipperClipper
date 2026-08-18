@@ -541,6 +541,38 @@ pub fn reveal_in_explorer(path: String) -> Result<(), String> {
         .map_err(|_| "Windows could not open Explorer for that file.".to_string())
 }
 
+/// The smallest the window may be made, in logical pixels.
+///
+/// Set from the frontend rather than from tauri.conf.json because the answer is a property of
+/// the control row, which changes whenever a control is added to it - a number written into
+/// the config is correct only until the next button lands. The caller measures what the row
+/// needs and clamps it to the screen; this only applies the result.
+///
+/// Windows does not resize a window that is already smaller than a new minimum - the
+/// constraint is consulted on the next resize - so a window under the new floor is grown here.
+#[tauri::command]
+pub fn set_min_window_size(window: tauri::Window, width: f64, height: f64) -> Result<(), String> {
+    if !width.is_finite() || !height.is_finite() || width <= 0.0 || height <= 0.0 {
+        return Err("The window minimum has to be a positive size.".to_string());
+    }
+    let wanted = tauri::LogicalSize::new(width, height);
+    window
+        .set_min_size(Some(wanted))
+        .map_err(|_| "The window minimum size could not be set.".to_string())?;
+
+    let scale = window.scale_factor().unwrap_or(1.0);
+    if let Ok(current) = window.inner_size() {
+        let current = current.to_logical::<f64>(scale);
+        if current.width < width || current.height < height {
+            let _ = window.set_size(tauri::LogicalSize::new(
+                current.width.max(width),
+                current.height.max(height),
+            ));
+        }
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub fn app_version(app: AppHandle) -> String {
     app.package_info().version.to_string()

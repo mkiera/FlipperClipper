@@ -8,6 +8,7 @@
  */
 
 import { subscribe } from './state';
+import { appliedMinWidth } from './windowsize';
 
 /** A control row on one line; anything taller has wrapped. */
 const ONE_ROW_MAX = 60;
@@ -67,6 +68,10 @@ function draw(): void {
   const need = controls ? controlsNeed(controls) : 0;
 
   const verdict = rows === 1 ? 'one row' : 'WRAPPED';
-  readout.textContent = `${window.innerWidth} x ${window.innerHeight}\ncontrols: ${verdict} (needs ${need})`;
+  const min = appliedMinWidth();
+  readout.textContent =
+    `${window.innerWidth} x ${window.innerHeight}\n` +
+    `controls: ${verdict} (needs ${need})\n` +
+    `min applied: ${min || 'pending'}`;
   readout.style.borderColor = rows === 1 ? 'rgba(107,197,210,0.8)' : '#ff6b6b';
 }

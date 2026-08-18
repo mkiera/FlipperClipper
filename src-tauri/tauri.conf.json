@@ -14,10 +14,10 @@
     "windows": [
       {
         "title": "FlipperClipper",
-        "width": 1400,
+        "width": 1760,
         "height": 800,
-        "minWidth": 640,
-        "minHeight": 480,
+        "minWidth": 800,
+        "minHeight": 520,
         "resizable": true,
         "center": true,
         "dragDropEnabled": true
