@@ -393,9 +393,16 @@ select option:disabled {
 
 /* ------------------------------------------------------------------ stage */
 
+#workspace {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+
 #stage {
   position: relative;
   flex: 1;
+  min-width: 0;
   min-height: 0;
   background: var(--stage);
   overflow: hidden;
@@ -575,6 +582,306 @@ select option:disabled {
   text-align: center;
   color: var(--fg-dim);
   font-variant-numeric: tabular-nums;
+}
+
+/* ---------------------------------------------------------------- effects */
+
+/* Docked beside the stage rather than floating over it. Two reasons: a panel over the picture
+   hides the thing being adjusted, and a translucent one would need a backdrop-filter, which is
+   what knocked the video off its hardware overlay and recoloured it. Opaque, and out of the
+   way of the frame entirely. */
+#effects-panel {
+  display: flex;
+  flex-direction: column;
+  flex: none;
+  width: 292px;
+  min-height: 0;
+  border-left: 1px solid var(--line);
+  background: #192635;
+}
+
+.fx-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 12px 12px 0;
+}
+
+.fx-title {
+  margin: 0;
+  font-size: 0.95rem;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+}
+
+.fx-count {
+  margin: 2px 12px 8px;
+  color: var(--fg-dim);
+  font-size: 0.75rem;
+}
+
+.fx-count.some {
+  color: var(--accent-glow);
+}
+
+.fx-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  flex: 1;
+  min-height: 0;
+  padding: 0 12px 12px;
+  overflow-y: auto;
+}
+
+.fx-list::-webkit-scrollbar {
+  width: 6px;
+}
+
+.fx-list::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.2);
+  border-radius: 3px;
+}
+
+.fx-foot {
+  display: flex;
+  justify-content: flex-end;
+  flex: none;
+  padding: 10px 12px;
+  border-top: 1px solid var(--line);
+}
+
+.fx-row {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--sunken);
+}
+
+/* An applied effect is meant to be findable at a glance, switched off dials and all. */
+.fx-row.on {
+  border-color: var(--accent-glow);
+  background: rgba(74, 144, 164, 0.14);
+}
+
+/* Not disabled: the setting is still worth keeping for when the export goes back to video. */
+.fx-row.inert .fx-name,
+.fx-row.inert .fx-summary {
+  opacity: 0.45;
+  text-decoration: line-through;
+}
+
+.fx-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 9px;
+}
+
+.fx-open {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.fx-name {
+  flex: none;
+  font-weight: 500;
+}
+
+.fx-summary {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--fg-dim);
+  font-size: 0.75rem;
+  text-align: right;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fx-row.on .fx-summary {
+  color: var(--fg);
+}
+
+.fx-chevron {
+  flex: none;
+  color: var(--fg-dim);
+  transition: transform 120ms ease;
+}
+
+.fx-row.open .fx-chevron {
+  transform: rotate(90deg);
+}
+
+.fx-body {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  padding: 2px 9px 10px;
+}
+
+.fx-hint {
+  margin: 0;
+  color: var(--fg-dim);
+  font-size: 0.72rem;
+  line-height: 1.35;
+}
+
+.fx-slider {
+  display: grid;
+  grid-template-columns: 52px 1fr 84px;
+  align-items: center;
+  gap: 8px;
+}
+
+.fx-slider input[type='range'] {
+  width: 100%;
+}
+
+.fx-sublabel {
+  color: var(--fg-dim);
+  font-size: 0.75rem;
+}
+
+.fx-value {
+  font-size: 0.75rem;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  white-space: nowrap;
+}
+
+.fx-textarea {
+  width: 100%;
+  min-height: 46px;
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--sunken);
+  color: var(--fg);
+  font: inherit;
+  resize: vertical;
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+.fx-textarea:focus {
+  border-color: var(--accent-glow);
+  outline: none;
+}
+
+.fx-line {
+  display: flex;
+  gap: 18px;
+  align-items: flex-end;
+}
+
+.fx-labelled {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+/* The same nine places drawtext can be told to put the text. */
+.fx-anchors {
+  display: grid;
+  grid-template-columns: repeat(3, 17px);
+  grid-template-rows: repeat(3, 17px);
+  gap: 3px;
+}
+
+.fx-anchor {
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--sunken);
+  cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease;
+}
+
+.fx-anchor:hover:not(.active) {
+  background: var(--hover);
+}
+
+.fx-anchor.active {
+  background: rgba(74, 144, 164, 0.55);
+  border-color: var(--accent-glow);
+}
+
+.fx-color {
+  width: 46px;
+  height: 26px;
+  padding: 2px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--sunken);
+  cursor: pointer;
+}
+
+.fx-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--fg-dim);
+  cursor: pointer;
+}
+
+.fx-check input {
+  margin: 0;
+  accent-color: var(--accent);
+}
+
+.fx-badge {
+  min-width: 17px;
+  height: 17px;
+  padding: 0 4px;
+  border-radius: 999px;
+  background: var(--accent-glow);
+  color: #06131c;
+  font-size: 0.68rem;
+  font-weight: 700;
+  line-height: 17px;
+  text-align: center;
+}
+
+/* --- what the effects look like on the frame --- */
+
+/* Positioned onto the exported region by overlay.ts, so a crop takes its overlays with it. */
+#fx-overlay {
+  position: absolute;
+  overflow: hidden;
+  pointer-events: none;
+  z-index: 1;
+}
+
+#fx-overlay > div {
+  position: absolute;
+  inset: 0;
+}
+
+#fx-text {
+  display: flex;
+}
+
+#fx-text-span {
+  /* drawtext neither wraps nor reflows, and lets a long line run off the frame; `pre` inside
+     an overflow-hidden box is the same behaviour. */
+  white-space: pre;
+  line-height: 1.15;
+}
+
+#fx-fade {
+  background: #000;
+  opacity: 0;
 }
 
 /* --------------------------------------------------------------- controls */

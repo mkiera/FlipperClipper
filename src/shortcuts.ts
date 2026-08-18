@@ -6,6 +6,7 @@ import {
   toggleReverse,
 } from './controls';
 import { cancelCrop, confirmCrop, enterCrop, isCropping } from './crop';
+import { closeEffectsPanel, toggleEffectsPanel } from './effectspanel';
 import { currentTime, pause, seek, stepFrames, stepSeconds, togglePlay } from './player';
 import { edit, patchEdit } from './state';
 
@@ -125,6 +126,12 @@ function handleKey(e: KeyboardEvent, deps: ShortcutDeps): void {
       if (edit.media?.hasAudio && !edit.mute) toggleNormalize();
       break;
 
+    case 'f':
+    case 'F':
+      e.preventDefault();
+      toggleEffectsPanel();
+      break;
+
     case 'c':
     case 'C':
       e.preventDefault();
@@ -143,6 +150,7 @@ function escape(): void {
     return;
   }
   if (closeExportPopover()) return;
+  if (closeEffectsPanel()) return;
   dismissToast();
 }
 

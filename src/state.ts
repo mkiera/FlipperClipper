@@ -1,6 +1,7 @@
 // Playhead position is deliberately not here: it changes every presented frame and would
 // re-render the control row with it. player.ts owns it.
 
+import { defaultEffects } from './effects';
 import { forgetLoudness } from './loudness';
 import {
   AUDIO_FORMATS,
@@ -16,6 +17,7 @@ import {
 
 export interface UiState {
   ffmpegAvailable: boolean;
+  effectsOpen: boolean;
   playing: boolean;
   cropping: boolean;
   exporting: boolean;
@@ -57,10 +59,12 @@ export const edit: EditState = {
   outputHeight: settings.defaultOutputHeight,
   videoKbps: null,
   lossless: false,
+  effects: defaultEffects(),
 };
 
 export const ui: UiState = {
   ffmpegAvailable: true,
+  effectsOpen: false,
   playing: false,
   cropping: false,
   exporting: false,
@@ -147,6 +151,8 @@ export function loadMedia(media: MediaInfo, src: string): void {
     outputHeight: seedOutputHeight(media),
     videoKbps: null,
     lossless: false,
+    // A new clip starts clean, the same as speed, crop and volume do.
+    effects: defaultEffects(),
   } satisfies Partial<EditState>);
   Object.assign(ui, {
     playing: false,

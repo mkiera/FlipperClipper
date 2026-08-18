@@ -15,6 +15,8 @@ import {
 import { edit, patchEdit, patchUi, refresh, rememberQuality, rememberTargetMb, settings, subscribe, ui } from './state';
 import { currentTime, onTime, togglePlay } from './player';
 import { toggleCrop } from './crop';
+import { enabledIds, toEffectsJob } from './effects';
+import { toggleEffectsPanel } from './effectspanel';
 import { ensureMeasured } from './loudness';
 import {
   AUDIO_FORMATS,
@@ -75,6 +77,8 @@ let speedSlider!: HTMLInputElement;
 let speedInput!: HTMLInputElement;
 let reverseBtn!: HTMLButtonElement;
 let cropBtn!: HTMLButtonElement;
+let effectsBtn!: HTMLButtonElement;
+let effectsBadge!: HTMLElement;
 let muteBtn!: HTMLButtonElement;
 let normalizeBtn!: HTMLButtonElement;
 let volumeGroup!: HTMLElement;
@@ -124,6 +128,8 @@ export function initControls(controlsDeps: ControlsDeps): void {
   speedInput = el<HTMLInputElement>('speed-input');
   reverseBtn = el<HTMLButtonElement>('reverse-btn');
   cropBtn = el<HTMLButtonElement>('crop-btn');
+  effectsBtn = el<HTMLButtonElement>('effects-btn');
+  effectsBadge = el('effects-badge');
   muteBtn = el<HTMLButtonElement>('mute-btn');
   normalizeBtn = el<HTMLButtonElement>('normalize-btn');
   volumeGroup = el('volume-group');
@@ -154,6 +160,7 @@ export function initControls(controlsDeps: ControlsDeps): void {
   openBtn.addEventListener('click', () => deps.openFile());
   playBtn.addEventListener('click', togglePlay);
   cropBtn.addEventListener('click', toggleCrop);
+  effectsBtn.addEventListener('click', toggleEffectsPanel);
   muteBtn.addEventListener('click', () => patchEdit({ mute: !edit.mute }));
   reverseBtn.addEventListener('click', toggleReverse);
   normalizeBtn.addEventListener('click', toggleNormalize);
@@ -352,6 +359,13 @@ function render(): void {
   cropBtn.disabled = !hasMedia;
   cropBtn.classList.toggle('active', ui.cropping || edit.crop !== null);
 
+  const effectCount = enabledIds(edit.effects).length;
+  effectsBtn.disabled = !hasMedia;
+  effectsBtn.classList.toggle('active', ui.effectsOpen || effectCount > 0);
+  // The badge is the answer to "what is on this clip" from outside the tab.
+  effectsBadge.hidden = effectCount === 0;
+  effectsBadge.textContent = String(effectCount);
+
   muteBtn.hidden = hasMedia && !hasAudio;
   muteBtn.disabled = !hasMedia || edit.audioOnly;
   muteBtn.classList.toggle('is-muted', edit.mute);
@@ -460,6 +474,9 @@ function estimateSignature(): string {
     edit.outputHeight,
     edit.videoKbps,
     edit.lossless,
+    // Not because an effect changes the projected size - none of them are modelled - but
+    // because switching one on takes the lossless stream copy away, which does.
+    enabledIds(edit.effects).join('+'),
   ].join('|');
 }
 
@@ -546,6 +563,7 @@ function buildJob(input: string, output: string): ExportJob {
     outputHeight: edit.audioOnly ? null : edit.outputHeight,
     videoKbps: edit.audioOnly || edit.quality === 'fit' ? null : edit.videoKbps,
     lossless: edit.lossless && losslessEligible(edit),
+    effects: toEffectsJob(edit.effects, edit.audioOnly),
   };
 }
 

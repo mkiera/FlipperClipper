@@ -61,6 +61,65 @@ export interface Loudness {
   gain: number;
 }
 
+/** Where a text overlay sits: a 3x3 grid rather than free coordinates, so it stays put
+ *  whatever the frame is. */
+export type TextAnchorX = 'left' | 'center' | 'right';
+export type TextAnchorY = 'top' | 'middle' | 'bottom';
+
+export interface TextOverlay {
+  text: string;
+  /** Fraction of the frame height, so the same setting reads the same at 1080p and 480p. */
+  size: number;
+  /** '#rrggbb'. */
+  color: string;
+  /** 0 - 1. */
+  opacity: number;
+  anchorX: TextAnchorX;
+  anchorY: TextAnchorY;
+  /** A dark plate behind the text, for footage it would otherwise disappear into. */
+  boxed: boolean;
+}
+
+/** What the export applies. Null is off: a switched-off effect keeps its dial in
+ *  EffectsState, and nothing here remembers it. */
+export interface EffectsJob {
+  /** Gaussian sigma, in source pixels. */
+  blur: number | null;
+  /** Linear multipliers; 1 is unchanged. */
+  brightness: number | null;
+  contrast: number | null;
+  saturation: number | null;
+  /** Degrees, -180 to 180. */
+  hue: number | null;
+  /** 0 - 1. */
+  vignette: number | null;
+  /** Seconds, measured on the exported timeline - after the trim and the speed change. */
+  fadeIn: number | null;
+  fadeOut: number | null;
+  text: TextOverlay | null;
+}
+
+/** The dials themselves, kept whether or not the effect is switched on. */
+export interface EffectSettings {
+  blur: { sigma: number };
+  brightness: { amount: number };
+  contrast: { amount: number };
+  saturation: { amount: number };
+  hue: { degrees: number };
+  vignette: { amount: number };
+  fade: { inSeconds: number; outSeconds: number };
+  text: TextOverlay;
+}
+
+export type EffectId = keyof EffectSettings;
+
+/** Switches live apart from settings, which is the whole point: turning an effect off has to
+ *  leave its dials where the user put them. */
+export interface EffectsState {
+  on: Record<EffectId, boolean>;
+  settings: EffectSettings;
+}
+
 export interface ExportJob {
   input: string;
   output: string;
@@ -82,6 +141,7 @@ export interface ExportJob {
   outputHeight: number | null;
   videoKbps: number | null;
   lossless: boolean;
+  effects: EffectsJob;
 }
 
 export interface EditState {
@@ -106,6 +166,7 @@ export interface EditState {
   /** null = automatic, i.e. the quality preset sets the rate. */
   videoKbps: number | null;
   lossless: boolean;
+  effects: EffectsState;
 }
 
 export interface FfmpegStatus {
@@ -230,9 +291,15 @@ export function scalesDown(state: EditState): boolean {
   return state.outputHeight !== null && edge !== null && state.outputHeight < edge;
 }
 
+/** True when nothing in the effects tab is switched on. */
+export function anyEffectOn(effects: EffectsState): boolean {
+  return Object.values(effects.on).some(Boolean);
+}
+
 export function isTrimOnly(state: EditState): boolean {
   return (
     state.speed === 1 &&
+    !anyEffectOn(state.effects) &&
     state.crop === null &&
     !state.mute &&
     !state.reverse &&

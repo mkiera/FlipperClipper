@@ -126,6 +126,37 @@ function syncVisibility(): void {
   drawMark();
 }
 
+/** Where the effect overlays have to sit, in the coordinate space of `host`. */
+export interface FrameGeometry {
+  /** The display rectangle of what an export would contain: the crop when one is set, the
+   *  whole letterboxed frame otherwise. drawtext and vignette both run on that region. */
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+  /** Display pixels per source pixel, for the one setting measured in source pixels: blur.
+   *  The horizontal scale, since a blur is a single radius and anamorphic footage has two. */
+  scale: number;
+}
+
+/** Null while there is no media, or before the element has been laid out. */
+export function frameGeometry(host: HTMLElement): FrameGeometry | null {
+  const box = contentBox(host);
+  if (!box) return null;
+
+  const crop = edit.crop;
+  if (!crop) {
+    return { left: box.left, top: box.top, width: box.width, height: box.height, scale: box.scaleX };
+  }
+  return {
+    left: box.left + crop.x * box.scaleX,
+    top: box.top + crop.y * box.scaleY,
+    width: crop.w * box.scaleX,
+    height: crop.h * box.scaleY,
+    scale: box.scaleX,
+  };
+}
+
 function buildMark(): void {
   const stage = layer.parentElement;
   if (!stage) throw new Error('FlipperClipper: #crop-layer has no stage to sit in');
