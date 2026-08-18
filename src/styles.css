@@ -911,6 +911,11 @@ select option:disabled {
   background: #192635;
 }
 
+/* tauri.conf.json's minWidth is sized to this row: 1710px is the narrowest it fits on one
+   line in its widest state - a clip open, a manual bitrate, a size estimate showing and an
+   export running - measured, with 30px of slack. Adding a control here, or widening one,
+   pushes that number up and the row starts wrapping again at the minimum size. */
+
 .spacer {
   flex: 1;
   min-width: 4px;
@@ -939,13 +944,6 @@ select option:disabled {
 
 #mute-btn.is-muted .i-muted {
   display: block;
-}
-
-/* The labels are the first thing to go near the 800px minimum; the icons stay unambiguous. */
-@media (max-width: 900px) {
-  .btn-label {
-    display: none;
-  }
 }
 
 .estimate {
