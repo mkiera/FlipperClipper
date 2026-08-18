@@ -81,6 +81,12 @@ function boot(): void {
   void showBuildIdentity();
 
   initUpdater();
+
+  // Development only, and dynamically imported so the branch - and the module with it - is
+  // gone from a production bundle rather than merely unreachable in one.
+  if (import.meta.env.DEV) {
+    void import('./devsize').then((mod) => mod.initSizeReadout());
+  }
 }
 
 function renderStage(): void {
