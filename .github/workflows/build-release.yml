@@ -41,7 +41,7 @@ jobs:
         run: |
           VERSION=${GITHUB_REF#refs/tags/v}
           echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
-          echo "RELEASE_NAME=FlipperClipper v$VERSION" >> $GITHUB_OUTPUT
+          echo "RELEASE_NAME=v$VERSION" >> $GITHUB_OUTPUT
           if [[ "$VERSION" == *"-"* ]]; then
             echo "IS_PRERELEASE=true" >> $GITHUB_OUTPUT
           else
@@ -99,8 +99,6 @@ jobs:
         with:
           name: ${{ steps.version.outputs.RELEASE_NAME }}
           body: |
-            ## ${{ steps.version.outputs.RELEASE_NAME }}
-
             Trim, crop, speed up, slow down, reverse or re-volume a clip, then
             export it as a video, a GIF, or just the audio — for when a clip
             needs one quick edit before it goes to someone.
