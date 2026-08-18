@@ -1,4 +1,6 @@
-import { edit, patchUi, subscribe } from './state';
+import { edit, patchUi, refresh, subscribe } from './state';
+import { applyGain, enableBoost } from './audio';
+import { normalizeGain } from './loudness';
 
 const PREVIEW_TIMEOUT_MS = 4000;
 
@@ -314,9 +316,17 @@ function syncFromState(): void {
   const rate = previewRate();
   if (video.playbackRate !== rate) video.playbackRate = rate;
   if (video.muted !== edit.mute) video.muted = edit.mute;
-  // The element caps volume at 1, so the boosted half of the range previews at unity.
-  const previewGain = Math.min(edit.volume, 1);
-  if (video.volume !== previewGain) video.volume = previewGain;
+  // Normalise first, then the slider trims from there - the same order the export emits.
+  const wanted = edit.volume * (edit.normalize ? normalizeGain() : 1);
+  // Only a boost needs the graph, so a session that never asks for one never attaches it.
+  // Attaching lands after this render, so the one call that succeeds asks for another - and
+  // only that call, or re-rendering would chase itself.
+  if (wanted > 1 && edit.src) {
+    void enableBoost(video, edit.src).then((attached) => {
+      if (attached) refresh();
+    });
+  }
+  applyGain(video, wanted);
 
   if (!edit.media) {
     stopReverse();

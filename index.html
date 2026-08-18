@@ -95,11 +95,11 @@
           <svg class="i-muted" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 2 4.5 5H2v6h2.5L8 14zM10.6 6.2 12 7.6l1.4-1.4 1 1L13 8.6l1.4 1.4-1 1L12 9.6l-1.4 1.4-1-1L11 8.6 9.6 7.2z" /></svg>
         </button>
 
-        <button id="normalize-btn" class="icon-btn" type="button" title="Normalize loudness (N). Finds the gain from the audio itself and applies it to the exported clip; the preview is unchanged." aria-label="Normalize loudness">
+        <button id="normalize-btn" class="icon-btn" type="button" title="Normalize loudness (N). Finds the gain from the audio itself, so a quiet clip comes up to a normal level. The preview follows it." aria-label="Normalize loudness">
           <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M1 7h2v2H1zm3-3h2v8H4zm3-3h2v14H7zm3 4h2v6h-2zm3 3h2v2h-2z" /></svg>
         </button>
 
-        <div class="slider-group" id="volume-group" title="Volume. Above 100% the boost applies to the exported clip; the preview tops out at 100%. After normalizing, a trim past about 120% spends the headroom and starts clipping peaks.">
+        <div class="slider-group" id="volume-group" title="Volume. Above 100% boosts the clip, in the preview as well as the export. After normalizing, a trim past about 120% spends the headroom and starts clipping peaks.">
           <input id="volume-slider" type="range" min="0" max="200" step="1" value="100" list="volume-notches" aria-label="Volume" />
           <datalist id="volume-notches">
             <option value="100" label="100%"></option>

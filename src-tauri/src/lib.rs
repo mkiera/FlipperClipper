@@ -57,6 +57,7 @@ pub fn run() {
             sysutil::ffmpeg_check_log,
             ffmpeg_install::install_ffmpeg,
             sysutil::probe,
+            sysutil::measure_loudness,
             sysutil::make_filmstrip,
             sysutil::make_preview_proxy,
             sysutil::copy_file_to_clipboard,

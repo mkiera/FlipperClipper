@@ -279,6 +279,71 @@ fn last_meaningful_line(text: &str) -> Option<String> {
         .map(|line| line.to_string())
 }
 
+/// What loudnorm's analysis pass says about a file, so the preview can approximate with a
+/// single gain what the export does with the real filter.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Loudness {
+    /// Integrated loudness, LUFS.
+    pub integrated: f64,
+    /// True peak, dBTP. What is left of it once the gain is applied is the clipping headroom.
+    pub true_peak: f64,
+    /// The gain that would take this file to the target, as a linear multiplier.
+    pub gain: f64,
+}
+
+/// Measures the whole file rather than the trim: it is one pass either way, and the difference
+/// a trim makes is a fraction of a LU, which is under what anyone can hear on a preview.
+#[tauri::command(async)]
+pub fn measure_loudness(path: String) -> Result<Loudness, String> {
+    let output = ffmpeg::hidden_command("ffmpeg")
+        .args(["-hide_banner", "-nostats", "-i"])
+        .arg(&path)
+        .args([
+            "-af",
+            &format!("{}:print_format=json", ffmpeg::LOUDNORM),
+            "-f",
+            "null",
+            "-",
+        ])
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|_| "FFmpeg could not be started to measure the audio.".to_string())?;
+
+    // loudnorm prints its analysis to stderr, after everything else ffmpeg has to say.
+    parse_loudness(&String::from_utf8_lossy(&output.stderr))
+}
+
+fn parse_loudness(text: &str) -> Result<Loudness, String> {
+    let start = text
+        .rfind('{')
+        .ok_or_else(|| "The audio measurement printed nothing to read.".to_string())?;
+    let end = text[start..]
+        .find('}')
+        .ok_or_else(|| "The audio measurement was cut short.".to_string())?;
+    let value: serde_json::Value = serde_json::from_str(&text[start..=start + end])
+        .map_err(|_| "The audio measurement could not be read.".to_string())?;
+
+    // Every number in that block is a JSON string, and a silent track reports -inf.
+    let number = |key: &str| -> Option<f64> {
+        value
+            .get(key)
+            .and_then(|v| v.as_str())
+            .and_then(|s| s.trim().parse::<f64>().ok())
+            .filter(|n| n.is_finite())
+    };
+
+    let integrated =
+        number("input_i").ok_or_else(|| "That clip has no measurable loudness.".to_string())?;
+    let true_peak = number("input_tp").unwrap_or(0.0);
+    let gain = 10f64.powf((ffmpeg::LOUDNORM_TARGET_LUFS - integrated) / 20.0);
+    Ok(Loudness {
+        integrated,
+        true_peak,
+        gain,
+    })
+}
+
 #[tauri::command(async)]
 pub fn probe(app: AppHandle, path: String) -> Result<MediaInfo, String> {
     let info = probe_media(&path)?;
@@ -537,6 +602,37 @@ fn base64_encode(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn the_loudness_block_is_read_from_the_tail_of_ffmpeg_stderr() {
+        // Exactly what ffmpeg 9.0 printed for the integration fixture, surrounding noise and all.
+        let text = "  handler_name : SoundHandler
+[Parsed_loudnorm_0 @ 0001] 
+{
+	\"input_i\" : \"-21.75\",
+	\"input_tp\" : \"-14.46\",
+	\"input_lra\" : \"0.00\",
+	\"normalization_type\" : \"dynamic\"
+}
+frame=  600 fps=0.0
+";
+        let m = parse_loudness(text).expect("the block parses");
+        assert!((m.integrated - -21.75).abs() < 1e-9);
+        assert!((m.true_peak - -14.46).abs() < 1e-9);
+        // -16 - -21.75 = 5.75 dB of gain, which is 1.9387x.
+        assert!((m.gain - 1.9387).abs() < 0.0001, "{}", m.gain);
+    }
+
+    #[test]
+    fn a_track_with_no_measurable_loudness_is_refused_rather_than_guessed() {
+        // Silence reports -inf, which would otherwise become an infinite gain.
+        let text = "{
+	\"input_i\" : \"-inf\",
+	\"input_tp\" : \"-inf\"
+}";
+        assert!(parse_loudness(text).is_err());
+        assert!(parse_loudness("no json here").is_err());
+    }
     use super::*;
     use std::time::Duration;
 

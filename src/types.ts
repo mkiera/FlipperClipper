@@ -51,6 +51,16 @@ export const VOLUME_MAX = 10;
 export const VIDEO_KBPS_MIN = 50;
 export const VIDEO_KBPS_MAX = 200_000;
 
+/** What loudnorm's analysis pass measured, and the gain it implies. */
+export interface Loudness {
+  /** Integrated loudness, LUFS. */
+  integrated: number;
+  /** True peak, dBTP. What is left of it after the gain is the clipping headroom. */
+  truePeak: number;
+  /** Linear multiplier that would reach the target. */
+  gain: number;
+}
+
 export interface ExportJob {
   input: string;
   output: string;

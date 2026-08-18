@@ -177,7 +177,11 @@ pub fn atempo_chain(speed: f64) -> Vec<String> {
 /// TP=-1.5 is a true-peak ceiling, so the gain it works out cannot clip however quiet the
 /// source was. That holds only as far as the filter: `volume` rides after it, and 1.5 dB of
 /// headroom is spent at a trim of about 119%.
-const LOUDNORM: &str = "loudnorm=I=-16:TP=-1.5:LRA=11";
+pub(crate) const LOUDNORM: &str = "loudnorm=I=-16:TP=-1.5:LRA=11";
+
+/// The level LOUDNORM aims at, in LUFS. The preview turns the gap between this and a file's
+/// measured loudness into one fixed gain.
+pub(crate) const LOUDNORM_TARGET_LUFS: f64 = -16.0;
 
 /// areverse has to buffer the entire stream before it can emit a sample, so it sits last,
 /// where a sped-up export hands it the shortened stream. volume is omitted at 1.0 for the

@@ -12,18 +12,10 @@ import {
   revealInExplorer,
   startExport,
 } from './ipc';
-import {
-  edit,
-  patchEdit,
-  patchUi,
-  rememberQuality,
-  rememberTargetMb,
-  settings,
-  subscribe,
-  ui,
-} from './state';
+import { edit, patchEdit, patchUi, refresh, rememberQuality, rememberTargetMb, settings, subscribe, ui } from './state';
 import { currentTime, onTime, togglePlay } from './player';
 import { toggleCrop } from './crop';
+import { ensureMeasured } from './loudness';
 import {
   AUDIO_FORMATS,
   OUTPUT_HEIGHTS,
@@ -272,7 +264,11 @@ export function initControls(controlsDeps: ControlsDeps): void {
 
 /** Exported because N in shortcuts.ts toggles it too. */
 export function toggleNormalize(): void {
-  patchEdit({ normalize: !edit.normalize });
+  const normalize = !edit.normalize;
+  patchEdit({ normalize });
+  // The gain is not known until the file has been measured, so the preview reaches its real
+  // level a moment after the button lights up.
+  if (normalize && edit.media) void ensureMeasured(edit.media.path, refresh);
 }
 
 export function toggleReverse(): void {

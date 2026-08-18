@@ -1,6 +1,7 @@
 // Playhead position is deliberately not here: it changes every presented frame and would
 // re-render the control row with it. player.ts owns it.
 
+import { forgetLoudness } from './loudness';
 import {
   AUDIO_FORMATS,
   DEFAULT_SETTINGS,
@@ -119,6 +120,7 @@ function dropFilmstrip(): void {
 // A new file starts from the saved settings, except where the user changed quality or fit
 // size by hand this session.
 export function loadMedia(media: MediaInfo, src: string): void {
+  forgetLoudness();
   let format: ExportFormat =
     settings.defaultFormat === 'source' ? defaultFormatFor(media.path) : settings.defaultFormat;
   let audioOnly = (AUDIO_FORMATS as string[]).includes(format);

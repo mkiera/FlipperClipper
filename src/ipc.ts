@@ -13,6 +13,7 @@ import {
   type ExportJob,
   type ExportProgress,
   type FfmpegStatus,
+  type Loudness,
   type MediaInfo,
   type ReleaseInfo,
   type UpdateChannel,
@@ -43,6 +44,11 @@ export function ffmpegStatus(): Promise<FfmpegStatus> {
 
 export function ffmpegCheckLog(): Promise<string | null> {
   return invoke<string | null>('ffmpeg_check_log');
+}
+
+/** loudnorm's analysis pass, so the preview can stand in for the filter with one gain. */
+export function measureLoudness(path: string): Promise<Loudness> {
+  return invoke<Loudness>('measure_loudness', { path });
 }
 
 /** Also adds the path to the asset-protocol scope; assetUrl() 403s without it. */
