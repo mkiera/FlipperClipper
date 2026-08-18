@@ -306,12 +306,13 @@ fn validate(job: &ExportJob) -> Result<(), String> {
     // A job arrives over IPC, so the UI greying these combinations out is not a guarantee.
     if job.lossless
         && (job.reverse
+            || job.normalize
             || job.volume != 1.0
             || is_audio_format(&job.format)
             || matches!(job.format, ExportFormat::Gif))
     {
         return Err(
-            "A lossless export copies the video as it is, so it cannot reverse, change the volume, or change to an audio or GIF format.".to_string(),
+            "A lossless export copies the video as it is, so it cannot reverse, change or normalise the volume, or change to an audio or GIF format.".to_string(),
         );
     }
     if !Path::new(&job.input).is_file() {
@@ -503,6 +504,7 @@ mod tests {
             crop: None,
             mute: false,
             reverse: false,
+            normalize: false,
             volume: 1.0,
             format: ExportFormat::Mp4,
             quality: QualityPreset::Balanced,

@@ -61,6 +61,8 @@ export interface ExportJob {
   crop: Rect | null;
   mute: boolean;
   reverse: boolean;
+  /** EBU R128 loudness normalisation. Owns the gain, so volume is ignored while it is on. */
+  normalize: boolean;
   /** 0 - 10. Above 1 is a boost the preview cannot show. */
   volume: number;
   format: ExportFormat;
@@ -82,6 +84,7 @@ export interface EditState {
   crop: Rect | null;
   mute: boolean;
   reverse: boolean;
+  normalize: boolean;
   /** 0 - 10, 1 = unchanged. */
   volume: number;
   format: ExportFormat;
@@ -223,6 +226,7 @@ export function isTrimOnly(state: EditState): boolean {
     state.crop === null &&
     !state.mute &&
     !state.reverse &&
+    !state.normalize &&
     state.volume === 1 &&
     !scalesDown(state) &&
     state.videoKbps === null

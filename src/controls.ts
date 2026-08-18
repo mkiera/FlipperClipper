@@ -84,6 +84,7 @@ let speedInput!: HTMLInputElement;
 let reverseBtn!: HTMLButtonElement;
 let cropBtn!: HTMLButtonElement;
 let muteBtn!: HTMLButtonElement;
+let normalizeBtn!: HTMLButtonElement;
 let volumeGroup!: HTMLElement;
 let volumeSlider!: HTMLInputElement;
 let volumeInput!: HTMLInputElement;
@@ -132,6 +133,7 @@ export function initControls(controlsDeps: ControlsDeps): void {
   reverseBtn = el<HTMLButtonElement>('reverse-btn');
   cropBtn = el<HTMLButtonElement>('crop-btn');
   muteBtn = el<HTMLButtonElement>('mute-btn');
+  normalizeBtn = el<HTMLButtonElement>('normalize-btn');
   volumeGroup = el('volume-group');
   volumeSlider = el<HTMLInputElement>('volume-slider');
   volumeInput = el<HTMLInputElement>('volume-input');
@@ -162,6 +164,7 @@ export function initControls(controlsDeps: ControlsDeps): void {
   cropBtn.addEventListener('click', toggleCrop);
   muteBtn.addEventListener('click', () => patchEdit({ mute: !edit.mute }));
   reverseBtn.addEventListener('click', toggleReverse);
+  normalizeBtn.addEventListener('click', toggleNormalize);
   audioOnlyBtn.addEventListener('click', toggleAudioOnly);
 
   speedSlider.addEventListener('input', () => {
@@ -267,6 +270,11 @@ export function initControls(controlsDeps: ControlsDeps): void {
   render();
 }
 
+/** Exported because N in shortcuts.ts toggles it too. */
+export function toggleNormalize(): void {
+  patchEdit({ normalize: !edit.normalize });
+}
+
 export function toggleReverse(): void {
   if (!edit.media) return;
   const reverse = !edit.reverse;
@@ -353,9 +361,16 @@ function render(): void {
   muteBtn.classList.toggle('is-muted', edit.mute);
   muteBtn.classList.toggle('active', edit.mute);
 
+  normalizeBtn.hidden = hasMedia && !hasAudio;
+  normalizeBtn.disabled = !hasMedia || edit.mute;
+  normalizeBtn.classList.toggle('active', edit.normalize);
+
   volumeGroup.hidden = hasMedia && !hasAudio;
-  volumeSlider.disabled = !hasMedia || edit.mute;
-  volumeInput.disabled = !hasMedia || edit.mute;
+  // Normalising works the gain out from the audio itself, so a multiplier on top of it would
+  // only undo the target it just hit.
+  const gainIsOwned = edit.mute || edit.normalize;
+  volumeSlider.disabled = !hasMedia || gainIsOwned;
+  volumeInput.disabled = !hasMedia || gainIsOwned;
   const volumePercent = Math.round(edit.volume * 100);
   // The slider covers 0..200; a typed boost above that pins it to the end while the real
   // value stands in the number input beside it.
@@ -528,6 +543,7 @@ function buildJob(input: string, output: string): ExportJob {
     crop: edit.crop,
     mute: edit.mute,
     reverse: edit.reverse,
+    normalize: edit.normalize,
     volume: edit.volume,
     format: edit.format,
     quality: edit.quality,

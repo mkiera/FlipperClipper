@@ -92,7 +92,9 @@ pub struct ExportJob {
     pub crop: Option<Rect>,
     pub mute: bool,
     pub reverse: bool,
-    /// Linear gain, 1.0 = unchanged. export.rs bounds it to [0.0, 2.0].
+    /// EBU R128 loudness normalisation, which owns the gain while it is on.
+    pub normalize: bool,
+    /// Linear gain, 1.0 = unchanged. export.rs bounds it to [0.0, 10.0].
     pub volume: f64,
     pub format: ExportFormat,
     pub quality: QualityPreset,
@@ -171,11 +173,19 @@ pub fn atempo_chain(speed: f64) -> Vec<String> {
     parts
 }
 
+/// One pass of EBU R128, at the target streaming services and chat clients settle around.
+/// TP=-1.5 is a true-peak ceiling, which is what makes this safe where a plain multiplier is
+/// not: whatever gain it works out can never clip, however quiet the source was.
+const LOUDNORM: &str = "loudnorm=I=-16:TP=-1.5:LRA=11";
+
 /// areverse has to buffer the entire stream before it can emit a sample, so it sits last,
 /// where a sped-up export hands it the shortened stream. volume is omitted at 1.0 for the
 /// same reason atempo is: a no-op filter still costs a resample pass.
 fn audio_filters(job: &ExportJob) -> Vec<String> {
     let mut parts = atempo_chain(job.speed);
+    if job.normalize {
+        parts.push(LOUDNORM.to_string());
+    }
     if (job.volume - 1.0).abs() > 1e-9 {
         parts.push(format!("volume={}", fmt_num(job.volume)));
     }
@@ -1337,6 +1347,7 @@ mod tests {
             crop: None,
             mute: false,
             reverse: false,
+            normalize: false,
             volume: 1.0,
             format: ExportFormat::Mp4,
             quality,
@@ -1384,13 +1395,14 @@ mod tests {
             "input": "a.mp4", "output": "b.m4a",
             "inPoint": 0.0, "outPoint": 2.0,
             "speed": 1.0, "crop": null, "mute": false,
-            "reverse": true, "volume": 1.5,
+            "reverse": true, "normalize": true, "volume": 1.5,
             "format": "m4a", "quality": "fit",
             "targetMb": 2.5, "lossless": false,
             "outputHeight": 720, "videoKbps": null
         }"#;
         let j: ExportJob = serde_json::from_str(json).unwrap();
         assert!(j.reverse);
+        assert!(j.normalize);
         assert_eq!(j.volume, 1.5);
         assert_eq!(j.format, ExportFormat::M4a);
         assert_eq!(j.quality, QualityPreset::Fit);
@@ -1626,6 +1638,44 @@ mod tests {
         j.volume = 0.5;
         let args = build_args(&j, "libx264", true, 1920, 1080, 30.0);
         assert_eq!(value_after(&args, "-af"), Some("volume=0.5"));
+    }
+
+    #[test]
+    fn normalising_replaces_the_manual_gain_and_sits_after_the_tempo_change() {
+        let mut j = job(QualityPreset::Balanced);
+        j.normalize = true;
+        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0);
+        assert_eq!(
+            value_after(&args, "-af"),
+            Some("loudnorm=I=-16:TP=-1.5:LRA=11")
+        );
+
+        // atempo first, so loudnorm measures the audio at the speed it will be heard at.
+        j.speed = 2.0;
+        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0);
+        assert_eq!(
+            value_after(&args, "-af"),
+            Some("atempo=2.0,loudnorm=I=-16:TP=-1.5:LRA=11")
+        );
+
+        // The UI disables the slider while this is on, but a job arriving over IPC can carry
+        // both, and the trim then applies after the target has been hit rather than fighting it.
+        j.speed = 1.0;
+        j.volume = 0.5;
+        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0);
+        assert_eq!(
+            value_after(&args, "-af"),
+            Some("loudnorm=I=-16:TP=-1.5:LRA=11,volume=0.5")
+        );
+    }
+
+    #[test]
+    fn normalising_a_muted_export_emits_nothing() {
+        let mut j = job(QualityPreset::Balanced);
+        j.normalize = true;
+        j.mute = true;
+        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0);
+        assert!(!has(&args, "-af"), "{args:?}");
     }
 
     #[test]

@@ -56,6 +56,21 @@ fn landscape() -> PathBuf {
 }
 
 /// No audio stream at all, so every audio flag has to sit out.
+/// The same picture as landscape(), with audio at a twentieth of full scale - the shape of a
+/// clip recorded with the mic gain far too low, which is what normalising is for.
+fn quiet() -> PathBuf {
+    ensure_fixture(
+        "quiet-1080p.mp4",
+        &[
+            "-f", "lavfi", "-i", "testsrc2=size=1920x1080:rate=30:duration=10",
+            "-f", "lavfi", "-i", "sine=frequency=440:duration=10",
+            "-af", "volume=0.05",
+            "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p",
+            "-c:a", "aac", "-b:a", "128k", "-shortest",
+        ],
+    )
+}
+
 fn silent() -> PathBuf {
     ensure_fixture(
         "silent-720p.mp4",
@@ -126,6 +141,25 @@ fn dimensions_of(path: &Path) -> (i64, i64) {
         parts.next().and_then(|v| v.parse().ok()).unwrap_or(0),
         parts.next().and_then(|v| v.parse().ok()).unwrap_or(0),
     )
+}
+
+/// Mean level in dBFS, straight from ffmpeg's volumedetect. Negative; closer to zero is louder.
+fn mean_volume(path: &Path) -> f64 {
+    let out = Command::new("ffmpeg")
+        .args(["-hide_banner", "-nostats", "-i"])
+        .arg(path)
+        .args(["-af", "volumedetect", "-f", "null", "-"])
+        .output()
+        .expect("could not run ffmpeg");
+    // volumedetect reports on stderr, as everything that is not the file itself does.
+    let text = String::from_utf8_lossy(&out.stderr).into_owned();
+    text.lines()
+        .find_map(|line| {
+            let (_, rest) = line.split_once("mean_volume:")?;
+            rest.trim().trim_end_matches(" dB").trim().parse::<f64>().ok()
+        })
+        .unwrap_or_else(|| panic!("volumedetect printed no mean_volume:
+{text}"))
 }
 
 fn has_audio(path: &Path) -> bool {
@@ -207,6 +241,7 @@ fn job(input: &Path, name: &str) -> ExportJob {
         crop: None,
         mute: false,
         reverse: false,
+        normalize: false,
         volume: 1.0,
         format: ExportFormat::Mp4,
         quality: QualityPreset::Balanced,
@@ -306,6 +341,30 @@ fn reverse_actually_reverses_the_video() {
     // Reversal must rearrange time, not consume it.
     assert!((duration_of(&b) - 2.0).abs() < 0.3);
     assert!(has_audio(&b), "areverse dropped the audio track");
+}
+
+#[test]
+fn normalising_lifts_a_quiet_clip_toward_the_target() {
+    if ffmpeg_missing() {
+        return;
+    }
+    let src = quiet();
+    let before = mean_volume(&src);
+
+    let mut j = job(&src, "out-normalized.mp4");
+    j.out_point = 5.0;
+    j.normalize = true;
+    let out = run_export(&j, 1920, 1080, 30.0, true);
+
+    let after = mean_volume(&out);
+    assert!(has_audio(&out), "normalising lost the audio stream");
+    assert!(
+        after > before + 15.0,
+        "a clip at {before:.1} dBFS came out at {after:.1}, which is not normalised"
+    );
+    // loudnorm targets -16 LUFS with a true-peak ceiling, so the mean lands well under 0 and
+    // nothing is driven into the clip a plain multiplier would have caused.
+    assert!(after < -6.0, "{after:.1} dBFS is hotter than the target allows");
 }
 
 #[test]

@@ -1,4 +1,10 @@
-import { beginExport, closeExportPopover, dismissToast, toggleReverse } from './controls';
+import {
+  beginExport,
+  closeExportPopover,
+  dismissToast,
+  toggleNormalize,
+  toggleReverse,
+} from './controls';
 import { cancelCrop, confirmCrop, enterCrop, isCropping } from './crop';
 import { currentTime, pause, seek, stepFrames, stepSeconds, togglePlay } from './player';
 import { edit, patchEdit } from './state';
@@ -110,6 +116,13 @@ function handleKey(e: KeyboardEvent, deps: ShortcutDeps): void {
     case 'R':
       e.preventDefault();
       toggleReverse();
+      break;
+
+    case 'n':
+    case 'N':
+      e.preventDefault();
+      // The same guard the button carries: there is no loudness to normalise without audio.
+      if (edit.media?.hasAudio && !edit.mute) toggleNormalize();
       break;
 
     case 'c':
