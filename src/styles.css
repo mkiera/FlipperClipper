@@ -408,12 +408,14 @@ select option:disabled {
   overflow: hidden;
 }
 
+/* No background of its own: object-fit only centres the picture, so the element still covers
+   the whole stage, and an effect filter set on it would grade the letterbox bars along with
+   the frame. #stage paints the same colour behind it, outside the filter. */
 #video {
   width: 100%;
   height: 100%;
   object-fit: contain;
   display: block;
-  background: var(--stage);
   visibility: hidden;
 }
 
