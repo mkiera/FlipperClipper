@@ -81,6 +81,77 @@ pub enum QualityPreset {
     Fit,
 }
 
+/// The nine places a text overlay can sit. A grid rather than free coordinates: it is one
+/// click, and it stays where it was put whatever the frame's shape turns out to be.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TextAnchorX {
+    Left,
+    Center,
+    Right,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TextAnchorY {
+    Top,
+    Middle,
+    Bottom,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TextOverlay {
+    /// Taken exactly as typed. It never enters the filtergraph - see drawtext_filter.
+    pub text: String,
+    /// Fraction of the frame height, so one setting reads the same at 1080p and 480p.
+    pub size: f64,
+    /// '#rrggbb'.
+    pub color: String,
+    /// 0 - 1.
+    pub opacity: f64,
+    pub anchor_x: TextAnchorX,
+    pub anchor_y: TextAnchorY,
+    pub boxed: bool,
+}
+
+/// The quick-effects tab, resolved: None is off. Container-level `default` so a job built
+/// before this existed - or by anything that leaves the block out - deserialises to no effects
+/// rather than failing.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct Effects {
+    /// Gaussian sigma, in source pixels.
+    pub blur: Option<f64>,
+    /// Linear multipliers; 1 is unchanged.
+    pub brightness: Option<f64>,
+    pub contrast: Option<f64>,
+    pub saturation: Option<f64>,
+    /// Degrees.
+    pub hue: Option<f64>,
+    /// 0 - 1, scaled onto the lens angle vignette actually takes.
+    pub vignette: Option<f64>,
+    /// Seconds, on the exported timeline - after the trim and the speed change.
+    pub fade_in: Option<f64>,
+    pub fade_out: Option<f64>,
+    pub text: Option<TextOverlay>,
+}
+
+impl Effects {
+    /// Whether anything at all is switched on. A stream copy cannot apply any of it.
+    pub fn any(&self) -> bool {
+        self.blur.is_some()
+            || self.brightness.is_some()
+            || self.contrast.is_some()
+            || self.saturation.is_some()
+            || self.hue.is_some()
+            || self.vignette.is_some()
+            || self.fade_in.is_some()
+            || self.fade_out.is_some()
+            || self.text.is_some()
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExportJob {
@@ -107,6 +178,8 @@ pub struct ExportJob {
     pub output_height: Option<i64>,
     /// None lets the quality preset's CRF/CQ decide the rate.
     pub video_kbps: Option<i64>,
+    #[serde(default)]
+    pub effects: Effects,
 }
 
 /// Below this, H.264 stops holding detail and a fit-under-10-MB export turns into mush.
@@ -197,7 +270,164 @@ fn audio_filters(job: &ExportJob) -> Vec<String> {
     if job.reverse {
         parts.push("areverse".to_string());
     }
+    // After areverse, where "the start" finally means the start of what will be heard.
+    parts.extend(fade_filters(&job.effects, output_duration(job), false));
     parts
+}
+
+// --- Quick effects ---
+
+/// The strongest vignette the slider can ask for. `vignette` clips its angle at PI/2, which is
+/// a black frame with a bright dot in it; PI/2.5 is heavy but still a picture.
+const VIGNETTE_MAX_ANGLE: f64 = std::f64::consts::PI / 2.5;
+
+/// The gap drawtext leaves at an edge, as a fraction of frame height - height on both axes, so
+/// the margin looks square rather than stretching with a wide frame. overlay.ts places the
+/// preview with the same fraction.
+const TEXT_MARGIN: &str = "h*0.04";
+
+/// The plate's border around the text, same units.
+const TEXT_PLATE_BORDER: &str = "h*0.012";
+
+const TEXT_PLATE_COLOR: &str = "black@0.45";
+
+/// The file drawtext reads the overlay text from, named relative to ffmpeg's working
+/// directory. **export.rs writes this file and sets the child's cwd to the folder holding it,
+/// and the two have to stay in step**: a path in a filtergraph has to be quoted, and a quoted
+/// path cannot express an apostrophe - which a Windows user name is allowed to contain. A bare
+/// filename resolved from the cwd sidesteps the escaping rules entirely.
+pub const OVERLAY_TEXT_FILE: &str = "flipperclipper-overlay.txt";
+
+/// Everything that repaints the pixels, in the order the preview's CSS filter applies the same
+/// list. drawtext is not here: it goes in after the scale, so the text is rasterised at the
+/// size it will be read at instead of being downsampled with the frame.
+fn effect_filters(fx: &Effects) -> Vec<String> {
+    let mut parts: Vec<String> = Vec::new();
+
+    // A multiply across RGB, which is what CSS brightness() does, so the preview and the file
+    // agree. `eq`'s own brightness is an addition and would not. The cost is that ffmpeg
+    // inserts a conversion either side of it - paid only when the dial is switched on.
+    if let Some(k) = fx.brightness {
+        parts.push(format!(
+            "colorchannelmixer=rr={0}:gg={0}:bb={0}",
+            fmt_num(k)
+        ));
+    }
+
+    // Two dials, one filter, one pass.
+    let mut eq: Vec<String> = Vec::new();
+    if let Some(c) = fx.contrast {
+        eq.push(format!("contrast={}", fmt_num(c)));
+    }
+    if let Some(sat) = fx.saturation {
+        eq.push(format!("saturation={}", fmt_num(sat)));
+    }
+    if !eq.is_empty() {
+        parts.push(format!("eq={}", eq.join(":")));
+    }
+
+    if let Some(degrees) = fx.hue {
+        parts.push(format!("hue=h={}", fmt_num(degrees)));
+    }
+    if let Some(sigma) = fx.blur {
+        parts.push(format!("gblur=sigma={}", fmt_num(sigma)));
+    }
+    if let Some(strength) = fx.vignette {
+        parts.push(format!(
+            "vignette=angle={}",
+            fmt_num(strength * VIGNETTE_MAX_ANGLE)
+        ));
+    }
+    parts
+}
+
+/// Fades are timed on the finished clip, so they are emitted after reverse - the last filter
+/// that changes what "the start" means. Empty on a clip with no duration to fade across.
+fn fade_filters(fx: &Effects, total: f64, video: bool) -> Vec<String> {
+    let mut parts: Vec<String> = Vec::new();
+    if !total.is_finite() || total <= 0.0 {
+        return parts;
+    }
+    let name = if video { "fade" } else { "afade" };
+
+    if let Some(seconds) = fx.fade_in.filter(|s| *s > 0.0) {
+        parts.push(format!(
+            "{}=t=in:st=0:d={}",
+            name,
+            fmt_time(seconds.min(total))
+        ));
+    }
+    if let Some(seconds) = fx.fade_out.filter(|s| *s > 0.0) {
+        let duration = seconds.min(total);
+        parts.push(format!(
+            "{}=t=out:st={}:d={}",
+            name,
+            fmt_time((total - duration).max(0.0)),
+            fmt_time(duration)
+        ));
+    }
+    parts
+}
+
+/// The text overlay. `font` is an absolute path and does go into the graph, quoted with its
+/// drive colon escaped - the Windows font directory is a system path, so it carries none of
+/// the characters that form cannot express. The text itself never appears here at all: it is
+/// read from OVERLAY_TEXT_FILE, and `expansion=none` stops ffmpeg reading `%{...}` or
+/// backslashes inside it, so a colon, a quote or a percent sign in the user's words is drawn
+/// rather than parsed.
+fn drawtext_filter(overlay: &TextOverlay, font: &Path) -> String {
+    let x = match overlay.anchor_x {
+        TextAnchorX::Left => format!("x={}", TEXT_MARGIN),
+        TextAnchorX::Center => "x=(w-text_w)/2".to_string(),
+        TextAnchorX::Right => format!("x=w-text_w-{}", TEXT_MARGIN),
+    };
+    let y = match overlay.anchor_y {
+        TextAnchorY::Top => format!("y={}", TEXT_MARGIN),
+        TextAnchorY::Middle => "y=(h-text_h)/2".to_string(),
+        TextAnchorY::Bottom => format!("y=h-text_h-{}", TEXT_MARGIN),
+    };
+
+    let mut parts = vec![
+        format!("fontfile={}", graph_path(font)),
+        format!("textfile={}", OVERLAY_TEXT_FILE),
+        "expansion=none".to_string(),
+        // Both are expressions against the frame, so neither needs the output size worked out.
+        format!("fontsize=h*{}", fmt_num(overlay.size)),
+        format!(
+            "fontcolor={}@{}",
+            ffmpeg_color(&overlay.color),
+            fmt_num(overlay.opacity)
+        ),
+        x,
+        y,
+    ];
+    if overlay.boxed {
+        parts.push("box=1".to_string());
+        parts.push(format!("boxcolor={}", TEXT_PLATE_COLOR));
+        parts.push(format!("boxborderw={}", TEXT_PLATE_BORDER));
+    }
+    format!("drawtext={}", parts.join(":"))
+}
+
+/// A path for a filtergraph: quoted, forward slashes, drive colon escaped. Measured against
+/// ffmpeg 9 - unquoted, a backslash does not escape the colon and the parser reads everything
+/// after the drive letter as the next option.
+fn graph_path(path: &Path) -> String {
+    format!(
+        "'{}'",
+        path.to_string_lossy().replace('\\', "/").replace(':', "\\:")
+    )
+}
+
+/// ffmpeg wants 0xRRGGBB; the colour input hands over '#rrggbb'. Anything unreadable becomes
+/// white, which is what the overlay would have defaulted to anyway.
+fn ffmpeg_color(hex: &str) -> String {
+    let body = hex.strip_prefix('#').unwrap_or(hex);
+    if body.len() == 6 && body.chars().all(|c| c.is_ascii_hexdigit()) {
+        format!("0x{}", body.to_ascii_lowercase())
+    } else {
+        "0xffffff".to_string()
+    }
 }
 
 /// Chroma is subsampled 2x2, so an odd width, height or offset makes libx264 refuse the
@@ -550,7 +780,9 @@ fn push_audio_codec(args: &mut Vec<String>, job: &ExportJob) {
 
 /// `width`, `height` and `fps` are the display-orientation source dimensions from `probe`.
 /// The crop clamp and the auto-downscale both depend on them, and neither belongs in
-/// ExportJob - they describe the file, not the edit.
+/// ExportJob - they describe the file, not the edit. `font` is the same kind of fact: which
+/// font file this machine has. Without one the text overlay is left out rather than guessed
+/// at; export.rs refuses the job before it gets here.
 pub fn build_args(
     job: &ExportJob,
     encoder: &str,
@@ -558,6 +790,7 @@ pub fn build_args(
     width: i64,
     height: i64,
     fps: f64,
+    font: Option<&Path>,
 ) -> Vec<String> {
     let mut args: Vec<String> = Vec::new();
     let keep_audio = has_audio && !job.mute;
@@ -640,9 +873,16 @@ pub fn build_args(
         if (job.speed - 1.0).abs() > 1e-9 {
             chain.push(format!("setpts=PTS/{}", fmt_num(job.speed)));
         }
+        // The gif branch owns its own scale, so the effects and the text both go in ahead of
+        // it - the same relative order as the video branch, minus the split.
+        chain.extend(effect_filters(&job.effects));
+        if let (Some(overlay), Some(font)) = (job.effects.text.as_ref(), font) {
+            chain.push(drawtext_filter(overlay, font));
+        }
         if job.reverse {
             chain.push("reverse".to_string());
         }
+        chain.extend(fade_filters(&job.effects, output_duration(job), true));
         chain.push(format!(
             "fps={},scale='min(iw,{})':-2:flags=lanczos,split[a][b];[a]palettegen=stats_mode=diff[p];[b][p]paletteuse=dither=bayer:bayer_scale=5",
             fps_cap, width_cap
@@ -695,14 +935,25 @@ pub fn build_args(
     if (job.speed - 1.0).abs() > 1e-9 {
         vfilters.push(format!("setpts=PTS/{}", fmt_num(job.speed)));
     }
+    // Ahead of the scale, so a sigma given in source pixels means the same thing whatever
+    // size the clip is exported at - which is what the preview shows.
+    vfilters.extend(effect_filters(&job.effects));
     if let Some(filter) = scale_filter {
         vfilters.push(filter);
     }
+    // After the scale, so the letters are rasterised at the size they will be read at rather
+    // than drawn large and then thrown away.
+    if let (Some(overlay), Some(font)) = (job.effects.text.as_ref(), font) {
+        vfilters.push(drawtext_filter(overlay, font));
+    }
     if job.reverse {
-        // Last on purpose: reverse holds every frame it will emit in memory before producing the
-        // first, so it should be handed cropped and downscaled frames.
+        // Last of the frame-shaping filters on purpose: reverse holds every frame it will emit
+        // in memory before producing the first, so it should be handed cropped and downscaled
+        // frames.
         vfilters.push("reverse".to_string());
     }
+    // After reverse, because a fade in belongs at the start of what will be watched.
+    vfilters.extend(fade_filters(&job.effects, output_duration(job), true));
     if !vfilters.is_empty() {
         args.push("-vf".to_string());
         args.push(vfilters.join(","));
@@ -1123,6 +1374,34 @@ fn resolved_tools() -> &'static Mutex<HashMap<String, PathBuf>> {
 }
 
 /// Drops the memoised paths so the next `resolve_tool` searches again.
+static FILTERS: OnceLock<HashSet<String>> = OnceLock::new();
+
+/// Whether this build has a given filter. drawtext needs libfreetype, and a cut-down ffmpeg on
+/// someone's PATH may not have been built with it - without this check the failure is an
+/// "Unknown filter" line at the end of a job the user has already waited through.
+///
+/// An unreadable listing answers yes: a probe that failed is not evidence the filter is
+/// missing, and ffmpeg's own error is a better report than a refusal built on a guess.
+pub fn has_filter(name: &str) -> bool {
+    let filters = FILTERS.get_or_init(|| {
+        let Ok(output) = hidden_command("ffmpeg")
+            .args(["-hide_banner", "-filters"])
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .output()
+        else {
+            return HashSet::new();
+        };
+        // " T. drawtext          V->V       Draw text on top of video frames..." - the flags
+        // come first, so the name is the second field.
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter_map(|line| line.split_whitespace().nth(1).map(str::to_string))
+            .collect()
+    });
+    filters.is_empty() || filters.contains(name)
+}
+
 pub fn forget_resolved_tools() {
     if let Ok(mut cache) = resolved_tools().lock() {
         cache.clear();
@@ -1360,6 +1639,7 @@ mod tests {
             lossless: false,
             output_height: None,
             video_kbps: None,
+            effects: Effects::default(),
         }
     }
 
@@ -1388,6 +1668,297 @@ mod tests {
     /// Asserts `pair` appears as two consecutive arguments.
     fn has_pair(args: &[String], flag: &str, value: &str) -> bool {
         args.windows(2).any(|w| w[0] == flag && w[1] == value)
+    }
+
+    /// The font is a fact about the machine, so the tests name one rather than looking for it.
+    fn font() -> PathBuf {
+        PathBuf::from("C:\\Windows\\Fonts\\arial.ttf")
+    }
+
+    fn overlay(text: &str) -> TextOverlay {
+        TextOverlay {
+            text: text.to_string(),
+            size: 0.07,
+            color: "#ffcc00".to_string(),
+            opacity: 0.9,
+            anchor_x: TextAnchorX::Center,
+            anchor_y: TextAnchorY::Bottom,
+            boxed: false,
+        }
+    }
+
+    /// The -vf chain as one string, which is where every ordering assertion below looks.
+    fn vf(args: &[String]) -> String {
+        value_after(args, "-vf")
+            .or_else(|| value_after(args, "-filter_complex"))
+            .unwrap_or("")
+            .to_string()
+    }
+
+    // -- quick effects -------------------------------------------------------
+
+    #[test]
+    fn no_effects_switched_on_emit_no_filters_at_all() {
+        // The whole point of Option-per-dial: an untouched effects tab costs nothing.
+        let args = build_args(&job(QualityPreset::Balanced), "libx264", true, 1920, 1080, 30.0, None);
+        assert!(!has(&args, "-vf"), "{args:?}");
+    }
+
+    #[test]
+    fn brightness_multiplies_rather_than_adding_so_the_preview_agrees() {
+        // eq's own brightness is additive; CSS brightness() multiplies. The preview can only
+        // do the second, so the export has to as well.
+        let mut j = job(QualityPreset::Balanced);
+        j.effects.brightness = Some(1.25);
+        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0, None);
+        assert_eq!(vf(&args), "colorchannelmixer=rr=1.25:gg=1.25:bb=1.25");
+    }
+
+    #[test]
+    fn contrast_and_saturation_share_one_eq() {
+        let mut j = job(QualityPreset::Balanced);
+        j.effects.contrast = Some(1.3);
+        j.effects.saturation = Some(0.7);
+        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0, None);
+        assert_eq!(vf(&args), "eq=contrast=1.3:saturation=0.7");
+    }
+
+    #[test]
+    fn each_colour_dial_can_stand_alone_in_the_eq() {
+        let mut j = job(QualityPreset::Balanced);
+        j.effects.saturation = Some(0.0);
+        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0, None);
+        assert_eq!(vf(&args), "eq=saturation=0.0");
+    }
+
+    #[test]
+    fn the_vignette_slider_maps_onto_the_lens_angle() {
+        let mut j = job(QualityPreset::Balanced);
+        j.effects.vignette = Some(1.0);
+        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0, None);
+        // Full strength stops short of PI/2, which vignette clips at and which is a black
+        // frame with a dot in the middle rather than a picture.
+        assert_eq!(vf(&args), format!("vignette=angle={}", fmt_num(VIGNETTE_MAX_ANGLE)));
+        assert!(VIGNETTE_MAX_ANGLE < std::f64::consts::FRAC_PI_2);
+    }
+
+    #[test]
+    fn blur_goes_in_before_the_scale_and_text_after_it() {
+        // A sigma is in source pixels. Blurring first keeps it proportional at any export
+        // size; drawing the text last keeps the letters crisp at the size they end up.
+        let mut j = job(QualityPreset::Balanced);
+        j.effects.blur = Some(6.0);
+        j.effects.text = Some(overlay("hello"));
+        j.output_height = Some(720);
+        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0, Some(&font()));
+        let chain = vf(&args);
+
+        let blur = chain.find("gblur").expect("no blur in the chain");
+        let scale = chain.find("scale=").expect("no scale in the chain");
+        let text = chain.find("drawtext").expect("no text in the chain");
+        assert!(blur < scale && scale < text, "{chain}");
+    }
+
+    #[test]
+    fn the_overlay_text_never_enters_the_filtergraph() {
+        // A colon separates filter options, a quote opens a quoted section and a percent sign
+        // starts an expansion. All three are ordinary things to type into a caption, so the
+        // words travel in a file and expansion is switched off rather than escaped.
+        let mut j = job(QualityPreset::Balanced);
+        j.effects.text = Some(overlay("50%: it's \\fine\\"));
+        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0, Some(&font()));
+        let chain = vf(&args);
+
+        assert!(!chain.contains("it's"), "{chain}");
+        assert!(!chain.contains("50%"), "{chain}");
+        assert!(chain.contains(&format!("textfile={OVERLAY_TEXT_FILE}")), "{chain}");
+        assert!(chain.contains("expansion=none"), "{chain}");
+    }
+
+    #[test]
+    fn the_text_file_is_named_relative_to_ffmpegs_working_directory() {
+        // Not a style choice: a filtergraph path must be quoted, and a quoted one cannot carry
+        // an apostrophe - which the temp path under a user called O'Brien would. export.rs
+        // sets the child's cwd to match, and the two only work together.
+        let mut j = job(QualityPreset::Balanced);
+        j.effects.text = Some(overlay("hi"));
+        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0, Some(&font()));
+        let chain = vf(&args);
+        assert!(chain.contains(&format!("textfile={OVERLAY_TEXT_FILE}:")), "{chain}");
+        assert!(!chain.contains("textfile='"), "{chain}");
+    }
+
+    #[test]
+    fn the_font_path_is_quoted_with_its_drive_colon_escaped() {
+        let mut j = job(QualityPreset::Balanced);
+        j.effects.text = Some(overlay("hi"));
+        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0, Some(&font()));
+        assert!(
+            vf(&args).contains("fontfile='C\\:/Windows/Fonts/arial.ttf'"),
+            "{}",
+            vf(&args)
+        );
+    }
+
+    #[test]
+    fn the_colour_input_hex_becomes_an_ffmpeg_colour() {
+        assert_eq!(ffmpeg_color("#FFcc00"), "0xffcc00");
+        assert_eq!(ffmpeg_color("112233"), "0x112233");
+        // Anything unreadable falls back rather than emitting a filter ffmpeg will reject.
+        assert_eq!(ffmpeg_color("rebeccapurple"), "0xffffff");
+        assert_eq!(ffmpeg_color("#12345"), "0xffffff");
+    }
+
+    #[test]
+    fn every_text_anchor_maps_onto_a_pair_of_drawtext_expressions() {
+        let cases = [
+            (TextAnchorX::Left, TextAnchorY::Top, "x=h*0.04", "y=h*0.04"),
+            (
+                TextAnchorX::Center,
+                TextAnchorY::Middle,
+                "x=(w-text_w)/2",
+                "y=(h-text_h)/2",
+            ),
+            (
+                TextAnchorX::Right,
+                TextAnchorY::Bottom,
+                "x=w-text_w-h*0.04",
+                "y=h-text_h-h*0.04",
+            ),
+        ];
+        for (anchor_x, anchor_y, x, y) in cases {
+            let mut j = job(QualityPreset::Balanced);
+            let mut o = overlay("hi");
+            o.anchor_x = anchor_x;
+            o.anchor_y = anchor_y;
+            j.effects.text = Some(o);
+            let chain = vf(&build_args(&j, "libx264", true, 1920, 1080, 30.0, Some(&font())));
+            assert!(chain.contains(&format!(":{x}:")), "{chain}");
+            assert!(chain.contains(&format!(":{y}")), "{chain}");
+        }
+    }
+
+    #[test]
+    fn the_text_is_dropped_rather_than_half_emitted_when_no_font_was_found() {
+        // build_args is handed None when the machine has no usable font. Emitting drawtext
+        // without a fontfile would fail the whole export over one optional overlay.
+        let mut j = job(QualityPreset::Balanced);
+        j.effects.text = Some(overlay("hi"));
+        j.effects.blur = Some(4.0);
+        let chain = vf(&build_args(&j, "libx264", true, 1920, 1080, 30.0, None));
+        assert!(!chain.contains("drawtext"), "{chain}");
+        assert!(chain.contains("gblur"), "{chain}");
+    }
+
+    #[test]
+    fn fades_are_measured_on_the_output_timeline_not_the_source_one() {
+        // A 10 s trim at 2x is a 5 s clip, so a fade out one second long starts at 4.
+        let mut j = job(QualityPreset::Balanced);
+        j.speed = 2.0;
+        j.effects.fade_out = Some(1.0);
+        let chain = vf(&build_args(&j, "libx264", true, 1920, 1080, 30.0, None));
+        assert!(chain.contains("fade=t=out:st=4.000:d=1.000"), "{chain}");
+    }
+
+    #[test]
+    fn a_fade_longer_than_the_clip_is_trimmed_to_the_clip() {
+        let mut j = job(QualityPreset::Balanced);
+        j.out_point = j.in_point + 2.0;
+        j.effects.fade_in = Some(30.0);
+        j.effects.fade_out = Some(30.0);
+        let chain = vf(&build_args(&j, "libx264", true, 1920, 1080, 30.0, None));
+        assert!(chain.contains("fade=t=in:st=0:d=2.000"), "{chain}");
+        assert!(chain.contains("fade=t=out:st=0.000:d=2.000"), "{chain}");
+    }
+
+    #[test]
+    fn fades_sit_after_reverse_in_both_chains() {
+        // reverse is the last filter that changes which end is the start, so a fade in put
+        // ahead of it would be seen as a fade out.
+        let mut j = job(QualityPreset::Balanced);
+        j.reverse = true;
+        j.effects.fade_in = Some(0.5);
+        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0, None);
+
+        let chain = vf(&args);
+        assert!(
+            chain.find("reverse").unwrap() < chain.find("fade=t=in").unwrap(),
+            "{chain}"
+        );
+
+        let audio = value_after(&args, "-af").unwrap_or("");
+        assert!(
+            audio.find("areverse").unwrap() < audio.find("afade=t=in").unwrap(),
+            "{audio}"
+        );
+    }
+
+    #[test]
+    fn the_audio_fades_with_the_picture() {
+        let mut j = job(QualityPreset::Balanced);
+        j.effects.fade_in = Some(0.5);
+        j.effects.fade_out = Some(1.5);
+        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0, None);
+        assert_eq!(
+            value_after(&args, "-af"),
+            Some("afade=t=in:st=0:d=0.500,afade=t=out:st=8.500:d=1.500")
+        );
+    }
+
+    #[test]
+    fn an_audio_only_export_fades_but_takes_no_picture_effects() {
+        let mut j = job(QualityPreset::Balanced);
+        j.format = ExportFormat::Mp3;
+        j.output = "C:\\clips\\out.mp3".to_string();
+        j.effects.fade_in = Some(0.5);
+        j.effects.blur = Some(9.0);
+        j.effects.text = Some(overlay("hi"));
+        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0, Some(&font()));
+
+        assert!(value_after(&args, "-af").unwrap().contains("afade=t=in"), "{args:?}");
+        assert!(!has(&args, "-vf"), "{args:?}");
+        assert!(!args.iter().any(|a| a.contains("gblur") || a.contains("drawtext")), "{args:?}");
+    }
+
+    #[test]
+    fn a_silent_source_gets_no_afade_either() {
+        let mut j = job(QualityPreset::Balanced);
+        j.effects.fade_in = Some(0.5);
+        let args = build_args(&j, "libx264", false, 1920, 1080, 30.0, None);
+        assert!(!has(&args, "-af"), "{args:?}");
+        assert!(vf(&args).contains("fade=t=in"), "{args:?}");
+    }
+
+    #[test]
+    fn the_gif_chain_carries_the_effects_into_its_filter_complex() {
+        let mut j = job(QualityPreset::Balanced);
+        j.format = ExportFormat::Gif;
+        j.output = "C:\\clips\\out.gif".to_string();
+        j.effects.blur = Some(3.0);
+        j.effects.text = Some(overlay("hi"));
+        j.effects.fade_in = Some(0.5);
+        let chain = value_after(&build_args(&j, "libx264", true, 1920, 1080, 30.0, Some(&font())), "-filter_complex")
+            .unwrap()
+            .to_string();
+
+        // Everything still has to land ahead of the palette pass, which is the only branch.
+        let palette = chain.find("palettegen").expect("no palette pass");
+        for needle in ["gblur", "drawtext", "fade=t=in"] {
+            let at = chain.find(needle).unwrap_or_else(|| panic!("no {needle} in {chain}"));
+            assert!(at < palette, "{needle} landed after the palette: {chain}");
+        }
+    }
+
+    #[test]
+    fn a_lossless_job_emits_no_effect_filters() {
+        // export.rs refuses this combination; build_args is reached anyway by the tests, and
+        // the stream-copy branch returns before any filter is considered.
+        let mut j = job(QualityPreset::Balanced);
+        j.lossless = true;
+        j.effects.blur = Some(4.0);
+        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0, None);
+        assert!(!has(&args, "-vf"), "{args:?}");
+        assert!(has_pair(&args, "-c", "copy"), "{args:?}");
     }
 
     // -- the IPC shape -------------------------------------------------------
@@ -1422,7 +1993,7 @@ mod tests {
     fn lossless_trim_is_a_stream_copy_with_no_filters() {
         let mut j = job(QualityPreset::Balanced);
         j.lossless = true;
-        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0);
+        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0, None);
 
         assert_eq!(
             args,
@@ -1459,7 +2030,7 @@ mod tests {
     fn lossless_on_a_silent_file_omits_the_audio_map() {
         let mut j = job(QualityPreset::Balanced);
         j.lossless = true;
-        let args = build_args(&j, "libx264", false, 1920, 1080, 30.0);
+        let args = build_args(&j, "libx264", false, 1920, 1080, 30.0, None);
         assert!(!has_pair(&args, "-map", "0:a:0?"));
         assert!(has_pair(&args, "-map", "0:v:0"));
         assert!(has_pair(&args, "-c", "copy"));
@@ -1473,7 +2044,7 @@ mod tests {
         j.lossless = true;
         j.format = ExportFormat::Mkv;
         j.output = "C:\\clips\\my video_clip.mkv".to_string();
-        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0);
+        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0, None);
         assert!(has_pair(&args, "-c", "copy"));
         assert!(!has(&args, "-movflags"));
         assert_eq!(args.last().unwrap(), "C:\\clips\\my video_clip.mkv");
@@ -1485,7 +2056,7 @@ mod tests {
         j.in_point = 4.0;
         j.out_point = 9.0;
         j.speed = 2.0;
-        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0);
+        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0, None);
 
         // -t is the source window (5s), unaffected by the 2x speed, and both
         // seek flags sit in front of -i.
@@ -1573,17 +2144,17 @@ mod tests {
     fn speed_sets_both_setpts_and_atempo() {
         let mut j = job(QualityPreset::Balanced);
         j.speed = 0.25;
-        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0);
+        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0, None);
         assert_eq!(value_after(&args, "-vf"), Some("setpts=PTS/0.25"));
         assert_eq!(value_after(&args, "-af"), Some("atempo=0.5,atempo=0.5"));
 
         j.speed = 4.0;
-        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0);
+        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0, None);
         assert_eq!(value_after(&args, "-vf"), Some("setpts=PTS/4.0"));
         assert_eq!(value_after(&args, "-af"), Some("atempo=2.0,atempo=2.0"));
 
         j.speed = 2.0;
-        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0);
+        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0, None);
         assert_eq!(value_after(&args, "-af"), Some("atempo=2.0"));
     }
 
@@ -1596,6 +2167,7 @@ mod tests {
             1920,
             1080,
             30.0,
+            None,
         );
         assert!(!has(&args, "-vf"));
         assert!(!has(&args, "-af"));
@@ -1607,13 +2179,13 @@ mod tests {
         j.speed = 2.0;
         j.mute = true;
         assert!(!has(
-            &build_args(&j, "libx264", true, 1920, 1080, 30.0),
+            &build_args(&j, "libx264", true, 1920, 1080, 30.0, None),
             "-af"
         ));
 
         j.mute = false;
         assert!(!has(
-            &build_args(&j, "libx264", false, 1920, 1080, 30.0),
+            &build_args(&j, "libx264", false, 1920, 1080, 30.0, None),
             "-af"
         ));
     }
@@ -1625,23 +2197,23 @@ mod tests {
         let mut j = job(QualityPreset::Balanced);
         j.speed = 2.0;
         j.volume = 1.5;
-        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0);
+        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0, None);
         assert_eq!(value_after(&args, "-af"), Some("atempo=2.0,volume=1.5"));
 
         // 1.0 is "unchanged": the filter must vanish, not read volume=1.0.
         j.volume = 1.0;
-        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0);
+        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0, None);
         assert_eq!(value_after(&args, "-af"), Some("atempo=2.0"));
 
         // A very quiet source needs far more than the slider's 200%, and the filter takes it.
         j.volume = 9.5;
-        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0);
+        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0, None);
         assert_eq!(value_after(&args, "-af"), Some("atempo=2.0,volume=9.5"));
 
         // Volume alone still produces an -af.
         j.speed = 1.0;
         j.volume = 0.5;
-        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0);
+        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0, None);
         assert_eq!(value_after(&args, "-af"), Some("volume=0.5"));
     }
 
@@ -1649,7 +2221,7 @@ mod tests {
     fn normalising_replaces_the_manual_gain_and_sits_after_the_tempo_change() {
         let mut j = job(QualityPreset::Balanced);
         j.normalize = true;
-        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0);
+        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0, None);
         assert_eq!(
             value_after(&args, "-af"),
             Some("loudnorm=I=-16:TP=-1.5:LRA=11")
@@ -1657,7 +2229,7 @@ mod tests {
 
         // atempo first, so loudnorm measures the audio at the speed it will be heard at.
         j.speed = 2.0;
-        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0);
+        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0, None);
         assert_eq!(
             value_after(&args, "-af"),
             Some("atempo=2.0,loudnorm=I=-16:TP=-1.5:LRA=11")
@@ -1666,7 +2238,7 @@ mod tests {
         // The pair the UI actually produces: normalise to a known level, then trim from it.
         j.speed = 1.0;
         j.volume = 0.5;
-        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0);
+        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0, None);
         assert_eq!(
             value_after(&args, "-af"),
             Some("loudnorm=I=-16:TP=-1.5:LRA=11,volume=0.5")
@@ -1678,7 +2250,7 @@ mod tests {
         let mut j = job(QualityPreset::Balanced);
         j.normalize = true;
         j.mute = true;
-        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0);
+        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0, None);
         assert!(!has(&args, "-af"), "{args:?}");
     }
 
@@ -1687,7 +2259,7 @@ mod tests {
         let mut j = job(QualityPreset::Balanced);
         j.volume = 2.0;
         j.mute = true;
-        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0);
+        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0, None);
         assert!(!has(&args, "-af"));
     }
 
@@ -1699,7 +2271,7 @@ mod tests {
         j.speed = 2.0;
         j.volume = 1.5;
         j.reverse = true;
-        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0);
+        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0, None);
         assert_eq!(value_after(&args, "-vf"), Some("setpts=PTS/2.0,reverse"));
         assert_eq!(
             value_after(&args, "-af"),
@@ -1716,7 +2288,7 @@ mod tests {
         j.out_point = 60.0;
         j.mute = true;
         j.reverse = true;
-        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0);
+        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0, None);
         assert_eq!(value_after(&args, "-vf"), Some("scale=1280:-2,reverse"));
     }
 
@@ -1724,7 +2296,7 @@ mod tests {
     fn reverse_alone_still_reverses_both_streams() {
         let mut j = job(QualityPreset::Balanced);
         j.reverse = true;
-        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0);
+        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0, None);
         assert_eq!(value_after(&args, "-vf"), Some("reverse"));
         assert_eq!(value_after(&args, "-af"), Some("areverse"));
     }
@@ -1740,7 +2312,7 @@ mod tests {
             w: 641,
             h: 361,
         });
-        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0);
+        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0, None);
         assert_eq!(value_after(&args, "-vf"), Some("crop=640:360:100:50"));
     }
 
@@ -1756,7 +2328,7 @@ mod tests {
             w: 400,
             h: 400,
         });
-        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0);
+        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0, None);
         assert_eq!(value_after(&args, "-vf"), Some("crop=120:80:1800:1000"));
     }
 
@@ -1772,7 +2344,7 @@ mod tests {
             w: 400,
             h: 400,
         });
-        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0);
+        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0, None);
         assert_eq!(value_after(&args, "-vf"), Some("crop=370:390:0:0"));
 
         // Overhanging both ends at once still yields the whole frame.
@@ -1782,7 +2354,7 @@ mod tests {
             w: 4000,
             h: 4000,
         });
-        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0);
+        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0, None);
         assert_eq!(value_after(&args, "-vf"), Some("crop=1920:1080:0:0"));
     }
 
@@ -1795,7 +2367,7 @@ mod tests {
             w: 1,
             h: 1,
         });
-        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0);
+        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0, None);
         assert!(!has(&args, "-vf"));
 
         j.crop = Some(Rect {
@@ -1804,7 +2376,7 @@ mod tests {
             w: 100,
             h: 100,
         });
-        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0);
+        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0, None);
         assert!(!has(&args, "-vf"));
     }
 
@@ -1818,7 +2390,7 @@ mod tests {
             h: 720,
         });
         j.speed = 2.0;
-        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0);
+        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0, None);
         assert_eq!(
             value_after(&args, "-vf"),
             Some("crop=1280:720:10:20,setpts=PTS/2.0")
@@ -1831,7 +2403,7 @@ mod tests {
     fn mute_drops_the_audio_map_and_adds_an() {
         let mut j = job(QualityPreset::Balanced);
         j.mute = true;
-        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0);
+        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0, None);
         assert!(has(&args, "-an"));
         assert!(has_pair(&args, "-map", "0:v:0"));
         assert!(!has_pair(&args, "-map", "0:a:0?"));
@@ -1848,6 +2420,7 @@ mod tests {
             1920,
             1080,
             30.0,
+            None,
         );
         assert!(!has_pair(&args, "-map", "0:a:0?"));
         assert!(!has(&args, "-c:a"));
@@ -1865,7 +2438,7 @@ mod tests {
             (QualityPreset::Balanced, "23", "128k"),
             (QualityPreset::Small, "28", "96k"),
         ] {
-            let args = build_args(&job(quality), "libx264", true, 1920, 1080, 30.0);
+            let args = build_args(&job(quality), "libx264", true, 1920, 1080, 30.0, None);
             assert!(has_pair(&args, "-c:v", "libx264"));
             assert!(has_pair(&args, "-preset", "veryfast"), "{:?}", quality);
             assert_eq!(value_after(&args, "-crf"), Some(crf), "{:?}", quality);
@@ -1883,7 +2456,7 @@ mod tests {
             (QualityPreset::Balanced, "24"),
             (QualityPreset::Small, "29"),
         ] {
-            let args = build_args(&job(quality), "h264_nvenc", true, 1920, 1080, 30.0);
+            let args = build_args(&job(quality), "h264_nvenc", true, 1920, 1080, 30.0, None);
             assert!(has_pair(&args, "-c:v", "h264_nvenc"));
             assert!(has_pair(&args, "-rc", "vbr"));
             assert_eq!(value_after(&args, "-cq"), Some(cq));
@@ -1901,7 +2474,7 @@ mod tests {
             (QualityPreset::Balanced, "24"),
             (QualityPreset::Small, "29"),
         ] {
-            let args = build_args(&job(quality), "h264_qsv", true, 1920, 1080, 30.0);
+            let args = build_args(&job(quality), "h264_qsv", true, 1920, 1080, 30.0, None);
             assert!(has_pair(&args, "-c:v", "h264_qsv"));
             assert_eq!(value_after(&args, "-global_quality"), Some(gq));
             assert!(!has(&args, "-crf"));
@@ -1916,7 +2489,7 @@ mod tests {
             (QualityPreset::Balanced, "24"),
             (QualityPreset::Small, "29"),
         ] {
-            let args = build_args(&job(quality), "h264_amf", true, 1920, 1080, 30.0);
+            let args = build_args(&job(quality), "h264_amf", true, 1920, 1080, 30.0, None);
             assert!(has_pair(&args, "-c:v", "h264_amf"));
             assert!(has_pair(&args, "-rc", "cqp"));
             assert_eq!(value_after(&args, "-qp_i"), Some(qp));
@@ -1941,7 +2514,7 @@ mod tests {
             j.output = "C:\\clips\\out.webm".to_string();
             // The encoder argument is the detected h264 hardware encoder; a
             // webm job must ignore it entirely.
-            let args = build_args(&j, "h264_nvenc", true, 1920, 1080, 30.0);
+            let args = build_args(&j, "h264_nvenc", true, 1920, 1080, 30.0, None);
             assert!(has_pair(&args, "-c:v", "libvpx-vp9"), "{:?}", quality);
             assert!(!has_pair(&args, "-c:v", "h264_nvenc"));
             assert!(has_pair(&args, "-b:v", "0"));
@@ -1965,7 +2538,7 @@ mod tests {
         j.in_point = 0.0;
         j.out_point = 20.0;
         j.mute = true;
-        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0);
+        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0, None);
         // (10_000_000 * 8 * 0.93 - 0) / 20 / 1000 = 3720
         assert!(has_pair(&args, "-c:v", "libvpx-vp9"));
         assert_eq!(value_after(&args, "-b:v"), Some("3720k"));
@@ -1977,7 +2550,7 @@ mod tests {
         // With audio, the 128k opus allowance comes off the video budget:
         // (10_000_000 * 8 * 0.93 - 128_000 * 20) / 20 / 1000 = 3592
         j.mute = false;
-        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0);
+        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0, None);
         assert_eq!(value_after(&args, "-b:v"), Some("3592k"));
         assert!(has_pair(&args, "-c:a", "libopus"));
         assert_eq!(value_after(&args, "-b:a"), Some("128k"));
@@ -2004,7 +2577,7 @@ mod tests {
             let mut j = job(quality);
             j.format = ExportFormat::Gif;
             j.output = "C:\\clips\\out.gif".to_string();
-            let args = build_args(&j, "libx264", true, 1920, 1080, 30.0);
+            let args = build_args(&j, "libx264", true, 1920, 1080, 30.0, None);
             assert_eq!(
                 value_after(&args, "-filter_complex"),
                 Some(expected),
@@ -2038,7 +2611,7 @@ mod tests {
         });
         j.speed = 2.0;
         j.reverse = true;
-        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0);
+        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0, None);
         assert_eq!(
             value_after(&args, "-filter_complex"),
             Some(
@@ -2064,7 +2637,7 @@ mod tests {
                 let mut j = job(quality);
                 j.format = format;
                 j.output = format!("C:\\clips\\out.{}", ext);
-                let args = build_args(&j, "libx264", true, 1920, 1080, 30.0);
+                let args = build_args(&j, "libx264", true, 1920, 1080, 30.0, None);
                 assert!(has(&args, "-vn"), "{:?} {:?}", format, quality);
                 assert!(has_pair(&args, "-map", "0:a:0"), "{:?}", format);
                 assert!(has_pair(&args, "-c:a", codec), "{:?} {:?}", format, quality);
@@ -2093,7 +2666,7 @@ mod tests {
                 let mut j = job(quality);
                 j.format = format;
                 j.output = format!("C:\\clips\\out.{}", ext);
-                let args = build_args(&j, "libx264", true, 1920, 1080, 30.0);
+                let args = build_args(&j, "libx264", true, 1920, 1080, 30.0, None);
                 assert!(has_pair(&args, "-c:a", codec), "{:?}", format);
                 assert!(!has(&args, "-b:a"), "{:?} {:?}", format, quality);
                 assert!(!has(&args, "-q:a"), "{:?} {:?}", format, quality);
@@ -2111,7 +2684,7 @@ mod tests {
             let mut j = job(quality);
             j.format = ExportFormat::Ogg;
             j.output = "C:\\clips\\out.ogg".to_string();
-            let args = build_args(&j, "libx264", true, 1920, 1080, 30.0);
+            let args = build_args(&j, "libx264", true, 1920, 1080, 30.0, None);
             assert!(has_pair(&args, "-c:a", "libvorbis"));
             assert_eq!(value_after(&args, "-q:a"), Some(q), "{:?}", quality);
             assert!(!has(&args, "-b:a"), "{:?}", quality);
@@ -2134,7 +2707,7 @@ mod tests {
             w: 640,
             h: 360,
         });
-        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0);
+        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0, None);
         assert_eq!(
             value_after(&args, "-af"),
             Some("atempo=2.0,volume=0.5,areverse")
@@ -2151,7 +2724,7 @@ mod tests {
         j.out_point = 60.0;
         // (2_000_000 * 8 * 0.93) / 60 / 1000 = 248 - no audio allowance to
         // subtract because the audio IS the budget.
-        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0);
+        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0, None);
         assert!(has_pair(&args, "-c:a", "libmp3lame"));
         assert_eq!(value_after(&args, "-b:a"), Some("248k"));
         assert!(!has(&args, "-b:v"));
@@ -2164,7 +2737,7 @@ mod tests {
         j.output = "C:\\clips\\out.mp3".to_string();
         j.in_point = 0.0;
         j.out_point = 200.0;
-        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0);
+        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0, None);
         assert_eq!(value_after(&args, "-b:a"), Some("32k"));
     }
 
@@ -2175,7 +2748,7 @@ mod tests {
         j.output = "C:\\clips\\out.ogg".to_string();
         j.in_point = 0.0;
         j.out_point = 60.0;
-        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0);
+        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0, None);
         assert!(has_pair(&args, "-c:a", "libvorbis"));
         assert_eq!(value_after(&args, "-b:a"), Some("248k"));
         assert!(!has(&args, "-q:a"));
@@ -2189,7 +2762,7 @@ mod tests {
         j.in_point = 0.0;
         j.out_point = 30.0;
         j.mute = true;
-        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0);
+        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0, None);
 
         // (10_000_000 * 8 * 0.93 - 0) / 30 / 1000 = 2480
         assert_eq!(value_after(&args, "-b:v"), Some("2480k"));
@@ -2203,7 +2776,7 @@ mod tests {
         let mut j = fit_job(10.0);
         j.in_point = 0.0;
         j.out_point = 20.0;
-        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0);
+        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0, None);
 
         // (10_000_000 * 8 * 0.93 - 128_000 * 20) / 20 / 1000 = 3592
         assert_eq!(value_after(&args, "-b:v"), Some("3592k"));
@@ -2217,7 +2790,7 @@ mod tests {
         j.in_point = 0.0;
         j.out_point = 120.0;
         j.speed = 2.0;
-        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0);
+        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0, None);
 
         // Output is 60s long, not 120s:
         // (25_000_000 * 8 * 0.93 - 128_000 * 60) / 60 / 1000 = 2972
@@ -2231,7 +2804,7 @@ mod tests {
         // but a balanced CRF beats a panic or a 100 kbps slideshow.
         let mut j = job(QualityPreset::Fit);
         j.target_mb = None;
-        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0);
+        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0, None);
         assert!(!has(&args, "-b:v"));
         assert_eq!(value_after(&args, "-crf"), Some("23"));
     }
@@ -2241,7 +2814,7 @@ mod tests {
         let mut j = fit_job(10.0);
         j.in_point = 0.0;
         j.out_point = 20.0;
-        let args = build_args(&j, "h264_nvenc", true, 1920, 1080, 30.0);
+        let args = build_args(&j, "h264_nvenc", true, 1920, 1080, 30.0, None);
         assert_eq!(value_after(&args, "-b:v"), Some("3592k"));
         assert!(!has(&args, "-cq"));
         assert!(!has(&args, "-preset"));
@@ -2255,7 +2828,7 @@ mod tests {
         j.in_point = 0.0;
         j.out_point = 10.0;
         j.mute = true;
-        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0);
+        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0, None);
         // 7440 kbps over 1920x1080x30 is 0.12 bpp, well clear of the floor.
         assert_eq!(value_after(&args, "-b:v"), Some("7440k"));
         assert!(!has(&args, "-vf"));
@@ -2267,7 +2840,7 @@ mod tests {
         j.in_point = 0.0;
         j.out_point = 60.0;
         j.mute = true;
-        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0);
+        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0, None);
         // 1240 kbps is 0.020 bpp at 1080p and 0.045 bpp at 720p.
         assert_eq!(value_after(&args, "-b:v"), Some("1240k"));
         assert_eq!(value_after(&args, "-vf"), Some("scale=1280:-2"));
@@ -2279,7 +2852,7 @@ mod tests {
         j.in_point = 0.0;
         j.out_point = 120.0;
         j.mute = true;
-        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0);
+        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0, None);
         // 620 kbps is 0.022 bpp at 720p and 0.050 bpp at 854x480.
         assert_eq!(value_after(&args, "-b:v"), Some("620k"));
         assert_eq!(value_after(&args, "-vf"), Some("scale=854:-2"));
@@ -2291,7 +2864,7 @@ mod tests {
         j.in_point = 0.0;
         j.out_point = 900.0;
         j.mute = true;
-        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0);
+        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0, None);
         assert_eq!(value_after(&args, "-vf"), Some("scale=640:-2"));
     }
 
@@ -2301,7 +2874,7 @@ mod tests {
         j.in_point = 0.0;
         j.out_point = 900.0;
         j.mute = true;
-        let args = build_args(&j, "libx264", true, 640, 360, 30.0);
+        let args = build_args(&j, "libx264", true, 640, 360, 30.0, None);
         assert!(!has(&args, "-vf"));
     }
 
@@ -2319,7 +2892,7 @@ mod tests {
             w: 1280,
             h: 720,
         });
-        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0);
+        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0, None);
         assert_eq!(value_after(&args, "-vf"), Some("crop=1280:720:0:0"));
     }
 
@@ -2328,7 +2901,7 @@ mod tests {
         let mut j = job(QualityPreset::Small);
         j.in_point = 0.0;
         j.out_point = 900.0;
-        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0);
+        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0, None);
         assert!(!has(&args, "-vf"));
         assert!(!has(&args, "-b:v"));
     }
@@ -2345,7 +2918,7 @@ mod tests {
             w: 800,
             h: 600,
         });
-        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0);
+        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0, None);
 
         assert_eq!(args[0], "-y");
         assert!(has_pair(&args, "-pix_fmt", "yuv420p"));
@@ -2367,12 +2940,12 @@ mod tests {
             let mut j = job(QualityPreset::Balanced);
             j.format = format;
             j.output = format!("C:\\clips\\{}", name);
-            let args = build_args(&j, "libx264", true, 1920, 1080, 30.0);
+            let args = build_args(&j, "libx264", true, 1920, 1080, 30.0, None);
             assert!(!has(&args, "-movflags"), "{}", name);
             assert!(has_pair(&args, "-pix_fmt", "yuv420p"), "{}", name);
 
             j.lossless = true;
-            let args = build_args(&j, "libx264", true, 1920, 1080, 30.0);
+            let args = build_args(&j, "libx264", true, 1920, 1080, 30.0, None);
             assert!(!has(&args, "-movflags"), "lossless {}", name);
             assert_eq!(args.last().unwrap(), &format!("C:\\clips\\{}", name));
         }
@@ -2381,11 +2954,11 @@ mod tests {
         for name in ["out.MP4", "out.m4v", "out.mov"] {
             let mut j = job(QualityPreset::Balanced);
             j.output = format!("C:\\clips\\{}", name);
-            let args = build_args(&j, "libx264", true, 1920, 1080, 30.0);
+            let args = build_args(&j, "libx264", true, 1920, 1080, 30.0, None);
             assert!(has_pair(&args, "-movflags", "+faststart"), "{}", name);
 
             j.lossless = true;
-            let args = build_args(&j, "libx264", true, 1920, 1080, 30.0);
+            let args = build_args(&j, "libx264", true, 1920, 1080, 30.0, None);
             assert!(
                 has_pair(&args, "-movflags", "+faststart"),
                 "lossless {}",
@@ -2401,7 +2974,7 @@ mod tests {
         let mut j = job(QualityPreset::Balanced);
         j.format = ExportFormat::M4a;
         j.output = "C:\\clips\\out.m4a".to_string();
-        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0);
+        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0, None);
         assert!(has_pair(&args, "-movflags", "+faststart"));
 
         for (format, ext) in [
@@ -2414,7 +2987,7 @@ mod tests {
             let mut j = job(QualityPreset::Balanced);
             j.format = format;
             j.output = format!("C:\\clips\\out.{}", ext);
-            let args = build_args(&j, "libx264", true, 1920, 1080, 30.0);
+            let args = build_args(&j, "libx264", true, 1920, 1080, 30.0, None);
             assert!(!has(&args, "-movflags"), "{:?}", format);
         }
     }
@@ -2431,7 +3004,7 @@ mod tests {
             w: 1281,
             h: 721,
         });
-        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0);
+        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0, None);
 
         assert_eq!(
             args,
@@ -2482,7 +3055,7 @@ mod tests {
     fn an_explicit_height_scales_the_short_edge_of_a_landscape_frame() {
         let mut j = job(QualityPreset::Balanced);
         j.output_height = Some(720);
-        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0);
+        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0, None);
         // "720p" names the height here, and -2 works out the width.
         assert_eq!(value_after(&args, "-vf"), Some("scale=-2:720"));
     }
@@ -2491,7 +3064,7 @@ mod tests {
     fn an_explicit_height_scales_the_width_of_a_portrait_frame() {
         let mut j = job(QualityPreset::Balanced);
         j.output_height = Some(720);
-        let args = build_args(&j, "libx264", true, 1080, 1920, 30.0);
+        let args = build_args(&j, "libx264", true, 1080, 1920, 30.0, None);
         // A phone clip's short edge is its width, so the same "720p" request
         // has to land on the other axis or the frame comes out 405 wide.
         assert_eq!(value_after(&args, "-vf"), Some("scale=720:-2"));
@@ -2503,7 +3076,7 @@ mod tests {
             for requested in [720, 1080, 2160] {
                 let mut j = job(QualityPreset::Balanced);
                 j.output_height = Some(requested);
-                let args = build_args(&j, "libx264", true, source_w, source_h, 30.0);
+                let args = build_args(&j, "libx264", true, source_w, source_h, 30.0, None);
                 assert!(
                     !has(&args, "-vf"),
                     "{requested} on {source_w}x{source_h} emitted a scale filter"
@@ -2524,7 +3097,7 @@ mod tests {
             h: 1080,
         });
         j.output_height = Some(480);
-        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0);
+        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0, None);
         assert_eq!(
             value_after(&args, "-vf"),
             Some("crop=608:1080:0:0,scale=480:-2")
@@ -2532,7 +3105,7 @@ mod tests {
 
         // And a crop that is already smaller than the request is left alone.
         j.output_height = Some(720);
-        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0);
+        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0, None);
         assert_eq!(value_after(&args, "-vf"), Some("crop=608:1080:0:0"));
     }
 
@@ -2548,7 +3121,7 @@ mod tests {
         j.speed = 2.0;
         j.reverse = true;
         j.output_height = Some(480);
-        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0);
+        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0, None);
         assert_eq!(
             value_after(&args, "-vf"),
             Some("crop=1920:1080:0:0,setpts=PTS/2.0,scale=-2:480,reverse")
@@ -2563,11 +3136,11 @@ mod tests {
         j.mute = true;
         // Left alone this budget walks the ladder all the way to 640 wide.
         j.output_height = Some(1080);
-        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0);
+        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0, None);
         assert!(!has(&args, "-vf"), "the ladder overrode the explicit height");
 
         j.output_height = Some(480);
-        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0);
+        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0, None);
         assert_eq!(value_after(&args, "-vf"), Some("scale=-2:480"));
     }
 
@@ -2579,7 +3152,7 @@ mod tests {
 
         j.format = ExportFormat::Gif;
         j.output = "C:\\clips\\out.gif".to_string();
-        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0);
+        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0, None);
         // The gif chain owns its own width and frame rate caps.
         assert_eq!(
             value_after(&args, "-filter_complex"),
@@ -2589,7 +3162,7 @@ mod tests {
 
         j.format = ExportFormat::Mp3;
         j.output = "C:\\clips\\out.mp3".to_string();
-        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0);
+        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0, None);
         assert!(!has(&args, "-vf"));
         assert!(!has(&args, "-b:v"));
         assert_eq!(value_after(&args, "-b:a"), Some("192k"));
@@ -2602,7 +3175,7 @@ mod tests {
         for encoder in ["libx264", "h264_nvenc", "h264_qsv", "h264_amf"] {
             let mut j = job(QualityPreset::High);
             j.video_kbps = Some(2500);
-            let args = build_args(&j, encoder, true, 1920, 1080, 30.0);
+            let args = build_args(&j, encoder, true, 1920, 1080, 30.0, None);
 
             assert_eq!(value_after(&args, "-b:v"), Some("2500k"), "{encoder}");
             assert_eq!(value_after(&args, "-maxrate"), Some("2500k"), "{encoder}");
@@ -2622,7 +3195,7 @@ mod tests {
         j.format = ExportFormat::Webm;
         j.output = "C:\\clips\\out.webm".to_string();
         j.video_kbps = Some(1500);
-        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0);
+        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0, None);
         assert!(has_pair(&args, "-c:v", "libvpx-vp9"));
         assert_eq!(value_after(&args, "-b:v"), Some("1500k"));
         assert_eq!(value_after(&args, "-bufsize"), Some("3000k"));
@@ -2641,7 +3214,7 @@ mod tests {
         j.out_point = 30.0;
         j.mute = true;
         j.video_kbps = Some(9999);
-        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0);
+        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0, None);
         assert_eq!(value_after(&args, "-b:v"), Some("2480k"));
     }
 
@@ -2819,7 +3392,7 @@ mod tests {
             j.out_point = 5.0;
             tune(&mut j);
 
-            let args = build_args(&j, "libx264", true, 1920, 1080, 30.0);
+            let args = build_args(&j, "libx264", true, 1920, 1080, 30.0, None);
             let out = std::process::Command::new("ffmpeg")
                 .args(&args)
                 .output()

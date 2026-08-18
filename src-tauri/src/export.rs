@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 use std::io::{BufRead, BufReader};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager};
 
-use crate::ffmpeg::{self, ExportFormat, ExportJob, QualityPreset};
+use crate::ffmpeg::{self, Effects, ExportFormat, ExportJob, QualityPreset};
 use crate::settings::EncoderPreference;
 use crate::{AppState, ExportSlot};
 
@@ -28,6 +28,14 @@ const ENCODER_CANDIDATES: [&str; 3] = ["h264_nvenc", "h264_qsv", "h264_amf"];
 
 /// The only thing keeping an arbitrary height out of a job that arrives over IPC.
 const OUTPUT_HEIGHTS: [i64; 6] = [2160, 1440, 1080, 720, 480, 360];
+
+/// Long enough for a caption or two lines of credits. drawtext draws every character whether
+/// or not the frame is wide enough to hold them, so this only guards the temp file.
+const TEXT_MAX_CHARS: usize = 500;
+
+/// Tried in order. Arial is on every Windows install and is the family overlay.ts names in its
+/// CSS, so the preview and the export are at least the same typeface at the same size.
+const OVERLAY_FONTS: [&str; 3] = ["arial.ttf", "segoeui.ttf", "tahoma.ttf"];
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -105,6 +113,43 @@ fn test_encode(encoder: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Where ffmpeg is run from when there is a text overlay, holding nothing but the overlay
+/// text. build_args names that file relative to this folder rather than by path, because a
+/// filtergraph path has to be quoted and a quoted one cannot express an apostrophe - which a
+/// Windows user name is allowed to contain. One folder per process, reused across exports.
+fn overlay_dir() -> Result<PathBuf, String> {
+    let dir = std::env::temp_dir().join(format!("flipperclipper-overlay-{}", std::process::id()));
+    std::fs::create_dir_all(&dir)
+        .map_err(|_| "Windows would not let FlipperClipper write to the temp folder.".to_string())?;
+    Ok(dir)
+}
+
+fn overlay_font() -> Option<PathBuf> {
+    let root = std::env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".to_string());
+    let fonts = Path::new(&root).join("Fonts");
+    OVERLAY_FONTS
+        .iter()
+        .map(|name| fonts.join(name))
+        .find(|path| path.is_file())
+}
+
+/// Everything the text overlay needs on disk, settled before a frame is encoded: refusing now
+/// costs a second, refusing at the end of a long export costs the whole export.
+fn prepare_overlay(text: &str) -> Result<(PathBuf, PathBuf), String> {
+    if !ffmpeg::has_filter("drawtext") {
+        return Err(
+            "This copy of FFmpeg was built without text support, so the overlay cannot be drawn. Switch the text overlay off, or install a full FFmpeg build."
+                .to_string(),
+        );
+    }
+    let font =
+        overlay_font().ok_or_else(|| "No font could be found to draw the text with.".to_string())?;
+    let dir = overlay_dir()?;
+    std::fs::write(dir.join(ffmpeg::OVERLAY_TEXT_FILE), text.as_bytes())
+        .map_err(|_| "The overlay text could not be written to a temporary file.".to_string())?;
+    Ok((dir, font))
+}
+
 #[tauri::command(async)]
 pub fn start_export(app: AppHandle, job: ExportJob) -> Result<(), String> {
     validate(&job)?;
@@ -132,6 +177,11 @@ pub fn start_export(app: AppHandle, job: ExportJob) -> Result<(), String> {
     } else {
         "libx264".to_string()
     };
+    let overlay = match job.effects.text.as_ref() {
+        Some(text) => Some(prepare_overlay(&text.text)?),
+        None => None,
+    };
+
     let args = ffmpeg::build_args(
         &job,
         &encoder,
@@ -139,10 +189,17 @@ pub fn start_export(app: AppHandle, job: ExportJob) -> Result<(), String> {
         info.width,
         info.height,
         info.fps,
+        overlay.as_ref().map(|(_, font)| font.as_path()),
     );
 
-    let mut child = ffmpeg::hidden_command("ffmpeg")
-        .args(&args)
+    let mut command = ffmpeg::hidden_command("ffmpeg");
+    command.args(&args);
+    if let Some((dir, _)) = overlay.as_ref() {
+        // build_args emitted `textfile=<bare name>`, which only resolves from here.
+        command.current_dir(dir);
+    }
+
+    let mut child = command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -178,6 +235,9 @@ pub fn start_export(app: AppHandle, job: ExportJob) -> Result<(), String> {
 
     let total = ffmpeg::output_duration(&job);
     let output_path = job.output.clone();
+    let overlay_text = overlay
+        .as_ref()
+        .map(|(dir, _)| dir.join(ffmpeg::OVERLAY_TEXT_FILE));
     let watcher_app = app.clone();
     let watcher_slot = Arc::clone(&slot_arc);
 
@@ -185,6 +245,10 @@ pub fn start_export(app: AppHandle, job: ExportJob) -> Result<(), String> {
         read_progress(&watcher_app, stdout, total);
 
         let tail = stderr_reader.join().unwrap_or_default();
+        // ffmpeg has read all of it by now, and the words are the user's.
+        if let Some(path) = overlay_text {
+            let _ = std::fs::remove_file(path);
+        }
 
         let (child, cancelled) = {
             let mut slot = lock_slot(&watcher_slot);
@@ -303,16 +367,19 @@ fn validate(job: &ExportJob) -> Result<(), String> {
         return Err("A muted audio export would be silence.".to_string());
     }
 
+    validate_effects(&job.effects)?;
+
     // A job arrives over IPC, so the UI greying these combinations out is not a guarantee.
     if job.lossless
         && (job.reverse
             || job.normalize
             || job.volume != 1.0
+            || job.effects.any()
             || is_audio_format(&job.format)
             || matches!(job.format, ExportFormat::Gif))
     {
         return Err(
-            "A lossless export copies the video as it is, so it cannot reverse, change or normalise the volume, or change to an audio or GIF format.".to_string(),
+            "A lossless export copies the video as it is, so it cannot reverse, apply an effect, change or normalise the volume, or change to an audio or GIF format.".to_string(),
         );
     }
     if !Path::new(&job.input).is_file() {
@@ -349,6 +416,41 @@ fn validate(job: &ExportJob) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+/// The bounds the sliders travel between, restated because a job arrives over IPC and a
+/// greyed-out control is not a guarantee. Every dial is optional; None is switched off.
+fn validate_effects(fx: &Effects) -> Result<(), String> {
+    bounded(fx.brightness, 0.2, 2.0, "Brightness")?;
+    bounded(fx.contrast, 0.2, 3.0, "Contrast")?;
+    bounded(fx.saturation, 0.0, 3.0, "Saturation")?;
+    bounded(fx.hue, -180.0, 180.0, "The hue shift")?;
+    bounded(fx.blur, 0.5, 50.0, "Blur")?;
+    bounded(fx.vignette, 0.0, 1.0, "The vignette")?;
+    bounded(fx.fade_in, 0.0, 60.0, "The fade in")?;
+    bounded(fx.fade_out, 0.0, 60.0, "The fade out")?;
+
+    if let Some(text) = fx.text.as_ref() {
+        if text.text.trim().is_empty() {
+            return Err("The text overlay has nothing to draw.".to_string());
+        }
+        if text.text.chars().count() > TEXT_MAX_CHARS {
+            return Err(format!(
+                "The overlay text is longer than {TEXT_MAX_CHARS} characters."
+            ));
+        }
+        bounded(Some(text.size), 0.02, 0.3, "The text size")?;
+        bounded(Some(text.opacity), 0.0, 1.0, "The text opacity")?;
+    }
+    Ok(())
+}
+
+fn bounded(value: Option<f64>, low: f64, high: f64, name: &str) -> Result<(), String> {
+    match value {
+        None => Ok(()),
+        Some(v) if v.is_finite() && (low..=high).contains(&v) => Ok(()),
+        Some(_) => Err(format!("{name} has to be between {low} and {high}.")),
+    }
 }
 
 fn read_progress<R: std::io::Read>(app: &AppHandle, stdout: R, total: f64) {
@@ -512,6 +614,7 @@ mod tests {
             lossless: false,
             output_height: None,
             video_kbps: None,
+            effects: Effects::default(),
         }
     }
 
@@ -575,6 +678,82 @@ mod tests {
                 "The video bitrate has to be between 50 and 200000 kbps."
             );
         }
+    }
+
+    fn overlay(text: &str) -> crate::ffmpeg::TextOverlay {
+        crate::ffmpeg::TextOverlay {
+            text: text.to_string(),
+            size: 0.07,
+            color: "#ffffff".to_string(),
+            opacity: 1.0,
+            anchor_x: crate::ffmpeg::TextAnchorX::Center,
+            anchor_y: crate::ffmpeg::TextAnchorY::Bottom,
+            boxed: true,
+        }
+    }
+
+    #[test]
+    fn every_effect_dial_is_bounded_the_way_its_slider_is() {
+        let cases: [(&dyn Fn(&mut ExportJob, f64), f64, f64, &str); 8] = [
+            (&|j, v| j.effects.brightness = Some(v), 1.2, 2.5, "Brightness"),
+            (&|j, v| j.effects.contrast = Some(v), 1.2, 3.5, "Contrast"),
+            (&|j, v| j.effects.saturation = Some(v), 0.0, -0.1, "Saturation"),
+            (&|j, v| j.effects.hue = Some(v), -180.0, 181.0, "The hue shift"),
+            (&|j, v| j.effects.blur = Some(v), 0.5, 0.4, "Blur"),
+            (&|j, v| j.effects.vignette = Some(v), 1.0, 1.1, "The vignette"),
+            (&|j, v| j.effects.fade_in = Some(v), 60.0, 60.1, "The fade in"),
+            (&|j, v| j.effects.fade_out = Some(v), 0.0, f64::NAN, "The fade out"),
+        ];
+
+        for (set, allowed, refused, name) in cases {
+            let mut good = job();
+            set(&mut good, allowed);
+            assert!(
+                !validate(&good).unwrap_err().starts_with(name),
+                "{name} refused {allowed}"
+            );
+
+            let mut bad = job();
+            set(&mut bad, refused);
+            assert!(
+                validate(&bad).unwrap_err().starts_with(name),
+                "{name} accepted {refused}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_text_overlay_with_nothing_in_it_is_refused_rather_than_drawn() {
+        // drawtext with an empty file is a filter that costs a pass and draws nothing, and the
+        // UI is meant to have caught this - so reaching here means the job was hand-built.
+        let mut j = job();
+        j.effects.text = Some(overlay("   \n  "));
+        assert_eq!(
+            validate(&j).unwrap_err(),
+            "The text overlay has nothing to draw."
+        );
+    }
+
+    #[test]
+    fn the_overlay_text_has_a_ceiling() {
+        let mut j = job();
+        j.effects.text = Some(overlay(&"a".repeat(TEXT_MAX_CHARS + 1)));
+        assert!(validate(&j).unwrap_err().starts_with("The overlay text is longer"));
+
+        j.effects.text = Some(overlay(&"a".repeat(TEXT_MAX_CHARS)));
+        assert!(!validate(&j).unwrap_err().starts_with("The overlay text is longer"));
+    }
+
+    #[test]
+    fn a_stream_copy_cannot_carry_an_effect() {
+        // The lossless path never reaches a filter, so an effect asked for beside it would be
+        // silently dropped from a file the user believes carries it.
+        let mut j = job();
+        j.lossless = true;
+        assert!(!validate(&j).unwrap_err().contains("apply an effect"));
+
+        j.effects.blur = Some(4.0);
+        assert!(validate(&j).unwrap_err().contains("apply an effect"));
     }
 
     #[test]

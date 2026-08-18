@@ -8,7 +8,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use flipperclipper_lib::ffmpeg::{
-    build_args, output_duration, ExportFormat, ExportJob, QualityPreset, Rect,
+    build_args, output_duration, Effects, ExportFormat, ExportJob, QualityPreset, Rect, TextAnchorX,
+    TextAnchorY, TextOverlay, OVERLAY_TEXT_FILE,
 };
 
 // --- Fixtures ---
@@ -215,14 +216,32 @@ fn first_frame_bytes(path: &Path, frame_name: &str) -> Vec<u8> {
     std::fs::read(&frame).expect("the extracted frame file is missing")
 }
 
+/// The font export.rs would resolve, or None on a machine without it.
+fn overlay_font() -> Option<PathBuf> {
+    let root = std::env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".to_string());
+    let font = Path::new(&root).join("Fonts").join("arial.ttf");
+    font.is_file().then_some(font)
+}
+
 /// Build the argv the app would build, run it, and hand back the output path.
 fn run_export(job: &ExportJob, width: i64, height: i64, fps: f64, has_source_audio: bool) -> PathBuf {
+    let font = overlay_font();
     // libx264 throughout: a hardware encoder would tie these assertions to whichever GPU ran them.
-    let args = build_args(job, "libx264", has_source_audio, width, height, fps);
-    let out = Command::new("ffmpeg")
-        .args(&args)
-        .output()
-        .expect("could not run ffmpeg");
+    let args = build_args(job, "libx264", has_source_audio, width, height, fps, font.as_deref());
+
+    let mut command = Command::new("ffmpeg");
+    command.args(&args);
+    // The same two-part arrangement export.rs makes: the text in a file named relative to the
+    // working directory, because a filtergraph path cannot carry an apostrophe. If this test
+    // ever passes with the cwd left alone, build_args has started spelling the path out.
+    if let Some(overlay) = job.effects.text.as_ref() {
+        let dir = fixture_dir();
+        std::fs::write(dir.join(OVERLAY_TEXT_FILE), overlay.text.as_bytes())
+            .expect("could not write the overlay text");
+        command.current_dir(dir);
+    }
+
+    let out = command.output().expect("could not run ffmpeg");
     assert!(
         out.status.success(),
         "ffmpeg refused the arguments the app built.\nargs: {args:?}\nstderr:\n{}",
@@ -248,6 +267,7 @@ fn job(input: &Path, name: &str) -> ExportJob {
         target_mb: None,
         output_height: None,
         video_kbps: None,
+        effects: Effects::default(),
         lossless: false,
     }
 }
@@ -647,4 +667,135 @@ fn everything_at_once_still_produces_a_sane_clip() {
     assert_eq!(dimensions_of(&out), (1280, 720));
     assert!(!has_audio(&out));
     assert!((duration_of(&out) - 4.0).abs() < 0.2);
+}
+
+// --- Quick effects ---
+
+/// The mean pixel value of a BMP's data, 0 (black) to 255. The 54-byte header is skipped;
+/// every fixture here is written by the same encoder, so the header is a fixed size.
+fn mean_pixel(bytes: &[u8]) -> f64 {
+    let pixels = &bytes[54..];
+    pixels.iter().map(|b| *b as f64).sum::<f64>() / pixels.len() as f64
+}
+
+fn overlay(text: &str) -> TextOverlay {
+    TextOverlay {
+        text: text.to_string(),
+        size: 0.12,
+        color: "#ffcc00".to_string(),
+        opacity: 1.0,
+        anchor_x: TextAnchorX::Center,
+        anchor_y: TextAnchorY::Bottom,
+        boxed: true,
+    }
+}
+
+#[test]
+fn a_text_overlay_survives_the_trip_through_a_real_filtergraph() {
+    if ffmpeg_missing() {
+        return;
+    }
+    // The characters that would each break a naively escaped filtergraph: a colon separates
+    // options, an apostrophe opens a quoted section, a percent starts an expansion and a
+    // backslash escapes whatever follows.
+    let src = landscape();
+    let mut j = job(&src, "out-text.mp4");
+    j.out_point = 2.0;
+    j.effects.text = Some(overlay("50%: it's \\here\\"));
+
+    let out = run_export(&j, 1920, 1080, 30.0, true);
+    assert!(out.is_file(), "the export produced no file");
+
+    // Drawn, not merely accepted: the frame has to differ from the same export without it.
+    let with_text = first_frame_bytes(&out, "frame-text.bmp");
+    let mut plain = job(&src, "out-text-plain.mp4");
+    plain.out_point = 2.0;
+    let without = first_frame_bytes(&run_export(&plain, 1920, 1080, 30.0, true), "frame-plain.bmp");
+    assert_ne!(with_text, without, "the overlay changed nothing in the frame");
+}
+
+#[test]
+fn the_picture_effects_reach_the_pixels() {
+    if ffmpeg_missing() {
+        return;
+    }
+    let src = landscape();
+    let mut plain = job(&src, "out-fx-plain.mp4");
+    plain.out_point = 1.0;
+    let before = first_frame_bytes(&run_export(&plain, 1920, 1080, 30.0, true), "frame-fx-plain.bmp");
+
+    let mut graded = job(&src, "out-fx-graded.mp4");
+    graded.out_point = 1.0;
+    graded.effects.blur = Some(12.0);
+    graded.effects.saturation = Some(0.0);
+    graded.effects.contrast = Some(1.4);
+    graded.effects.brightness = Some(0.8);
+    graded.effects.hue = Some(45.0);
+    graded.effects.vignette = Some(0.6);
+    let after = first_frame_bytes(&run_export(&graded, 1920, 1080, 30.0, true), "frame-fx-graded.bmp");
+
+    assert_ne!(before, after, "a full grade left the frame untouched");
+    // Darker: a vignette, a brightness under 1 and colour bars pulled to grey all take light out.
+    assert!(
+        mean_pixel(&after) < mean_pixel(&before),
+        "graded {} was not darker than plain {}",
+        mean_pixel(&after),
+        mean_pixel(&before)
+    );
+}
+
+#[test]
+fn a_fade_in_starts_black_and_the_clip_recovers() {
+    if ffmpeg_missing() {
+        return;
+    }
+    let src = landscape();
+    let mut j = job(&src, "out-fade.mp4");
+    j.out_point = 4.0;
+    j.effects.fade_in = Some(1.0);
+
+    let out = run_export(&j, 1920, 1080, 30.0, true);
+    let first = mean_pixel(&first_frame_bytes(&out, "frame-fade-first.bmp"));
+    assert!(first < 4.0, "the first frame of a fade in was not black: {first}");
+
+    // Two seconds in is past the fade, so the picture is back.
+    let later = fixture_dir().join("frame-fade-later.bmp");
+    let status = Command::new("ffmpeg")
+        .args(["-hide_banner", "-loglevel", "error", "-y", "-ss", "2", "-i"])
+        .arg(&out)
+        .args(["-frames:v", "1"])
+        .arg(&later)
+        .status()
+        .expect("could not run ffmpeg");
+    assert!(status.success(), "could not extract the later frame");
+    let recovered = mean_pixel(&std::fs::read(&later).expect("the later frame is missing"));
+    assert!(
+        recovered > 40.0,
+        "the clip never came back from the fade: {recovered}"
+    );
+}
+
+#[test]
+fn a_fade_applies_to_the_audio_as_well() {
+    if ffmpeg_missing() {
+        return;
+    }
+    let src = landscape();
+    let mut j = job(&src, "out-fade-audio.mp4");
+    j.out_point = 4.0;
+    j.effects.fade_in = Some(1.0);
+    j.effects.fade_out = Some(1.0);
+
+    let out = run_export(&j, 1920, 1080, 30.0, true);
+    // Half of a four second tone is fading, so the mean level has to sit under the tone's own.
+    let mut plain = job(&src, "out-fade-audio-plain.mp4");
+    plain.out_point = 4.0;
+    let reference = run_export(&plain, 1920, 1080, 30.0, true);
+
+    assert!(
+        mean_volume(&out) < mean_volume(&reference) - 1.0,
+        "faded {} was not quieter than plain {}",
+        mean_volume(&out),
+        mean_volume(&reference)
+    );
 }
