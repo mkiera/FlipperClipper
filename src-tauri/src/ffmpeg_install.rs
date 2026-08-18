@@ -150,12 +150,31 @@ fn swap_into_place(managed: &Path, staged: &[(&'static str, PathBuf)]) -> Result
         let dest = managed.join(format!("{tool}{}", std::env::consts::EXE_SUFFIX));
         let aside = dest.with_extension(format!("exe{ASIDE_PREFIX}{}", stamp()));
         if dest.exists() {
-            std::fs::rename(&dest, &aside).map_err(swap_failed)?;
+            rename_when_free(&dest, &aside).map_err(swap_failed)?;
         }
-        std::fs::rename(from, &dest).map_err(swap_failed)?;
+        rename_when_free(from, &dest).map_err(swap_failed)?;
         let _ = std::fs::remove_file(&aside);
     }
     Ok(())
+}
+
+/// A binary that was just extracted and just run is not always movable at once: Windows holds
+/// the image section briefly after the process exits, and antivirus opens what appeared on disk
+/// a moment ago. Both surface as a sharing violation on the rename - measured as os error 32
+/// against a freshly unpacked ffmpeg.exe - and both clear on their own within seconds.
+fn rename_when_free(from: &Path, to: &Path) -> std::io::Result<()> {
+    const ATTEMPTS: u32 = 150;
+    let mut last = None;
+    for attempt in 0..ATTEMPTS {
+        match std::fs::rename(from, to) {
+            Ok(()) => return Ok(()),
+            Err(e) => last = Some(e),
+        }
+        if attempt + 1 < ATTEMPTS {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+    }
+    Err(last.expect("at least one attempt"))
 }
 
 fn swap_failed(e: std::io::Error) -> String {
@@ -211,11 +230,23 @@ pub fn sweep_leftovers(app: &AppHandle) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::windows::fs::OpenOptionsExt;
 
     fn temp_dir(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("flipperclipper-ffmpeg-test-{name}-{}", stamp()));
         std::fs::create_dir_all(&dir).expect("temp dir");
         dir
+    }
+
+    /// Half a gigabyte of temp files is worth a few retries: the binaries were just run, and
+    /// the same hold that delays a rename delays their removal.
+    fn sweep(dir: &Path) {
+        for _ in 0..30 {
+            if std::fs::remove_dir_all(dir).is_ok() || !dir.exists() {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
     }
 
     fn write(path: &Path, body: &str) {
@@ -299,6 +330,33 @@ mod tests {
     }
 
     #[test]
+    fn a_binary_still_held_open_is_waited_out_rather_than_failed() {
+        // What the live run hit: the file is unrenameable for a moment after being run.
+        let dir = temp_dir("held");
+        let from = dir.join("ffmpeg.exe");
+        let to = dir.join("published.exe");
+        write(&from, "new");
+
+        let blocker = dir.join("published.exe");
+        write(&blocker, "old");
+        let held = std::fs::File::options()
+            .read(true)
+            .share_mode(0)
+            .open(&blocker)
+            .expect("exclusive open");
+        let releaser = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(400));
+            drop(held);
+        });
+
+        rename_when_free(&from, &to).expect("the rename waits the lock out");
+        releaser.join().expect("releaser");
+        assert_eq!(std::fs::read_to_string(&to).expect("read"), "new");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn an_unreachable_host_reads_as_a_connection_problem() {
         assert_eq!(
             download_failed("Could not reach the download: dns error".to_string()),
@@ -311,6 +369,90 @@ mod tests {
         assert_eq!(
             download_failed("Could not write the download: os error 112".to_string()),
             NO_SPACE
+        );
+    }
+
+    /// The whole thing, for real: fetch the zip gyan.dev is serving today, run it through the
+    /// production unpack/verify/swap, then hard-link the result into the folder the app actually
+    /// looks in and prove the resolver picks it over everything already on this machine.
+    ///
+    /// #[ignore] because it downloads about 106 MB:
+    ///     cargo test -- --ignored the_real_download_installs_a_working_ffmpeg --test-threads=1
+    #[tokio::test]
+    #[ignore]
+    async fn the_real_download_installs_a_working_ffmpeg() {
+        let staging = temp_dir("live-staging");
+        let managed = temp_dir("live-managed");
+
+        let client = reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(15))
+            .build()
+            .expect("client");
+        let body = client
+            .get(FFMPEG_URL)
+            .send()
+            .await
+            .expect("gyan.dev could not be reached")
+            .error_for_status()
+            .expect("the download answered with an error")
+            .bytes()
+            .await
+            .expect("the download stopped early");
+        eprintln!("downloaded {} bytes", body.len());
+        assert!(body.len() > 50_000_000, "{} bytes is not a build", body.len());
+        std::fs::write(staging.join("ffmpeg.zip"), &body).expect("write the zip");
+
+        install_from(&staging, &managed).expect("the install");
+
+        for tool in TOOLS {
+            let path = managed.join(format!("{tool}.exe"));
+            assert!(path.is_file(), "{tool} was not published");
+            let version = crate::ffmpeg::run_version(&path)
+                .unwrap_or_else(|| panic!("{tool} would not run from the managed folder"));
+            eprintln!("{tool}: {}", version.lines().next().unwrap_or(""));
+            assert!(version.starts_with(&format!("{tool} version")));
+        }
+
+        // The zip is gone and the tree with it, so only the two tools are left behind.
+        assert!(!staging.join("ffmpeg.zip").exists(), "the zip was kept");
+        let published: Vec<_> = std::fs::read_dir(&managed)
+            .expect("read managed")
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(published.len(), 2, "{published:?}");
+
+        // Now the part the offline tests cannot reach: that the app would pick this copy up
+        // ahead of the winget install already on this machine. Hard-linked rather than copied,
+        // so the proof costs no second 200 MB.
+        let real = crate::ffmpeg::managed_dir().expect("a managed dir");
+        let preexisting = real.exists();
+        std::fs::create_dir_all(&real).expect("create the real managed dir");
+        for tool in TOOLS {
+            let link = real.join(format!("{tool}.exe"));
+            let _ = std::fs::remove_file(&link);
+            std::fs::hard_link(managed.join(format!("{tool}.exe")), &link).expect("hard link");
+        }
+        crate::ffmpeg::forget_resolved_tools();
+        let resolved = crate::ffmpeg::resolve_tool("ffmpeg").expect("ffmpeg resolves");
+        eprintln!("resolver chose: {}", resolved.display());
+
+        // Undo before asserting, so a failure does not leave the links behind.
+        for tool in TOOLS {
+            let _ = std::fs::remove_file(real.join(format!("{tool}.exe")));
+        }
+        if !preexisting {
+            let _ = std::fs::remove_dir(&real);
+        }
+        crate::ffmpeg::forget_resolved_tools();
+
+        sweep(&staging);
+        sweep(&managed);
+
+        assert_eq!(
+            resolved,
+            real.join("ffmpeg.exe"),
+            "the app's own copy did not win the search"
         );
     }
 
