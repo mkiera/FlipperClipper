@@ -16,6 +16,20 @@
       <section id="stage">
         <video id="video" playsinline preload="auto" crossorigin="anonymous"></video>
 
+        <!-- CSS blur() spreads alpha, so the frame's edge fades into the stage while ffmpeg's
+             gblur clamps at the border. Blurring, forcing alpha back to 1, then compositing
+             "in" the source's own alpha gives an opaque blur cut to the picture's silhouette -
+             which leaves the letterbox untouched without anyone having to measure it. -->
+        <svg id="fx-defs" width="0" height="0" aria-hidden="true" focusable="false">
+          <filter id="fx-blur" color-interpolation-filters="sRGB">
+            <feGaussianBlur id="fx-blur-amount" stdDeviation="0" result="spread" />
+            <feComponentTransfer in="spread" result="opaque">
+              <feFuncA type="linear" slope="0" intercept="1" />
+            </feComponentTransfer>
+            <feComposite in="opaque" in2="SourceAlpha" operator="in" />
+          </filter>
+        </svg>
+
         <!-- Sized onto the exported region by overlay.ts, and stacked in the order the export
              applies them: vignette, then text, then the fade over both. -->
         <div id="fx-overlay" hidden>

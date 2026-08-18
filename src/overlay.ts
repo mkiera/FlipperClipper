@@ -13,7 +13,7 @@
  */
 
 import { frameGeometry } from './crop';
-import { cssFilterFor, hasEffect, rgba } from './effects';
+import { blurPixels, cssFilterFor, hasEffect, rgba } from './effects';
 import { currentTime, onTime, videoElement } from './player';
 import { edit, subscribe } from './state';
 import { outputDuration } from './types';
@@ -36,6 +36,7 @@ let vignette!: HTMLElement;
 let textLayer!: HTMLElement;
 let textSpan!: HTMLElement;
 let fadeShade!: HTMLElement;
+let blurAmount!: SVGFEGaussianBlurElement;
 
 function el<T extends HTMLElement>(id: string): T {
   const found = document.getElementById(id);
@@ -52,6 +53,7 @@ export function initOverlay(): void {
   textLayer = el('fx-text');
   textSpan = el('fx-text-span');
   fadeShade = el('fx-fade');
+  blurAmount = el<HTMLElement>('fx-blur-amount') as unknown as SVGFEGaussianBlurElement;
 
   const video = videoElement();
   new ResizeObserver(render).observe(video);
@@ -69,7 +71,10 @@ export function render(): void {
   const effects = edit.effects;
 
   const geometry = edit.media ? frameGeometry(stage) : null;
-  const filter = cssFilterFor(effects, geometry?.scale ?? 1);
+  const scale = geometry?.scale ?? 1;
+  // Set before the filter is applied, so the first blurred frame is drawn at the right radius.
+  blurAmount.setAttribute('stdDeviation', blurPixels(effects, scale).toFixed(2));
+  const filter = cssFilterFor(effects, scale);
   if (video.style.filter !== filter) video.style.filter = filter;
 
   const drawsText = hasEffect(effects, 'text');

@@ -186,10 +186,18 @@ export function cssFilterFor(effects: EffectsState, scale: number): string {
   if (effects.on.contrast) parts.push(`contrast(${s.contrast.amount})`);
   if (effects.on.saturation) parts.push(`saturate(${s.saturation.amount})`);
   if (effects.on.hue) parts.push(`hue-rotate(${s.hue.degrees}deg)`);
-  if (effects.on.blur) parts.push(`blur(${(s.blur.sigma * scale).toFixed(2)}px)`);
+  // Not blur(): that one fades the frame's edge into the stage. #fx-blur is the same Gaussian
+  // with the opacity put back, and overlay.ts sets its radius from blurPixels() below.
+  if (effects.on.blur && scale > 0) parts.push('url(#fx-blur)');
   // 'none' rather than an empty string: any filter value at all, even one that changes
   // nothing, keeps the element on the composited path and off the video overlay plane.
   return parts.length > 0 ? parts.join(' ') : 'none';
+}
+
+/** The blur radius in display pixels: a sigma is in source pixels, and the preview draws the
+ *  frame scaled down, so an unscaled one would show a far heavier blur than the export. */
+export function blurPixels(effects: EffectsState, scale: number): number {
+  return effects.on.blur ? effects.settings.blur.sigma * scale : 0;
 }
 
 /** '#rrggbb' plus an alpha, the way CSS wants it. Used for the text and its plate. */

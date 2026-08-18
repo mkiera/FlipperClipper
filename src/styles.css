@@ -393,6 +393,14 @@ select option:disabled {
 
 /* ------------------------------------------------------------------ stage */
 
+/* Filter definitions only: it must stay in the layout for the filter to resolve, but it has
+   nothing to draw. */
+#fx-defs {
+  position: absolute;
+  width: 0;
+  height: 0;
+}
+
 #workspace {
   display: flex;
   flex: 1;
