@@ -174,6 +174,7 @@ export const EVENT = {
   exportDone: 'export-done',
   exportError: 'export-error',
   updateProgress: 'update-progress',
+  ffmpegProgress: 'ffmpeg-progress',
 } as const;
 
 export function outputDuration(state: EditState): number {

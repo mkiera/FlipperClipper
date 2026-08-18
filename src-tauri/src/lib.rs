@@ -1,11 +1,14 @@
 // Public so tests/real_export.rs can drive the real command builder.
 pub mod ffmpeg;
+mod download;
 mod export;
+mod ffmpeg_install;
 mod settings;
 mod sysutil;
 mod updater;
 
 use std::sync::{Arc, Mutex};
+use tauri::Manager;
 
 pub struct ExportSlot {
     pub child: Option<std::process::Child>,
@@ -40,14 +43,19 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .manage(AppState::new())
         .setup(|app| {
-            // Startup is the one moment nothing in that folder is in use.
+            // Before anything can resolve a tool, so the app's own copy is the first tier.
+            if let Ok(dir) = app.path().app_local_data_dir() {
+                ffmpeg::set_managed_dir(dir.join("ffmpeg"));
+            }
+            // Startup is the one moment nothing in these folders is in use.
+            ffmpeg_install::sweep_leftovers(app.handle());
             updater::clear_updates_dir(app.handle());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             sysutil::ffmpeg_status,
             sysutil::ffmpeg_check_log,
-            sysutil::install_ffmpeg,
+            ffmpeg_install::install_ffmpeg,
             sysutil::probe,
             sysutil::make_filmstrip,
             sysutil::make_preview_proxy,

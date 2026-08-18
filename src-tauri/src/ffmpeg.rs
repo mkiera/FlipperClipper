@@ -1082,6 +1082,26 @@ fn hidden_command_at(program: &std::ffi::OsStr) -> std::process::Command {
 /// even when the environment block this process inherited is stale.
 const REGISTRY_PATH_SCOPES: [&str; 2] = ["User", "Machine"];
 
+/// The identifier from tauri.conf.json, used only by the fallback in managed_dir.
+const APP_IDENTIFIER: &str = "com.mkiera.flipperclipper";
+
+static MANAGED_DIR: OnceLock<PathBuf> = OnceLock::new();
+
+/// Set once from lib.rs's setup hook, before anything can resolve a tool.
+pub fn set_managed_dir(dir: PathBuf) {
+    let _ = MANAGED_DIR.set(dir);
+}
+
+/// Where the app keeps the copy of FFmpeg it downloaded itself, whether or not one is there yet.
+/// The fallback is what Tauri's app_local_data_dir expands to, so a caller running before the
+/// setup hook - and every test - agrees with it.
+pub fn managed_dir() -> Option<PathBuf> {
+    MANAGED_DIR.get().cloned().or_else(|| {
+        std::env::var_os("LOCALAPPDATA")
+            .map(|root| PathBuf::from(root).join(APP_IDENTIFIER).join("ffmpeg"))
+    })
+}
+
 fn resolved_tools() -> &'static Mutex<HashMap<String, PathBuf>> {
     static CACHE: OnceLock<Mutex<HashMap<String, PathBuf>>> = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
@@ -1163,7 +1183,7 @@ fn link_target(path: &Path) -> Option<PathBuf> {
 
 /// The stdout of a `-version` that exited zero, or None - which is what keeps a
 /// zero-byte WinGet alias from winning the search.
-fn run_version(path: &Path) -> Option<String> {
+pub(crate) fn run_version(path: &Path) -> Option<String> {
     let output = hidden_command_at(path.as_os_str())
         .arg("-version")
         .stdin(Stdio::null())
@@ -1191,9 +1211,12 @@ fn candidate_dirs() -> impl Iterator<Item = PathBuf> {
             .unwrap_or_default()
     });
 
+    // The app's own copy first: it is the one binary this app verified itself, it costs no
+    // PowerShell spawn to find, and it is never a reparse point.
     dedupe_dirs(
-        inherited
+        managed_dir()
             .into_iter()
+            .chain(inherited)
             .chain(registry)
             .chain(std::iter::once_with(known_install_dirs).flatten()),
     )
@@ -2949,6 +2972,27 @@ mod tests {
     }
 
     // -- tool resolution ----------------------------------------------------
+
+    #[test]
+    fn the_app_own_copy_is_the_first_directory_tried() {
+        // Ahead of PATH on purpose: it is the one binary this app verified itself.
+        let Some(managed) = managed_dir() else {
+            return;
+        };
+        assert_eq!(candidate_dirs().next(), Some(managed));
+    }
+
+    #[test]
+    fn the_managed_dir_sits_under_the_app_identifier() {
+        if std::env::var_os("LOCALAPPDATA").is_none() {
+            return;
+        }
+        let dir = managed_dir().expect("a managed dir where LOCALAPPDATA exists");
+        assert!(
+            dir.ends_with(PathBuf::from(APP_IDENTIFIER).join("ffmpeg")),
+            "{dir:?}"
+        );
+    }
 
     #[test]
     fn a_path_string_splits_on_semicolons() {

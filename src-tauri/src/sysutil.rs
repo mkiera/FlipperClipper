@@ -132,6 +132,11 @@ fn probe_candidates(name: &str) -> Vec<(&'static str, PathBuf, String)> {
 fn diagnostic_dirs() -> Vec<(&'static str, PathBuf)> {
     let mut dirs: Vec<(&'static str, PathBuf)> = Vec::new();
 
+    // First here because it is first in the resolver; a log that named a different order would
+    // be describing a search the app does not run.
+    if let Some(dir) = ffmpeg::managed_dir() {
+        dirs.push(("managed", dir));
+    }
     if let Some(value) = std::env::var_os("PATH") {
         dirs.extend(
             split_path_list(&value.to_string_lossy())
@@ -264,76 +269,6 @@ fn parse_version_line(text: &str) -> Option<String> {
         return None;
     }
     parts.next().map(|version| version.to_string())
-}
-
-#[tauri::command(async)]
-pub fn install_ffmpeg() -> Result<(), String> {
-    let output = ffmpeg::hidden_command("winget")
-        .args([
-            "install",
-            "-e",
-            "--id",
-            "Gyan.FFmpeg",
-            "--source",
-            "winget",
-            "--accept-package-agreements",
-            "--accept-source-agreements",
-            "--disable-interactivity",
-            "--silent",
-        ])
-        .stdin(Stdio::null())
-        .output()
-        .map_err(|_| {
-            "Windows Package Manager (winget) is not available on this PC, so FFmpeg cannot be \
-             installed automatically. Install FFmpeg yourself and restart FlipperClipper."
-                .to_string()
-        })?;
-
-    if !output.status.success() {
-        let text = format!(
-            "{}{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-        // winget exits non-zero when the package is already present, which is not a failure here:
-        // the honest outcome is that it was installed and only the PATH was stale.
-        if !text.to_lowercase().contains("already installed") {
-            return Err(last_meaningful_line(&text).unwrap_or_else(|| {
-                "The FFmpeg install did not finish. Try running it from a terminal to see why: \
-                 winget install -e --id Gyan.FFmpeg"
-                    .to_string()
-            }));
-        }
-    }
-
-    add_winget_links_to_path();
-    ffmpeg::forget_resolved_tools();
-    Ok(())
-}
-
-/// winget adds its Links folder to the *user's* PATH, which this already-running process
-/// did not inherit. Keeps the PATH children inherit honest too.
-fn add_winget_links_to_path() {
-    let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") else {
-        return;
-    };
-    let links = PathBuf::from(local_app_data)
-        .join("Microsoft")
-        .join("WinGet")
-        .join("Links");
-    if !links.is_dir() {
-        return;
-    }
-
-    let current = std::env::var_os("PATH").unwrap_or_default();
-    let mut dirs: Vec<PathBuf> = std::env::split_paths(&current).collect();
-    if dirs.iter().any(|dir| dir == &links) {
-        return;
-    }
-    dirs.push(links);
-    if let Ok(joined) = std::env::join_paths(dirs) {
-        std::env::set_var("PATH", joined);
-    }
 }
 
 fn last_meaningful_line(text: &str) -> Option<String> {

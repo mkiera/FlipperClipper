@@ -7,6 +7,7 @@ import {
   onExportDone,
   onExportError,
   onExportProgress,
+  onFfmpegProgress,
   pickExportTarget,
   revealInExplorer,
   startExport,
@@ -637,21 +638,48 @@ function bannerShowing(key: string): boolean {
   return banners.querySelector(`[data-key="${key}"]`) !== null;
 }
 
+/** Rewrites a raised banner's text without rebuilding it, which would reset its button. */
+function setBannerMessage(key: string, message: string): void {
+  const msg = banners.querySelector(`[data-key="${key}"] .banner-msg`);
+  if (msg) msg.textContent = message;
+}
+
 export function showFfmpegBanner(onInstalled: () => void = () => {}): void {
   // Re-raising rebuilds the button, losing the disabled flag that blocks a second install.
   if (bannerShowing('ffmpeg')) return;
 
   showBanner('ffmpeg', {
     message: 'FFmpeg is required for exporting.',
-    actionLabel: 'Install it',
+    actionLabel: 'Download FFmpeg (106 MB)',
     onAction: async () => {
+      let unlisten: (() => void) | null = null;
       try {
+        unlisten = await onFfmpegProgress((fraction) => {
+          setBannerMessage(
+            'ffmpeg',
+            fraction >= 1
+              ? 'Unpacking FFmpeg…'
+              : `Downloading FFmpeg… ${Math.round(fraction * 100)}%`,
+          );
+        });
+        setBannerMessage('ffmpeg', 'Downloading FFmpeg…');
         await installFfmpeg();
+        // Confirmed, not assumed: the new copy has to satisfy the same resolver an export uses.
+        if (!(await ffmpegStatus()).available) {
+          throw new Error('FFmpeg was installed but still cannot be run.');
+        }
         hideBanner('ffmpeg');
         patchUi({ ffmpegAvailable: true });
+        showToast('FFmpeg is ready.');
         onInstalled();
       } catch (error) {
+        setBannerMessage(
+          'ffmpeg',
+          'FFmpeg could not be installed. You can also install it yourself and restart FlipperClipper.',
+        );
         showToast(describe(error), [], true);
+      } finally {
+        unlisten?.();
       }
     },
   });

@@ -1,14 +1,13 @@
 //! Self-update against the GitHub Releases API, ported from FinFetcher's UpdateManager.
 
 use std::fs;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
-use tauri::{Emitter, Manager};
+use tauri::Manager;
 
+use crate::download::{extract_zip, find_file, stream_download, user_agent, UnpackError};
 use crate::settings::{self, UpdateChannel};
 
 /// Matches `UpdateInfo` in src/types.ts, which is why the rename is here.
@@ -74,11 +73,6 @@ const INSTALLER_SUFFIX: &str = "-setup.exe";
 
 /// Event name from `EVENT.updateProgress` in src/types.ts.
 const UPDATE_PROGRESS_EVENT: &str = "update-progress";
-
-/// GitHub answers 403 to an unauthenticated request that carries no `User-Agent`.
-fn user_agent(version: &semver::Version) -> String {
-    format!("FlipperClipper/{version} (+https://github.com/mkiera/FlipperClipper)")
-}
 
 #[derive(Deserialize, Clone)]
 struct GhAsset {
@@ -526,66 +520,27 @@ async fn unpack_alpha_build(
     dir: &Path,
 ) -> Result<PathBuf, String> {
     let zip = dir.join("build.zip");
-    stream_download(app, &build.download_url, &zip, None, Some(ARTIFACT_GONE)).await?;
-    extract_zip(&zip, dir)?;
+    stream_download(
+        app,
+        &build.download_url,
+        &zip,
+        None,
+        Some(ARTIFACT_GONE),
+        UPDATE_PROGRESS_EVENT,
+    )
+    .await?;
+    extract_zip(&zip, dir).map_err(|e| match e {
+        UnpackError::PowerShellMissing =>
+            "Windows PowerShell could not be started, so the build could not be unpacked.".to_string(),
+        UnpackError::Failed => "That build's download could not be unpacked.".to_string(),
+    })?;
 
-    find_setup_exe(dir, 3).ok_or_else(|| {
+    find_file(dir, 3, &|name| name.to_ascii_lowercase().ends_with(INSTALLER_SUFFIX)).ok_or_else(|| {
         format!(
             "{} does not contain an installer, so there is nothing to run.",
             build.artifact_name
         )
     })
-}
-
-/// Expand-Archive rather than a zip crate, and the path travels in an environment variable
-/// because PowerShell re-parses everything after -Command.
-fn extract_zip(zip: &Path, dir: &Path) -> Result<(), String> {
-    let status = crate::ffmpeg::hidden_command("powershell")
-        .args([
-            "-NoProfile",
-            "-NonInteractive",
-            "-Command",
-            "Expand-Archive -LiteralPath $env:FLIPPERCLIPPER_ZIP \
-             -DestinationPath $env:FLIPPERCLIPPER_ZIP_DEST -Force",
-        ])
-        .env("FLIPPERCLIPPER_ZIP", zip)
-        .env("FLIPPERCLIPPER_ZIP_DEST", dir)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map_err(|_| {
-            "Windows PowerShell could not be started, so the build could not be unpacked."
-                .to_string()
-        })?;
-
-    if !status.success() {
-        // Expand-Archive reads the central directory at the end, so a truncated download fails here.
-        return Err("That build's download could not be unpacked.".to_string());
-    }
-    Ok(())
-}
-
-fn find_setup_exe(dir: &Path, depth: u8) -> Option<PathBuf> {
-    let mut subdirs = Vec::new();
-    for entry in fs::read_dir(dir).ok()?.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            subdirs.push(path);
-        } else if path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| name.to_ascii_lowercase().ends_with(INSTALLER_SUFFIX))
-        {
-            return Some(path);
-        }
-    }
-    if depth == 0 {
-        return None;
-    }
-    subdirs
-        .into_iter()
-        .find_map(|subdir| find_setup_exe(&subdir, depth - 1))
 }
 
 const EXPORT_RUNNING: &str =
@@ -638,102 +593,16 @@ async fn download_and_install(
         .ok_or_else(|| format!("{} is not a usable file name.", asset_name))?;
     let dest = dir.join(file_name);
 
-    stream_download(&app, download_url, &dest, Some(size_bytes), None).await?;
+    stream_download(
+        &app,
+        download_url,
+        &dest,
+        Some(size_bytes),
+        None,
+        UPDATE_PROGRESS_EVENT,
+    )
+    .await?;
     spawn_installer(&app, &dest, &dir)
-}
-
-/// Streams one file to disk, emitting progress, and deletes anything short of its promised length.
-async fn stream_download(
-    app: &tauri::AppHandle,
-    download_url: &str,
-    dest: &Path,
-    size_bytes: Option<u64>,
-    gone_message: Option<&str>,
-) -> Result<(), String> {
-    let client = reqwest::Client::builder()
-        // No overall timeout: this body is the whole installer and a slow connection is not an error.
-        .connect_timeout(Duration::from_secs(15))
-        .build()
-        .map_err(|e| format!("Could not start the download: {e}"))?;
-
-    let response = client
-        .get(download_url)
-        .header(
-            reqwest::header::USER_AGENT,
-            user_agent(&app.package_info().version),
-        )
-        .send()
-        .await
-        .map_err(|e| format!("Could not reach the download: {e}"))?;
-
-    if !response.status().is_success() {
-        if let (404, Some(gone)) = (response.status().as_u16(), gone_message) {
-            return Err(gone.to_string());
-        }
-        return Err(format!(
-            "The download answered with HTTP {}.",
-            response.status()
-        ));
-    }
-
-    // The releases API states a length; nightly.link only sends one back.
-    let expected = size_bytes.or_else(|| response.content_length());
-
-    let mut file =
-        fs::File::create(dest).map_err(|e| format!("Could not write the download: {e}"))?;
-    let mut stream = response.bytes_stream();
-    let mut written: u64 = 0;
-    let mut last_emitted = 0.0_f64;
-    let mut last_emitted_at = Instant::now();
-
-    while let Some(chunk) = stream.next().await {
-        let chunk = match chunk {
-            Ok(chunk) => chunk,
-            Err(e) => {
-                let _ = fs::remove_file(dest);
-                return Err(format!("The download stopped early: {e}"));
-            }
-        };
-        if let Err(e) = file.write_all(&chunk) {
-            let _ = fs::remove_file(dest);
-            return Err(format!("Could not write the download: {e}"));
-        }
-        written += chunk.len() as u64;
-
-        // Per chunk would be hundreds of IPC events a second to move the bar by less than a pixel.
-        let Some(total) = expected.filter(|total| *total > 0) else {
-            continue;
-        };
-        let fraction = (written as f64 / total as f64).min(1.0);
-        if fraction - last_emitted >= 0.01 || last_emitted_at.elapsed() >= Duration::from_millis(100)
-        {
-            last_emitted = fraction;
-            last_emitted_at = Instant::now();
-            let _ = app.emit(UPDATE_PROGRESS_EVENT, fraction);
-        }
-    }
-
-    if let Err(e) = file.flush() {
-        let _ = fs::remove_file(dest);
-        return Err(format!("Could not finish writing the download: {e}"));
-    }
-    drop(file);
-
-    // A stream that ends is indistinguishable from a connection that was cut, and this file is
-    // about to be executed as an installer.
-    if let Some(total) = expected {
-        if written != total {
-            let _ = fs::remove_file(dest);
-            return Err(format!(
-                "The download stopped early — got {} bytes of the {} it should have. \
-                 The incomplete file has been deleted; please try again.",
-                written, total
-            ));
-        }
-    }
-
-    let _ = app.emit(UPDATE_PROGRESS_EVENT, 1.0_f64);
-    Ok(())
 }
 
 /// Hands one installer to Windows and gets out of the way. On success this process is exiting.

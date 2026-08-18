@@ -160,6 +160,11 @@ export function onUpdateProgress(cb: (fraction: number) => void): Promise<Unlist
   return listen<number>(EVENT.updateProgress, (e) => cb(e.payload));
 }
 
+/** Fraction 0-1 while the app downloads its own copy of FFmpeg. */
+export function onFfmpegProgress(cb: (fraction: number) => void): Promise<UnlistenFn> {
+  return listen<number>(EVENT.ffmpegProgress, (e) => cb(e.payload));
+}
+
 /** Tauri swallows OS drops at the window level, so HTML5 drop never fires. */
 export function onDragDrop(handler: (event: DragDropEvent) => void): Promise<UnlistenFn> {
   return getCurrentWebview().onDragDropEvent((e) => handler(e.payload));
