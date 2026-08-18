@@ -174,8 +174,9 @@ pub fn atempo_chain(speed: f64) -> Vec<String> {
 }
 
 /// One pass of EBU R128, at the target streaming services and chat clients settle around.
-/// TP=-1.5 is a true-peak ceiling, which is what makes this safe where a plain multiplier is
-/// not: whatever gain it works out can never clip, however quiet the source was.
+/// TP=-1.5 is a true-peak ceiling, so the gain it works out cannot clip however quiet the
+/// source was. That holds only as far as the filter: `volume` rides after it, and 1.5 dB of
+/// headroom is spent at a trim of about 119%.
 const LOUDNORM: &str = "loudnorm=I=-16:TP=-1.5:LRA=11";
 
 /// areverse has to buffer the entire stream before it can emit a sample, so it sits last,

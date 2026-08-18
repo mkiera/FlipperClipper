@@ -99,7 +99,7 @@
           <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M1 7h2v2H1zm3-3h2v8H4zm3-3h2v14H7zm3 4h2v6h-2zm3 3h2v2h-2z" /></svg>
         </button>
 
-        <div class="slider-group" id="volume-group" title="Volume. Above 100% the boost applies to the exported clip; the preview tops out at 100%.">
+        <div class="slider-group" id="volume-group" title="Volume. Above 100% the boost applies to the exported clip; the preview tops out at 100%. After normalizing, a trim past about 120% spends the headroom and starts clipping peaks.">
           <input id="volume-slider" type="range" min="0" max="200" step="1" value="100" list="volume-notches" aria-label="Volume" />
           <datalist id="volume-notches">
             <option value="100" label="100%"></option>
