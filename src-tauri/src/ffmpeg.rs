@@ -280,6 +280,7 @@ fn audio_filters(job: &ExportJob) -> Vec<String> {
 /// The strongest vignette the slider can ask for. `vignette` clips its angle at PI/2, which is
 /// a black frame with a bright dot in it; PI/2.5 is heavy but still a picture.
 const VIGNETTE_MAX_ANGLE: f64 = std::f64::consts::PI / 2.5;
+const _: () = assert!(VIGNETTE_MAX_ANGLE < std::f64::consts::FRAC_PI_2);
 
 /// The gap drawtext leaves at an edge, as a fraction of frame height - height on both axes, so
 /// the margin looks square rather than stretching with a wide frame. overlay.ts places the
@@ -1739,7 +1740,6 @@ mod tests {
         // Full strength stops short of PI/2, which vignette clips at and which is a black
         // frame with a dot in the middle rather than a picture.
         assert_eq!(vf(&args), format!("vignette=angle={}", fmt_num(VIGNETTE_MAX_ANGLE)));
-        assert!(VIGNETTE_MAX_ANGLE < std::f64::consts::FRAC_PI_2);
     }
 
     #[test]

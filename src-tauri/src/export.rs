@@ -694,7 +694,10 @@ mod tests {
 
     #[test]
     fn every_effect_dial_is_bounded_the_way_its_slider_is() {
-        let cases: [(&dyn Fn(&mut ExportJob, f64), f64, f64, &str); 8] = [
+        /// Set one dial, a value it should take, a value it should refuse, and its name.
+        type Case<'a> = (&'a dyn Fn(&mut ExportJob, f64), f64, f64, &'a str);
+
+        let cases: [Case; 8] = [
             (&|j, v| j.effects.brightness = Some(v), 1.2, 2.5, "Brightness"),
             (&|j, v| j.effects.contrast = Some(v), 1.2, 3.5, "Contrast"),
             (&|j, v| j.effects.saturation = Some(v), 0.0, -0.1, "Saturation"),
