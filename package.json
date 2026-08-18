@@ -1,7 +1,7 @@
 {
   "name": "flipperclipper",
   "private": true,
-  "version": "0.1.6-beta",
+  "version": "0.1.7-beta",
   "type": "module",
   "scripts": {
     "dev": "vite",
