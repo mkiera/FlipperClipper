@@ -334,8 +334,8 @@ async fn fetch_alpha_builds(current: &semver::Version) -> Result<Vec<AlphaBuild>
         .into_iter()
         .take(ALPHA_MAX_BRANCHES)
     {
-        // The artifact name is asked for rather than guessed: a workflow_dispatch run is named
-        // after the dispatch input instead of the branch.
+        // The artifact name is asked for rather than derived from the branch: only the run knows
+        // what build-test.yml uploaded.
         let artifacts: Result<GhArtifactList, String> = github_json(
             &client,
             &format!("{ALPHA_RUNS_URL_BASE}/{}/artifacts", run.id),
@@ -1041,7 +1041,7 @@ mod tests {
     #[test]
     fn a_row_carries_the_nightly_link_url_for_the_artifact_the_run_actually_uploaded() {
         let run = newest_run_per_branch(runs(RUNS_PAYLOAD)).remove(0);
-        // Named after the dispatch input, not the branch - which is why the artifact name is asked for.
+        // Whatever build-test.yml uploaded is what gets downloaded; the name is never derived here.
         let build = alpha_build(&run, "FlipperClipper-Setup_handles-retry".to_string())
             .expect("a sane artifact name is usable");
         assert_eq!(build.run_id, 501);

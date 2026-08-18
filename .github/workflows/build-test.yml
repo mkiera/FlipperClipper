@@ -2,11 +2,6 @@ name: Build Test
 
 on:
   workflow_dispatch:
-    inputs:
-      build_name:
-        description: 'Build name suffix (e.g., crop-handles)'
-        required: false
-        default: 'test'
   push:
     branches:
       - 'feature/**'
@@ -36,26 +31,6 @@ jobs:
 
       - name: Install npm dependencies
         run: npm ci
-
-      # upload-artifact rejects names containing / \ : < > | * ? " or newline, and
-      # feature/** invites nested branch names. The input arrives via env: so free
-      # text containing quotes or $(...) cannot run on the runner.
-      - name: Get build name
-        id: build_name
-        shell: bash
-        env:
-          INPUT_BUILD_NAME: ${{ github.event.inputs.build_name }}
-        run: |
-          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
-            RAW_NAME="$INPUT_BUILD_NAME"
-          else
-            RAW_NAME=${GITHUB_REF#refs/heads/}
-            RAW_NAME=${RAW_NAME#feature/}
-            RAW_NAME=${RAW_NAME#bugfix/}
-          fi
-          SAFE_NAME=${RAW_NAME//[^A-Za-z0-9._-]/-}
-          echo "NAME=${SAFE_NAME}" >> $GITHUB_OUTPUT
-          echo "artifact name suffix: $SAFE_NAME"
 
       # No version rewrite, unlike the release workflow: there is no tag to take
       # one from. build-info.json's commit is what tells two test builds apart.
@@ -105,6 +80,6 @@ jobs:
       - name: Upload Build Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: FlipperClipper-Setup_${{ steps.build_name.outputs.NAME }}
+          name: FlipperClipper-Setup
           path: dist_installer/FlipperClipper-Setup.exe
           retention-days: 30
