@@ -334,7 +334,8 @@ input[type='range']:disabled::-webkit-slider-thumb {
   width: 110px;
 }
 
-#speed-input {
+#speed-input,
+#volume-input {
   width: 64px;
 }
 

@@ -44,6 +44,9 @@ export interface Rendition {
 
 export const OUTPUT_HEIGHTS: number[] = [2160, 1440, 1080, 720, 480, 360];
 
+/** The range the volume input and the Rust validator agree on, as a multiplier. */
+export const VOLUME_MAX = 10;
+
 /** The range the kbps input and the Rust validator agree on. */
 export const VIDEO_KBPS_MIN = 50;
 export const VIDEO_KBPS_MAX = 200_000;
@@ -58,7 +61,7 @@ export interface ExportJob {
   crop: Rect | null;
   mute: boolean;
   reverse: boolean;
-  /** 0 - 2. Above 1 is a boost the preview cannot show. */
+  /** 0 - 10. Above 1 is a boost the preview cannot show. */
   volume: number;
   format: ExportFormat;
   quality: QualityPreset;
@@ -79,7 +82,7 @@ export interface EditState {
   crop: Rect | null;
   mute: boolean;
   reverse: boolean;
-  /** 0 - 2, 1 = unchanged. */
+  /** 0 - 10, 1 = unchanged. */
   volume: number;
   format: ExportFormat;
   /** UI only: swaps the format dropdown to AudioFormats. Not sent to Rust. */

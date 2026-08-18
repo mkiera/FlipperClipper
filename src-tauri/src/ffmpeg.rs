@@ -1616,6 +1616,11 @@ mod tests {
         let args = build_args(&j, "libx264", true, 1920, 1080, 30.0);
         assert_eq!(value_after(&args, "-af"), Some("atempo=2.0"));
 
+        // A very quiet source needs far more than the slider's 200%, and the filter takes it.
+        j.volume = 9.5;
+        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0);
+        assert_eq!(value_after(&args, "-af"), Some("atempo=2.0,volume=9.5"));
+
         // Volume alone still produces an -af.
         j.speed = 1.0;
         j.volume = 0.5;

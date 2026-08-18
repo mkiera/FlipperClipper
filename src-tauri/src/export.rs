@@ -260,8 +260,8 @@ fn validate(job: &ExportJob) -> Result<(), String> {
     if !job.speed.is_finite() || !(0.05..=20.0).contains(&job.speed) {
         return Err("Speed has to be between 0.05x and 20x.".to_string());
     }
-    if !job.volume.is_finite() || !(0.0..=2.0).contains(&job.volume) {
-        return Err("Volume has to be between 0% and 200%.".to_string());
+    if !job.volume.is_finite() || !(0.0..=10.0).contains(&job.volume) {
+        return Err("Volume has to be between 0% and 1000%.".to_string());
     }
 
     if matches!(job.quality, QualityPreset::Fit) {
@@ -529,6 +529,28 @@ mod tests {
             assert_eq!(
                 validate(&j).unwrap_err(),
                 "The output size has to be 2160, 1440, 1080, 720, 480 or 360."
+            );
+        }
+    }
+
+    #[test]
+    fn the_volume_reaches_past_the_slider_but_not_past_the_validator() {
+        // The slider stops at 200%; a barely-audible source needs more than that, and the
+        // typed field is what reaches it.
+        for volume in [0.0, 1.0, 2.5, 10.0] {
+            let mut j = job();
+            j.volume = volume;
+            assert_ne!(
+                validate(&j).unwrap_err(),
+                "Volume has to be between 0% and 1000%."
+            );
+        }
+        for volume in [-0.1, 10.1, f64::NAN, f64::INFINITY] {
+            let mut j = job();
+            j.volume = volume;
+            assert_eq!(
+                validate(&j).unwrap_err(),
+                "Volume has to be between 0% and 1000%."
             );
         }
     }

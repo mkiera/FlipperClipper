@@ -30,6 +30,7 @@ import {
   VIDEO_FORMATS,
   VIDEO_KBPS_MAX,
   VIDEO_KBPS_MIN,
+  VOLUME_MAX,
   defaultFormatFor,
   losslessEligible,
   outputDuration,
@@ -85,7 +86,7 @@ let cropBtn!: HTMLButtonElement;
 let muteBtn!: HTMLButtonElement;
 let volumeGroup!: HTMLElement;
 let volumeSlider!: HTMLInputElement;
-let volumeReadout!: HTMLElement;
+let volumeInput!: HTMLInputElement;
 let audioOnlyBtn!: HTMLButtonElement;
 let formatSelect!: HTMLSelectElement;
 let qualitySelect!: HTMLSelectElement;
@@ -133,7 +134,7 @@ export function initControls(controlsDeps: ControlsDeps): void {
   muteBtn = el<HTMLButtonElement>('mute-btn');
   volumeGroup = el('volume-group');
   volumeSlider = el<HTMLInputElement>('volume-slider');
-  volumeReadout = el('volume-readout');
+  volumeInput = el<HTMLInputElement>('volume-input');
   audioOnlyBtn = el<HTMLButtonElement>('audio-only-btn');
   formatSelect = el<HTMLSelectElement>('format-select');
   qualitySelect = el<HTMLSelectElement>('quality-select');
@@ -154,6 +155,7 @@ export function initControls(controlsDeps: ControlsDeps): void {
   toastActions = el('toast-actions');
 
   speedInput.title = 'Speed, 0.05 to 20. The preview tops out at 16x; export uses the exact value.';
+  volumeInput.title = `Volume percent, 0 to ${VOLUME_MAX * 100}. The slider stops at 200; type a bigger number to boost a very quiet clip further.`;
 
   openBtn.addEventListener('click', () => deps.openFile());
   playBtn.addEventListener('click', togglePlay);
@@ -181,6 +183,20 @@ export function initControls(controlsDeps: ControlsDeps): void {
 
   volumeSlider.addEventListener('input', () => {
     patchEdit({ volume: Number(volumeSlider.value) / 100 });
+  });
+
+  volumeInput.addEventListener('change', () => {
+    // A number input hands back an empty string for anything it could not parse, and Number('')
+    // is 0 - which is a real volume here, so emptiness has to be caught before the parse.
+    const text = volumeInput.value.trim();
+    const raw = Number(text);
+    if (text === '' || !Number.isFinite(raw)) {
+      volumeInput.value = String(Math.round(edit.volume * 100));
+      return;
+    }
+    const percent = Math.round(clamp(raw, 0, VOLUME_MAX * 100));
+    if (percent !== raw) volumeInput.value = String(percent);
+    patchEdit({ volume: percent / 100 });
   });
 
   formatSelect.addEventListener('change', () => {
@@ -339,8 +355,13 @@ function render(): void {
 
   volumeGroup.hidden = hasMedia && !hasAudio;
   volumeSlider.disabled = !hasMedia || edit.mute;
-  volumeSlider.value = String(Math.round(edit.volume * 100));
-  volumeReadout.textContent = `${Math.round(edit.volume * 100)}%`;
+  volumeInput.disabled = !hasMedia || edit.mute;
+  const volumePercent = Math.round(edit.volume * 100);
+  // The slider covers 0..200; a typed boost above that pins it to the end while the real
+  // value stands in the number input beside it.
+  volumeSlider.value = String(Math.min(volumePercent, 200));
+  // Left alone while being typed in, the same as the speed input.
+  if (document.activeElement !== volumeInput) volumeInput.value = String(volumePercent);
 
   audioOnlyBtn.disabled = !hasMedia || !hasAudio || edit.mute;
   audioOnlyBtn.classList.toggle('active', edit.audioOnly);
