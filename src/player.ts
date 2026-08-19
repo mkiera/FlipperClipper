@@ -322,7 +322,7 @@ function syncFromState(): void {
   // Attaching lands after this render, so the one call that succeeds asks for another - and
   // only that call, or re-rendering would chase itself.
   if (wanted > 1 && edit.src) {
-    void enableBoost(video, edit.src).then((attached) => {
+    void enableBoost(video).then((attached) => {
       if (attached) refresh();
     });
   }
