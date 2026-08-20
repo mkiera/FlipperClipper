@@ -3,10 +3,14 @@
  *
  * A number in tauri.conf.json is right only until the next button lands in the row, and the
  * row is the one part of the layout that cannot shrink - everything else just gets smaller.
- * So the row is measured at its widest and the window is told never to go below it.
  *
- * The measurement is clamped to the display: on a screen too narrow to hold the row there is
- * no minimum that helps, and a window wider than the monitor is worse than a wrapped row.
+ * The row is two groups either side of the spacer, and it is built to break between them, so
+ * the minimum is the wider GROUP rather than the pair. A window narrower than the pair drops
+ * output and export onto a second line, which is a layout the app is meant to have; one
+ * narrower than a single group would squeeze controls into each other, which it is not.
+ *
+ * The measurement is clamped to the display: on a screen too narrow to hold even one group
+ * there is no minimum that helps, and a window wider than the monitor is worse than a wrap.
  */
 
 import { setMinWindowSize } from './ipc';
@@ -56,7 +60,9 @@ export async function applyMinWindowSize(): Promise<void> {
   const controls = document.getElementById('controls');
   if (!controls) return;
 
-  const needed = widestControlRow(controls) + MARGIN;
+  const style = getComputedStyle(controls);
+  const padding = parseFloat(style.paddingLeft) + parseFloat(style.paddingRight);
+  const needed = widestControlGroup(controls) + padding + MARGIN;
   const room = Math.max(window.screen.availWidth - SCREEN_MARGIN, FLOOR);
   applied = Math.max(Math.min(needed, room), FLOOR);
 
@@ -68,13 +74,16 @@ export async function applyMinWindowSize(): Promise<void> {
 }
 
 /**
- * The row at its widest: every optional control showing, the size estimate at its longest,
- * and an export running - the progress bar is wider than the button it replaces.
+ * The widest group can be at its widest: every optional control showing, the size estimate at
+ * its longest, and an export running - the progress bar is wider than the button it replaces.
  *
  * Everything is put back before returning. None of it is ever seen: the browser paints at the
  * end of a task, and this whole function is one synchronous run.
  */
-function widestControlRow(controls: HTMLElement): number {
+function widestControlGroup(controls: HTMLElement): number {
+  const groups = [...controls.querySelectorAll<HTMLElement>('.control-group')];
+  if (groups.length === 0) return 0;
+
   const undo: (() => void)[] = [];
 
   const reveal = (id: string) => {
@@ -105,16 +114,15 @@ function widestControlRow(controls: HTMLElement): number {
     });
   };
 
-  // Laid out on one line at its natural size, so nothing is squeezed by wrapping: a shrunken
-  // control would report less than it needs and the minimum would come out too small.
-  const wrap = controls.style.flexWrap;
-  const width = controls.style.width;
-  controls.style.flexWrap = 'nowrap';
-  controls.style.width = 'max-content';
-  undo.push(() => {
-    controls.style.flexWrap = wrap;
-    controls.style.width = width;
-  });
+  // At its natural size, so nothing is squeezed: a group narrow enough to shrink its children
+  // would report less than it needs and the minimum would come out too small.
+  for (const group of groups) {
+    const was = group.style.width;
+    group.style.width = 'max-content';
+    undo.push(() => {
+      group.style.width = was;
+    });
+  }
 
   for (const id of SOMETIMES_HIDDEN) reveal(id);
   write('effects-badge', '8');
@@ -126,12 +134,34 @@ function widestControlRow(controls: HTMLElement): number {
   // is whichever of them is wider, never the pair.
   conceal('bitrate-kbps');
   reveal('fit-mb');
-  const withTarget = controls.getBoundingClientRect().width;
+  const withTarget = widestLane(controls, groups);
 
   conceal('fit-mb');
   reveal('bitrate-kbps');
-  const withBitrate = controls.getBoundingClientRect().width;
+  const withBitrate = widestLane(controls, groups);
 
   for (const step of undo.reverse()) step();
   return Math.ceil(Math.max(withTarget, withBitrate));
+}
+
+/**
+ * The widest line any one group would make. A group ahead of the spacer shares its line with
+ * it, and the spacer is entitled to its min-width, so that group's line costs a little more
+ * than the group itself.
+ */
+function widestLane(controls: HTMLElement, groups: HTMLElement[]): number {
+  const kids = [...controls.children];
+  const spacer = controls.querySelector<HTMLElement>('.spacer');
+  const spacerAt = spacer ? kids.indexOf(spacer) : -1;
+  const toll = spacer
+    ? (parseFloat(getComputedStyle(controls).columnGap) || 0) +
+      (parseFloat(getComputedStyle(spacer).minWidth) || 0)
+    : 0;
+
+  return Math.max(
+    ...groups.map((group) => {
+      const shares = spacerAt > kids.indexOf(group);
+      return group.getBoundingClientRect().width + (shares ? toll : 0);
+    }),
+  );
 }

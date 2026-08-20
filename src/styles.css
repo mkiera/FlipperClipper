@@ -911,11 +911,19 @@ select option:disabled {
   background: #192635;
 }
 
-/* tauri.conf.json's minWidth is sized to this row: 1710px is the narrowest it fits on one
-   line in its widest state - a clip open, a manual bitrate, a size estimate showing and an
-   export running - measured, with 30px of slack. Adding a control here, or widening one,
-   pushes that number up and the row starts wrapping again at the minimum size. */
+/* The row is two groups either side of the spacer, and the wrap can only fall between them:
+   playback and clip edits stay together, output and export drop to a second line when the
+   window is too narrow to hold both. windowsize.ts sizes the window minimum to the wider
+   group rather than to the pair, so the minimum is a group's width and not a row's. */
+.control-group {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 8px;
+}
 
+/* Basis zero, so it never counts against the line it is on: the second group wraps whole
+   rather than the spacer being pushed down alone, and the wrapped group starts at the left. */
 .spacer {
   flex: 1;
   min-width: 4px;
