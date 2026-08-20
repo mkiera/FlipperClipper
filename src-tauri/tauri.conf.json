@@ -15,7 +15,7 @@
       {
         "title": "FlipperClipper",
         "width": 1100,
-        "height": 520,
+        "height": 800,
         "minWidth": 1100,
         "minHeight": 520,
         "resizable": true,
