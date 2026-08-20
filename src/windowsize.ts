@@ -9,8 +9,12 @@
  * output and export onto a second line, which is a layout the app is meant to have; one
  * narrower than a single group would squeeze controls into each other, which it is not.
  *
- * The measurement is clamped to the display: on a screen too narrow to hold even one group
- * there is no minimum that helps, and a window wider than the monitor is worse than a wrap.
+ * What the row needs is the floor, not the answer. WANTED is the minimum the app asks for,
+ * chosen for how much picture is left above the row rather than for whether the row fits.
+ * The measurement stops that choice going too low as controls are added.
+ *
+ * Both are clamped to the display: a window wider than the monitor is worse than a wrap, so
+ * a screen with no room for WANTED gets what it can take, down to what the row needs.
  */
 
 import { setMinWindowSize } from './ipc';
@@ -22,7 +26,12 @@ const MIN_HEIGHT = 520;
 /** Left clear at the sides, for the window frame and a margin of politeness. */
 const SCREEN_MARGIN = 64;
 
-/** Below this the app is unusable whatever the row says. */
+/** The minimum the app asks for where the screen has room. The row fits in about 900, so this
+ *  is a comfort call: below it the stage is too small to judge an edit in. */
+const WANTED = 1100;
+
+/** Below this the app is unusable whatever the row says, and it catches a measurement that
+ *  found no groups to measure. */
 const FLOOR = 640;
 
 /** Slack on the measurement. The format dropdown is sized by its longest option, and the audio
@@ -62,9 +71,10 @@ export async function applyMinWindowSize(): Promise<void> {
 
   const style = getComputedStyle(controls);
   const padding = parseFloat(style.paddingLeft) + parseFloat(style.paddingRight);
-  const needed = widestControlGroup(controls) + padding + MARGIN;
-  const room = Math.max(window.screen.availWidth - SCREEN_MARGIN, FLOOR);
-  applied = Math.max(Math.min(needed, room), FLOOR);
+  const needed = Math.max(widestControlGroup(controls) + padding + MARGIN, FLOOR);
+  const room = window.screen.availWidth - SCREEN_MARGIN;
+  // WANTED where the screen allows it, and never under what the row measured either way.
+  applied = Math.max(Math.min(Math.max(needed, WANTED), room), needed);
 
   try {
     await setMinWindowSize(applied, MIN_HEIGHT);
