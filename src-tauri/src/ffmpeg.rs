@@ -229,17 +229,31 @@ fn ramp_segments(job: &ExportJob) -> Vec<ramp::Segment> {
     ramp::segments(&job.ramp, job.speed, job.in_point, job.out_point)
 }
 
-/// The retiming filter: one division at a single speed, a nested expression under a curve,
+/// The retiming filters: one division at a single speed, a nested expression under a curve,
 /// and nothing at all when neither changes the timing.
-fn setpts_filter(job: &ExportJob) -> Option<String> {
+///
+/// A curve also needs its frame rate settling. A single speed leaves a clip that is evenly
+/// spaced, just at a different rate, and the muxer writes that as it stands. A curve leaves
+/// frames bunched where it ran fast and spread where it ran slow, and ffmpeg's own conversion
+/// to a constant rate overshoots: measured on a five-part ramp, 5.967s of picture against a
+/// predicted 5.914s. The audio is padded to the prediction, so that gap is the two of them
+/// coming apart. An explicit fps brings it inside half a frame.
+fn retime_filters(job: &ExportJob, fps: f64) -> Vec<String> {
     if ramp::has_ramp(&job.ramp) {
         if let Some(expr) = ramp::setpts_expression(&ramp_segments(job)) {
             // Quoted inside the graph: the expression is full of commas, which separate
             // filters, and ffmpeg reads everything after the first one as the next filter.
-            return Some(format!("setpts='({})/TB'", expr));
+            let mut parts = vec![format!("setpts='({})/TB'", expr)];
+            if fps > 0.0 {
+                parts.push(format!("fps={}", fmt_num(fps)));
+            }
+            return parts;
         }
     }
-    ((job.speed - 1.0).abs() > 1e-9).then(|| format!("setpts=PTS/{}", fmt_num(job.speed)))
+    if (job.speed - 1.0).abs() > 1e-9 {
+        return vec![format!("setpts=PTS/{}", fmt_num(job.speed))];
+    }
+    Vec::new()
 }
 
 /// The source window, which the speed change does not alter. Keeping it separate from
@@ -918,9 +932,7 @@ pub fn build_args(
         if let Some(r) = crop {
             chain.push(format!("crop={}:{}:{}:{}", r.w, r.h, r.x, r.y));
         }
-        if let Some(filter) = setpts_filter(job) {
-            chain.push(filter);
-        }
+        chain.extend(retime_filters(job, fps));
         // The gif branch owns its own scale, so the effects and the text both go in ahead of
         // it - the same relative order as the video branch, minus the split.
         chain.extend(effect_filters(&job.effects));
@@ -980,9 +992,7 @@ pub fn build_args(
         // the source pixel space the overlay measured them in.
         vfilters.push(format!("crop={}:{}:{}:{}", r.w, r.h, r.x, r.y));
     }
-    if let Some(filter) = setpts_filter(job) {
-        vfilters.push(filter);
-    }
+    vfilters.extend(retime_filters(job, fps));
     // Ahead of the scale, so a sigma given in source pixels means the same thing whatever
     // size the clip is exported at - which is what the preview shows.
     vfilters.extend(effect_filters(&job.effects));
@@ -2136,6 +2146,30 @@ mod tests {
     }
 
     // -- speed --------------------------------------------------------------
+
+    #[test]
+    fn a_curve_settles_the_frame_rate_where_a_single_speed_does_not_need_to() {
+        // One speed leaves the clip evenly spaced, just at another rate, and the muxer writes
+        // that as it stands. A curve leaves frames bunched where it ran fast, and ffmpeg's own
+        // conversion to a constant rate overshoots the length the audio is padded to.
+        let mut j = job(QualityPreset::High);
+        j.speed = 2.0;
+        let graph = build_args(&j, "libx264", true, 1920, 1080, 30.0, None).join(" ");
+        assert!(graph.contains("setpts=PTS/2.0"), "{graph}");
+        assert!(!graph.contains("fps=30"), "{graph}");
+
+        j.speed = 1.0;
+        j.ramp = vec![
+            SpeedPoint { t: 0.0, speed: 1.0 },
+            SpeedPoint { t: 2.0, speed: 4.0 },
+        ];
+        let graph = build_args(&j, "libx264", true, 1920, 1080, 30.0, None).join(" ");
+        assert!(graph.contains("setpts='("), "{graph}");
+        assert!(graph.contains("fps=30"), "{graph}");
+        // The expression itself, not a division: a curve has no single speed to divide by.
+        assert!(!graph.contains("setpts=PTS/"), "{graph}");
+    }
+
 
     #[test]
     fn atempo_chains_outside_its_supported_range() {

@@ -2,14 +2,18 @@
  * The speed curve: how fast the clip runs at each moment, rather than all the way through.
  *
  * A ramp is a list of points on the SOURCE timeline, each holding a multiplier on top of the
- * speed slider. Between two points the multiplier moves linearly; before the first and after
- * the last it holds flat. No points at all means a flat 1, which is the speed slider on its
- * own and the behaviour the app had before ramps existed.
+ * speed slider. No points at all means a flat 1, which is the speed slider on its own and the
+ * behaviour the app had before ramps existed.
+ *
+ * Between two points the speed moves GEOMETRICALLY, not by equal steps: halfway from 8x to 1x
+ * is 2.83x rather than 4.5x. Speed is multiplicative, and the lane draws it on a log axis, so
+ * a geometric move is the one that draws as a straight line between the two points. The line
+ * in the lane is then the speed itself rather than a picture of it.
  *
  * Output time is the integral of 1/speed, so a ramp shortens the clip by a different amount
- * than its endpoints suggest. Linear speed integrates to a logarithm, and the closed form is
- * used rather than a sum of slices: ffmpeg's setpts gets the same expression, so the preview,
- * the size estimate and the exported file all agree on how long the clip is.
+ * than its endpoints suggest. A geometric ramp integrates in closed form, and ffmpeg's setpts
+ * gets that same expression, so the preview, the size estimate and the exported file all agree
+ * on how long the clip is.
  *
  * DOM-free on purpose - ramplane.ts draws the lane and player.ts follows the curve, and both
  * read the maths from here.
@@ -43,10 +47,17 @@ export function multiplierAt(points: SpeedPoint[], t: number): number {
     if (t <= b.t) {
       const span = b.t - a.t;
       if (span <= RAMP_EPSILON) return b.speed;
-      return a.speed + ((b.speed - a.speed) * (t - a.t)) / span;
+      return betweenSpeeds(a.speed, b.speed, (t - a.t) / span);
     }
   }
   return last.speed;
+}
+
+/** A speed part way from one to another, moving by equal ratios rather than equal steps. On
+ *  the lane's log axis this is the straight line between the two points. */
+export function betweenSpeeds(from: number, to: number, fraction: number): number {
+  if (from <= 0 || to <= 0) return from;
+  return from * Math.pow(to / from, fraction);
 }
 
 /** What the clip actually runs at: the slider, bent by the curve. */
@@ -88,14 +99,14 @@ export function segmentsOver(state: EditState, from: number, to: number): RampSe
   return out;
 }
 
-/** How long one segment lasts in the finished clip. Constant speed divides; a linear ramp
- *  integrates to a logarithm, which is exact rather than a fine-enough approximation. */
+/** How long one segment lasts in the finished clip. Constant speed divides; a geometric ramp
+ *  integrates in closed form, which is exact rather than a fine-enough sum of slices. */
 export function segmentOutput(segment: RampSegment): number {
   const { from, to, speedFrom, speedTo } = segment;
   const span = to - from;
   if (span <= 0 || speedFrom <= 0 || speedTo <= 0) return 0;
   if (Math.abs(speedTo - speedFrom) < 1e-9) return span / speedFrom;
-  return (span / (speedTo - speedFrom)) * Math.log(speedTo / speedFrom);
+  return (span * (1 / speedFrom - 1 / speedTo)) / Math.log(speedTo / speedFrom);
 }
 
 /** The finished clip's length. Replaces dividing the trim by one speed. */

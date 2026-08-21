@@ -1,11 +1,15 @@
 //! The speed curve: how fast the clip runs at each moment, rather than all the way through.
 //!
 //! A ramp is a list of points on the source timeline, each a multiplier on the job's speed.
-//! Between two points the multiplier moves linearly; outside them it holds. No points means a
-//! flat 1, and every caller here falls back to the single-speed path it had before.
+//! Outside the points the curve holds flat. No points means a flat 1, and every caller here
+//! falls back to the single-speed path it had before.
 //!
-//! Output time is the integral of 1/speed. Linear speed integrates to a logarithm, and the
-//! closed form is what `setpts` is handed, so the file's length matches what src/ramp.ts
+//! Between two points the speed moves GEOMETRICALLY, by equal ratios rather than equal steps:
+//! halfway from 8x to 1x is 2.83x, not 4.5x. Speed is multiplicative, and the lane draws it on
+//! a log axis, so this is the move that draws as a straight line between the two points.
+//!
+//! Output time is the integral of 1/speed. A geometric ramp integrates in closed form, and
+//! that same form is what `setpts` is handed, so the file's length matches what src/ramp.ts
 //! predicted for the preview and the size estimate down to frame quantisation.
 //!
 //! Audio cannot follow the same curve. `atempo` only takes one factor at a time, so the tempo
@@ -90,10 +94,19 @@ pub fn multiplier_at(points: &[SpeedPoint], t: f64) -> f64 {
             if span <= RAMP_EPSILON {
                 return b.speed;
             }
-            return a.speed + (b.speed - a.speed) * (t - a.t) / span;
+            return between_speeds(a.speed, b.speed, (t - a.t) / span);
         }
     }
     last.speed
+}
+
+/// A speed part way from one to another, by equal ratios rather than equal steps. On the
+/// lane's log axis this is the straight line between the two points.
+pub fn between_speeds(from: f64, to: f64, fraction: f64) -> f64 {
+    if from <= 0.0 || to <= 0.0 {
+        return from;
+    }
+    from * (to / from).powf(fraction)
 }
 
 /// The curve cut into flat and sloped pieces across the trim, rebased so the first starts at
@@ -128,8 +141,8 @@ pub fn segments(points: &[SpeedPoint], base: f64, in_point: f64, out_point: f64)
     out
 }
 
-/// How long one piece lasts in the finished clip. A flat piece divides; a sloped one
-/// integrates to a logarithm, which is exact rather than a fine-enough sum of slices.
+/// How long one piece lasts in the finished clip. A flat piece divides; a geometric one
+/// integrates in closed form, which is exact rather than a fine-enough sum of slices.
 pub fn segment_output(segment: &Segment) -> f64 {
     let span = segment.to - segment.from;
     if span <= 0.0 || segment.speed_from <= 0.0 || segment.speed_to <= 0.0 {
@@ -138,7 +151,8 @@ pub fn segment_output(segment: &Segment) -> f64 {
     if segment.is_flat() {
         return span / segment.speed_from;
     }
-    (span / (segment.speed_to - segment.speed_from)) * (segment.speed_to / segment.speed_from).ln()
+    span * (1.0 / segment.speed_from - 1.0 / segment.speed_to)
+        / (segment.speed_to / segment.speed_from).ln()
 }
 
 /// The finished clip's length under the curve.
@@ -198,16 +212,14 @@ fn branch(segment: &Segment, offset: f64) -> String {
             num(segment.speed_from)
         );
     }
-    // Speed is s0 + k(T-from), so the integral of 1/speed is ln(speed/s0)/k.
-    let k = (segment.speed_to - segment.speed_from) / (segment.to - segment.from);
+    // Speed is s0*e^(k(T-from)), so the integral of 1/speed is (1 - e^(-k(T-from)))/(s0*k).
+    let k = (segment.speed_to / segment.speed_from).ln() / (segment.to - segment.from);
     format!(
-        "{}+{}*log(({}+{}*(T-{}))/{})",
+        "{}+{}*(1-exp({}*(T-{})))",
         num(offset),
-        num(1.0 / k),
-        num(segment.speed_from),
-        num(k),
-        num(segment.from),
-        num(segment.speed_from)
+        num(1.0 / (segment.speed_from * k)),
+        num(-k),
+        num(segment.from)
     )
 }
 
@@ -238,16 +250,28 @@ pub fn audio_stages(segments: &[Segment], step: f64) -> Option<Vec<String>> {
             continue;
         }
         let mut t = segment.from;
+        let span = segment.to - segment.from;
         while t < segment.to - 1e-9 {
             let end = (t + step).min(segment.to);
-            // Sampled at the midpoint: the step's error against the true curve cancels either
-            // side of it, where sampling the start would run the whole step slow.
-            let mid = (t + end) / 2.0;
-            let fraction = (mid - segment.from) / (segment.to - segment.from);
-            push(
-                t,
-                segment.speed_from + (segment.speed_to - segment.speed_from) * fraction,
-            );
+            // Not the speed at the midpoint but the one constant speed that takes exactly as
+            // long over this step as the curve does. Stepping is already the audio's whole
+            // compromise; there is no reason to add an approximation on top of it.
+            let slice = Segment {
+                from: t,
+                to: end,
+                speed_from: between_speeds(
+                    segment.speed_from,
+                    segment.speed_to,
+                    (t - segment.from) / span,
+                ),
+                speed_to: between_speeds(
+                    segment.speed_from,
+                    segment.speed_to,
+                    (end - segment.from) / span,
+                ),
+            };
+            let taken = segment_output(&slice);
+            push(t, if taken > 0.0 { (end - t) / taken } else { slice.speed_from });
             t = end;
         }
     }
@@ -312,7 +336,8 @@ mod tests {
         let p = points(&[(2.0, 1.0), (4.0, 3.0)]);
         assert_eq!(multiplier_at(&p, 0.0), 1.0);
         assert_eq!(multiplier_at(&p, 2.0), 1.0);
-        assert_eq!(multiplier_at(&p, 3.0), 2.0);
+        // Halfway between the points is the geometric middle of 1 and 3, not the average.
+        assert!((multiplier_at(&p, 3.0) - 3.0_f64.sqrt()).abs() < 1e-12);
         assert_eq!(multiplier_at(&p, 4.0), 3.0);
         assert_eq!(multiplier_at(&p, 9.0), 3.0);
     }
@@ -325,12 +350,22 @@ mod tests {
 
     #[test]
     fn a_ramp_integrates_rather_than_averaging_its_ends() {
-        // 1x to 4x over 2 seconds. The mean of the ends would say 2/2.5 = 0.8s; the integral
-        // of 1/speed says (2/3)ln(4) = 0.924s, and the file is the length of the integral.
+        // 1x to 4x over 2 seconds. The mean of the ends would say 2/2.5 = 0.8s; the integral of
+        // 1/speed over the geometric curve says 2(1 - 1/4)/ln(4) = 1.082s, and the file is the
+        // length of the integral.
         let p = points(&[(0.0, 1.0), (2.0, 4.0)]);
         let d = ramped_duration(&p, 1.0, 0.0, 2.0);
-        assert!((d - (2.0 / 3.0) * 4.0_f64.ln()).abs() < 1e-9, "{d}");
+        let expected = 2.0 * (1.0 - 0.25) / 4.0_f64.ln();
+        assert!((d - expected).abs() < 1e-9, "{d} vs {expected}");
         assert!(d > 0.8, "the integral must exceed the average of the ends");
+    }
+
+    #[test]
+    fn the_speed_halfway_along_a_ramp_is_the_geometric_middle() {
+        // The whole reason the lane's line is straight: 8x to 1x passes through 2.83x, not 4.5x.
+        let p = points(&[(0.0, 8.0), (4.0, 1.0)]);
+        let mid = multiplier_at(&p, 2.0);
+        assert!((mid - 8.0_f64.sqrt()).abs() < 1e-9, "{mid}");
     }
 
     #[test]
@@ -362,15 +397,16 @@ mod tests {
         let p = points(&[(0.0, 1.0), (10.0, 3.0)]);
         let segs = segments(&p, 1.0, 5.0, 6.0);
         assert_eq!(segs.len(), 1);
-        assert!((segs[0].speed_from - 2.0).abs() < 1e-9, "{:?}", segs[0]);
-        assert!((segs[0].speed_to - 2.2).abs() < 1e-9, "{:?}", segs[0]);
+        // Halfway along a 1x to 3x ramp is sqrt(3), not 2.
+        assert!((segs[0].speed_from - 3.0_f64.sqrt()).abs() < 1e-9, "{:?}", segs[0]);
+        assert!((segs[0].speed_to - 3.0_f64.powf(0.6)).abs() < 1e-9, "{:?}", segs[0]);
     }
 
     #[test]
-    fn a_flat_curve_emits_a_plain_division_rather_than_a_logarithm() {
+    fn a_flat_curve_emits_a_plain_division_rather_than_an_exponential() {
         let segs = segments(&[], 2.0, 0.0, 5.0);
         let expr = setpts_expression(&segs).expect("a flat curve still has one segment");
-        assert!(!expr.contains("log"), "{expr}");
+        assert!(!expr.contains("exp"), "{expr}");
         assert!(expr.contains("/2.0"), "{expr}");
     }
 
@@ -381,7 +417,7 @@ mod tests {
         let expr = setpts_expression(&segs).expect("three segments");
         assert_eq!(segs.len(), 3);
         assert_eq!(expr.matches("if(lt(T,").count(), 2, "{expr}");
-        assert_eq!(expr.matches("log(").count(), 1, "{expr}");
+        assert_eq!(expr.matches("exp(").count(), 1, "{expr}");
     }
 
     /// The expression is what ffmpeg will evaluate, so evaluating it here is the only check
@@ -394,9 +430,10 @@ mod tests {
                 let part = if segment.is_flat() {
                     (part.to - part.from) / part.speed_from
                 } else {
-                    let k = (segment.speed_to - segment.speed_from) / (segment.to - segment.from);
-                    let at = segment.speed_from + k * (part.to - part.from);
-                    (1.0 / k) * (at / segment.speed_from).ln()
+                    let k = (segment.speed_to / segment.speed_from).ln()
+                        / (segment.to - segment.from);
+                    (1.0 / (segment.speed_from * k))
+                        * (1.0 - (-k * (part.to - part.from)).exp())
                 };
                 return offset + part;
             }
@@ -412,8 +449,9 @@ mod tests {
         let predicted = ramped_duration(&p, 1.0, 0.0, 10.0);
         let walked = eval(&segs, 10.0);
         assert!((walked - predicted).abs() < 1e-9, "{walked} vs {predicted}");
-        // The measured render of exactly this curve came out at 5.6s against 5.598392.
-        assert!((predicted - 5.598392).abs() < 1e-5, "{predicted}");
+        // The same curve read arithmetically came to 5.598392; geometrically it is longer,
+        // because the speed spends less of the ramp near the fast end.
+        assert!((predicted - 5.914043).abs() < 1e-5, "{predicted}");
     }
 
     #[test]

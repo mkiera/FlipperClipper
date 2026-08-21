@@ -851,9 +851,10 @@ fn a_speed_ramp_lands_on_the_length_the_integral_predicts() {
         (actual - predicted).abs() < 0.05,
         "ramped clip ran {actual}s against a predicted {predicted}s"
     );
-    // The averaged-ends answer would be about 5.1s. The integral says about 5.6s, and a
-    // regression to the wrong maths lands well outside the frame tolerance above.
-    assert!((predicted - 5.598).abs() < 0.01, "predicted {predicted}");
+    // The averaged-ends answer would be about 5.1s and the arithmetic ramp 5.598s. The
+    // geometric one is 5.914s, and a regression to either lands well outside the frame
+    // tolerance above.
+    assert!((predicted - 5.914).abs() < 0.01, "predicted {predicted}");
 }
 
 /// The audio has to end with the picture. atempo loses a sliver at every tempo change, so
