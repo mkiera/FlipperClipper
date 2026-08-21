@@ -18,6 +18,7 @@ import { toggleCrop } from './crop';
 import { enabledIds, toEffectsJob } from './effects';
 import { toggleEffectsPanel } from './effectspanel';
 import { ensureMeasured } from './loudness';
+import { recordError } from './devpanel';
 import {
   AUDIO_FORMATS,
   OUTPUT_HEIGHTS,
@@ -261,6 +262,7 @@ export function initControls(controlsDeps: ControlsDeps): void {
   void onExportDone(onExportFinished);
   void onExportError((message) => {
     patchUi({ exporting: false, exportPercent: 0 });
+    recordError(message);
     showToast(message, [], true);
   });
 

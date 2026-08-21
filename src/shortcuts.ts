@@ -8,6 +8,7 @@ import {
 import { cancelCrop, confirmCrop, enterCrop, isCropping } from './crop';
 import { closeEffectsPanel, toggleEffectsPanel } from './effectspanel';
 import { closeRampLane, toggleRampLane } from './ramplane';
+import { closeDevPanel } from './devpanel';
 import { currentTime, pause, seek, stepFrames, stepSeconds, togglePlay } from './player';
 import { edit, patchEdit } from './state';
 
@@ -156,6 +157,7 @@ function escape(): void {
     cancelCrop();
     return;
   }
+  if (closeDevPanel()) return;
   if (closeExportPopover()) return;
   if (closeEffectsPanel()) return;
   if (closeRampLane()) return;

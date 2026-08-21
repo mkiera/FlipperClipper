@@ -20,6 +20,7 @@ import { initOverlay } from './overlay';
 import { initEffectsPanel } from './effectspanel';
 import { describe, hideBanner, initControls, showBanner, showFfmpegBanner, showToast } from './controls';
 import { initShortcuts } from './shortcuts';
+import { initDevPanel, recordError } from './devpanel';
 import { initUpdater } from './updater';
 import { appSettings, buildInfo, initSettings } from './settings';
 import { applyMinWindowSize } from './windowsize';
@@ -55,6 +56,8 @@ function boot(): void {
   initEffectsPanel();
   initControls({ openFile: () => void openViaDialog() });
   initShortcuts({ openFile: () => void openViaDialog() });
+  // Ships in release builds: Ctrl+Shift+D and nothing else reaches it.
+  initDevPanel();
   const settingsReady = initSettings();
 
   el('empty-open').addEventListener('click', () => void openViaDialog());
@@ -87,12 +90,6 @@ function boot(): void {
   void showBuildIdentity();
 
   initUpdater();
-
-  // Development only, and dynamically imported so the branch - and the module with it - is
-  // gone from a production bundle rather than merely unreachable in one.
-  if (import.meta.env.DEV) {
-    void import('./devsize').then((mod) => mod.initSizeReadout());
-  }
 }
 
 function renderStage(): void {
@@ -116,6 +113,7 @@ async function openPath(path: string): Promise<void> {
     loadSource(src);
     void loadFilmstrip(path);
   } catch (error) {
+    recordError(describe(error));
     showToast(describe(error), [], true);
   }
 }
@@ -255,7 +253,8 @@ function offerPreviewProxy(): void {
         loadSource(src);
         hideBanner('preview');
       } catch (error) {
-        showToast(describe(error), [], true);
+        recordError(describe(error));
+    showToast(describe(error), [], true);
       }
     },
     dismissible: true,

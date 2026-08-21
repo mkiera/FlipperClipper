@@ -1347,6 +1347,63 @@ select option:disabled {
   overflow-y: auto;
 }
 
+/* Wider than the settings panel: every line in it is a path or a version string, and
+   wrapping those turns a report meant for copying into something unreadable. */
+.debug-modal {
+  max-width: 620px;
+}
+
+.debug-hint {
+  margin: 0 0 12px;
+  color: var(--fg-dim);
+  font-size: 12px;
+}
+
+.debug-section {
+  margin-bottom: 16px;
+}
+
+.debug-section h3 {
+  margin: 0 0 6px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--fg-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.debug-out {
+  margin: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--sunken);
+  color: var(--fg);
+  font: 12px/1.5 Consolas, 'Cascadia Mono', monospace;
+  white-space: pre-wrap;
+  word-break: break-word;
+  /* A stack trace from FFmpeg can run for pages; the panel must not grow with it. */
+  max-height: 220px;
+  overflow-y: auto;
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+.debug-out:empty {
+  display: none;
+}
+
+.debug-section .btn {
+  margin-bottom: 6px;
+}
+
+.debug-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding-top: 4px;
+}
+
 .modal-panel::-webkit-scrollbar {
   width: 6px;
 }

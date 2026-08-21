@@ -1,6 +1,7 @@
 // Public so tests/real_export.rs can drive the real command builder.
 pub mod ffmpeg;
 mod download;
+mod debug;
 mod export;
 mod ffmpeg_install;
 pub mod ramp;
@@ -67,6 +68,8 @@ pub fn run() {
             sysutil::set_min_window_size,
             sysutil::cli_file_path,
             export::detect_encoder,
+            debug::debug_report,
+            debug::run_diagnostic,
             export::start_export,
             export::cancel_export,
             updater::check_for_update,
