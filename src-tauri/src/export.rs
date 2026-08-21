@@ -9,6 +9,7 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager};
 
 use crate::ffmpeg::{self, Effects, ExportFormat, ExportJob, QualityPreset};
+use crate::ramp;
 use crate::settings::EncoderPreference;
 use crate::{AppState, ExportSlot};
 
@@ -368,10 +369,13 @@ fn validate(job: &ExportJob) -> Result<(), String> {
     }
 
     validate_effects(&job.effects)?;
+    validate_ramp(job)?;
 
     // A job arrives over IPC, so the UI greying these combinations out is not a guarantee.
     if job.lossless
         && (job.reverse
+            || (job.speed - 1.0).abs() > 1e-9
+            || ramp::has_ramp(&job.ramp)
             || job.normalize
             || job.volume != 1.0
             || job.effects.any()
@@ -379,7 +383,7 @@ fn validate(job: &ExportJob) -> Result<(), String> {
             || matches!(job.format, ExportFormat::Gif))
     {
         return Err(
-            "A lossless export copies the video as it is, so it cannot reverse, apply an effect, change or normalise the volume, or change to an audio or GIF format.".to_string(),
+            "A lossless export copies the video as it is, so it cannot reverse, change the speed, apply an effect, change or normalise the volume, or change to an audio or GIF format.".to_string(),
         );
     }
     if !Path::new(&job.input).is_file() {
@@ -420,6 +424,62 @@ fn validate(job: &ExportJob) -> Result<(), String> {
 
 /// The bounds the sliders travel between, restated because a job arrives over IPC and a
 /// greyed-out control is not a guarantee. Every dial is optional; None is switched off.
+/// The speed curve, which is the one input that arrives as a list rather than a number. The
+/// points are bounded the way the slider is, and the effective speed - the slider with the
+/// curve folded in - is bounded the same way, so no combination of the two escapes the range
+/// the app says it works over.
+fn validate_ramp(job: &ExportJob) -> Result<(), String> {
+    if job.ramp.is_empty() {
+        return Ok(());
+    }
+    if job.ramp.len() > ramp::MAX_POINTS {
+        return Err(format!(
+            "A speed curve can hold at most {} points.",
+            ramp::MAX_POINTS
+        ));
+    }
+
+    let mut previous = f64::NEG_INFINITY;
+    for point in &job.ramp {
+        if !point.t.is_finite() || point.t < 0.0 {
+            return Err("A speed curve point sits outside the clip.".to_string());
+        }
+        if !point.speed.is_finite()
+            || !(ramp::RAMP_MIN..=ramp::RAMP_MAX).contains(&point.speed)
+        {
+            return Err("Every speed curve point has to be between 0.05x and 20x.".to_string());
+        }
+        // Two points at one instant would make two speeds true at once, and the segment
+        // between them integrates to nothing the expression can express.
+        if point.t < previous + ramp::RAMP_EPSILON {
+            return Err("The speed curve points have to be in order and apart.".to_string());
+        }
+        previous = point.t;
+    }
+
+    let segments = ramp::segments(&job.ramp, job.speed, job.in_point, job.out_point);
+    let Some((lo, hi)) = ramp::speed_bounds(&segments) else {
+        return Ok(());
+    };
+    if !(ramp::RAMP_MIN..=ramp::RAMP_MAX).contains(&lo)
+        || !(ramp::RAMP_MIN..=ramp::RAMP_MAX).contains(&hi)
+    {
+        return Err(
+            "The speed slider and the curve together take the clip outside 0.05x to 20x."
+                .to_string(),
+        );
+    }
+    // atempo follows the curve through one driven stage, and that stage covers a hundredfold
+    // range. Past it the audio would have to change the shape of its own chain mid-clip.
+    if !job.mute && hi / lo > ramp::MAX_AUDIO_SPAN {
+        return Err(format!(
+            "A speed curve this wide cannot carry its audio. Keep the fastest point within {}x of the slowest, or mute the clip.",
+            ramp::MAX_AUDIO_SPAN as i64
+        ));
+    }
+    Ok(())
+}
+
 fn validate_effects(fx: &Effects) -> Result<(), String> {
     bounded(fx.brightness, 0.2, 2.0, "Brightness")?;
     bounded(fx.contrast, 0.2, 3.0, "Contrast")?;
@@ -603,6 +663,7 @@ mod tests {
             in_point: 0.0,
             out_point: 10.0,
             speed: 1.0,
+            ramp: Vec::new(),
             crop: None,
             mute: false,
             reverse: false,
@@ -745,6 +806,97 @@ mod tests {
 
         j.effects.text = Some(overlay(&"a".repeat(TEXT_MAX_CHARS)));
         assert!(!validate(&j).unwrap_err().starts_with("The overlay text is longer"));
+    }
+
+    fn curve(pairs: &[(f64, f64)]) -> Vec<crate::ramp::SpeedPoint> {
+        pairs
+            .iter()
+            .map(|(t, speed)| crate::ramp::SpeedPoint { t: *t, speed: *speed })
+            .collect()
+    }
+
+    #[test]
+    fn an_ordinary_speed_curve_is_accepted() {
+        let mut j = job();
+        j.ramp = curve(&[(0.0, 1.0), (3.0, 1.0), (5.0, 4.0), (8.0, 4.0), (10.0, 1.0)]);
+        let err = validate(&j).unwrap_err();
+        assert!(!err.contains("speed curve"), "{err}");
+        assert!(!err.contains("curve"), "{err}");
+    }
+
+    #[test]
+    fn a_curve_point_outside_the_slider_range_is_refused() {
+        let mut j = job();
+        j.ramp = curve(&[(0.0, 1.0), (2.0, 25.0)]);
+        assert!(validate(&j)
+            .unwrap_err()
+            .starts_with("Every speed curve point"));
+
+        j.ramp = curve(&[(0.0, 1.0), (2.0, f64::NAN)]);
+        assert!(validate(&j)
+            .unwrap_err()
+            .starts_with("Every speed curve point"));
+    }
+
+    #[test]
+    fn two_points_at_one_instant_are_refused() {
+        // Two speeds true at once, and a segment between them that integrates to nothing the
+        // setpts expression can express.
+        let mut j = job();
+        j.ramp = curve(&[(2.0, 1.0), (2.0, 3.0)]);
+        assert!(validate(&j).unwrap_err().starts_with("The speed curve points"));
+
+        j.ramp = curve(&[(4.0, 1.0), (2.0, 3.0)]);
+        assert!(validate(&j).unwrap_err().starts_with("The speed curve points"));
+    }
+
+    #[test]
+    fn the_curve_has_a_ceiling_on_how_many_points_it_carries() {
+        // Each point nests another if() into the setpts expression, and an expression ffmpeg
+        // cannot parse fails the whole export rather than the one point that caused it.
+        let mut j = job();
+        let many: Vec<(f64, f64)> = (0..=crate::ramp::MAX_POINTS)
+            .map(|i| (i as f64 * 0.5, 1.0 + i as f64 * 0.01))
+            .collect();
+        j.ramp = curve(&many);
+        assert!(validate(&j).unwrap_err().starts_with("A speed curve can hold"));
+    }
+
+    #[test]
+    fn the_slider_and_the_curve_together_stay_inside_the_range() {
+        // Either alone is legal; multiplied they are not, and only the product is what the
+        // clip actually runs at.
+        let mut j = job();
+        j.speed = 8.0;
+        j.ramp = curve(&[(0.0, 1.0), (2.0, 6.0)]);
+        assert!(validate(&j).unwrap_err().starts_with("The speed slider and the curve"));
+    }
+
+    #[test]
+    fn a_curve_too_wide_for_atempo_is_refused_unless_the_clip_is_muted() {
+        let mut j = job();
+        j.ramp = curve(&[(0.0, 0.05), (4.0, 20.0)]);
+        assert!(validate(&j).unwrap_err().contains("cannot carry its audio"));
+
+        // Muted, there is no audio to fail to follow it.
+        j.mute = true;
+        assert!(!validate(&j).unwrap_err().contains("cannot carry its audio"));
+    }
+
+    #[test]
+    fn a_stream_copy_cannot_retime_the_clip() {
+        // A copy never reaches a filter, so a speed asked for beside it would be dropped from
+        // a file the user believes carries it - the same trap as an effect.
+        let mut j = job();
+        j.lossless = true;
+        assert!(!validate(&j).unwrap_err().contains("change the speed"));
+
+        j.ramp = curve(&[(0.0, 1.0), (2.0, 2.0)]);
+        assert!(validate(&j).unwrap_err().contains("change the speed"));
+
+        j.ramp = Vec::new();
+        j.speed = 2.0;
+        assert!(validate(&j).unwrap_err().contains("change the speed"));
     }
 
     #[test]

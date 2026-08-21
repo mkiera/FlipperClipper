@@ -552,6 +552,7 @@ function buildJob(input: string, output: string): ExportJob {
     inPoint: edit.inPoint,
     outPoint: edit.outPoint,
     speed: edit.speed,
+    ramp: edit.ramp,
     crop: edit.crop,
     mute: edit.mute,
     reverse: edit.reverse,
