@@ -135,4 +135,4 @@ Pushing to a `feature/**` or `bugfix/**` branch runs
 
 ## Licence
 
-MIT. See [LICENSE](LICENSE).
+GPL-3.0-or-later. See [LICENSE](LICENSE).
