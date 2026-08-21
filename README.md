@@ -135,10 +135,4 @@ Pushing to a `feature/**` or `bugfix/**` branch runs
 
 ## Licence
 
-GNU General Public License v3.0 or later. See [LICENSE](LICENSE).
-
-FlipperClipper runs FFmpeg as a separate program and does not bundle it, so
-FFmpeg's own licence stays on its own side of that line. Bundling an FFmpeg
-binary into the installer would change that: the common full builds are GPL
-themselves, and shipping one alongside would put its terms on the whole
-distribution.
+MIT. See [LICENSE](LICENSE).
