@@ -64,7 +64,7 @@ VersionInfoTextVersion={#AppVersion}
 VersionInfoProductName={#AppName}
 VersionInfoDescription={#AppName} Setup
 VersionInfoCompany={#AppPublisher}
-VersionInfoCopyright=MIT License
+VersionInfoCopyright=Copyright (C) 2026 mkiera - GPL-3.0-or-later
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"

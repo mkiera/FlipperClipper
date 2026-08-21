@@ -36,11 +36,11 @@
     "active": true,
     "targets": "all",
     "publisher": "mkiera",
-    "copyright": "MIT License",
+    "copyright": "Copyright (C) 2026 mkiera",
     "shortDescription": "Quick trim, crop and speed edits for video clips",
     "longDescription": "FlipperClipper is a lightweight video editor for fast edits before sending a clip to someone: trim the length, crop the frame, change the speed and mute the audio, then export to MP4, MKV, MOV, WebM or GIF, or pull the audio out on its own.",
     "category": "Video",
-    "license": "MIT",
+    "license": "GPL-3.0-or-later",
     "homepage": "https://github.com/mkiera/FlipperClipper",
     "icon": [
       "icons/32x32.png",

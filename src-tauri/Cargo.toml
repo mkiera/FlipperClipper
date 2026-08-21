@@ -3,7 +3,7 @@ name = "flipperclipper"
 version = "0.1.0"
 description = "Quick trim, crop and speed edits for video clips"
 authors = ["mkiera"]
-license = "MIT"
+license = "GPL-3.0-or-later"
 edition = "2021"
 
 [lib]
