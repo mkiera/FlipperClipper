@@ -41,6 +41,11 @@ const LANE_WINDOW_SHARE = 0.4;
 
 const LANE_KEY = 'flipperclipper.rampLaneHeight';
 
+/** How long after a tap a second one on the same point still counts as a double tap, and how
+ *  far the pointer may have wandered between them. */
+const DOUBLE_TAP_MS = 400;
+const DOUBLE_TAP_SLOP = 8;
+
 const LOG_MIN = Math.log(RAMP_MIN);
 const LOG_SPAN = Math.log(RAMP_MAX) - LOG_MIN;
 
@@ -60,6 +65,9 @@ let dragging: number | null = null;
 /** Where a lane resize started, so the drag measures against its own beginning rather than
  *  against a height it is itself changing. */
 let resizing: { y: number; height: number } | null = null;
+
+/** The last press on a point, for spotting the second half of a double tap. */
+let lastTap: { index: number; at: number; x: number; y: number } | null = null;
 
 function el<T extends Element>(id: string): T {
   const found = document.getElementById(id);
@@ -86,6 +94,7 @@ export function initRampLane(): void {
   toggle.addEventListener('click', toggleRampLane);
 
   lane.addEventListener('pointerdown', onLanePointerDown);
+  lane.addEventListener('contextmenu', onLaneContextMenu);
   lane.addEventListener('pointermove', onPointerMove);
   lane.addEventListener('pointerup', endDrag);
   lane.addEventListener('pointercancel', endDrag);
@@ -184,11 +193,13 @@ function onLanePointerDown(e: PointerEvent): void {
   const index = Number(target.dataset.index ?? -1);
 
   if (index >= 0) {
-    // A second click on a point takes it back out, which is how every curve editor removes one.
-    if (e.detail > 1) {
+    // A second press on a point takes it back out, which is how every curve editor removes one.
+    if (isSecondTap(index, e)) {
+      lastTap = null;
       patchEdit({ ramp: withoutPoint(edit.ramp, index) });
       return;
     }
+    lastTap = { index, at: e.timeStamp, x: e.clientX, y: e.clientY };
     dragging = index;
   } else {
     // Landing on empty lane drops a point where the pointer is and picks it straight up, so
@@ -220,6 +231,8 @@ function onPointerMove(e: PointerEvent): void {
     return;
   }
   if (dragging === null) return;
+  // Moving the point ends any chance that this press was the first half of a double tap.
+  lastTap = null;
   const moved = withPointMoved(
     edit.ramp,
     dragging,
@@ -250,6 +263,33 @@ function releaseCapture(pointerId: number): void {
   } catch {
     /* nothing was captured, which is the state this wanted anyway */
   }
+}
+
+/**
+ * The second press of a double tap, worked out from the clock rather than read off the event.
+ *
+ * PointerEvent carries no click count to read - `detail` is not the one MouseEvent has - and
+ * the dblclick that would carry it never arrives, because this handler cancels pointerdown to
+ * stop the drag selecting text, and a cancelled pointerdown suppresses the compatibility mouse
+ * events that dblclick is one of.
+ */
+function isSecondTap(index: number, e: PointerEvent): boolean {
+  if (!lastTap || lastTap.index !== index) return false;
+  if (e.timeStamp - lastTap.at > DOUBLE_TAP_MS) return false;
+  return (
+    Math.abs(e.clientX - lastTap.x) <= DOUBLE_TAP_SLOP &&
+    Math.abs(e.clientY - lastTap.y) <= DOUBLE_TAP_SLOP
+  );
+}
+
+/** Right click removes a point too. An 11px dot is a small target to hit twice running, and
+ *  a menu the app has no other use for is worth spending on the one destructive action here. */
+function onLaneContextMenu(e: MouseEvent): void {
+  const index = Number((e.target as HTMLElement).dataset.index ?? -1);
+  if (index < 0) return;
+  e.preventDefault();
+  lastTap = null;
+  patchEdit({ ramp: withoutPoint(edit.ramp, index) });
 }
 
 /* --- Resizing --- */
@@ -327,7 +367,7 @@ function drawPoints(): void {
     dot.style.left = `${pixelAt(point.t)}px`;
     dot.style.top = `${yOf(edit.speed * point.speed)}px`;
     const speed = fmtSpeed(edit.speed * point.speed);
-    dot.title = `${speed} here. Drag to move, double click to remove.`;
+    dot.title = `${speed} here. Drag to move, double click or right click to remove.`;
     dot.setAttribute('aria-label', `Speed point at ${point.t.toFixed(2)} seconds, ${speed}`);
     return dot;
   });
