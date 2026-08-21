@@ -10,6 +10,8 @@ import {
   EVENT,
   type AlphaBuild,
   type AppSettings,
+  type DebugReport,
+  type DiagnosticResult,
   type ExportJob,
   type ExportProgress,
   type FfmpegStatus,
@@ -54,6 +56,16 @@ export function measureLoudness(path: string): Promise<Loudness> {
 /** Also adds the path to the asset-protocol scope; assetUrl() 403s without it. */
 export function probe(path: string): Promise<MediaInfo> {
   return invoke<MediaInfo>('probe', { path });
+}
+
+/** Read fresh every time: a report saying FFmpeg is missing when it was installed ten
+ *  minutes ago sends the reader down the wrong path. */
+export function debugReport(): Promise<DebugReport> {
+  return invoke<DebugReport>('debug_report');
+}
+
+export function runDiagnostic(): Promise<DiagnosticResult> {
+  return invoke<DiagnosticResult>('run_diagnostic');
 }
 
 export function detectEncoder(): Promise<string> {

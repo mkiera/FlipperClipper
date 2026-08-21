@@ -184,6 +184,35 @@ export interface EditState {
   effects: EffectsState;
 }
 
+/** One external tool, as the debug panel found it. */
+export interface ToolReport {
+  found: boolean;
+  /** Where it resolved to, which is the answer when two FFmpegs are installed. */
+  path: string | null;
+  version: string | null;
+}
+
+export interface DebugReport {
+  appVersion: string;
+  tauriVersion: string;
+  arch: string;
+  osFamily: string;
+  ffmpeg: ToolReport;
+  ffprobe: ToolReport;
+  /** What an export would actually encode with, hardware or software. */
+  encoder: string;
+  configDir: string | null;
+  tempDir: string;
+}
+
+export interface DiagnosticResult {
+  success: boolean;
+  message: string;
+  /** Whatever FFmpeg said, when it said anything. Empty on success. */
+  detail: string;
+  millis: number;
+}
+
 export interface FfmpegStatus {
   available: boolean;
   version: string | null;
