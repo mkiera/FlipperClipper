@@ -1118,6 +1118,32 @@ select option:disabled {
   touch-action: none;
 }
 
+/* Sits over the lane's own top border, which is where a resize grip is looked for. */
+#tl-ramp-grip {
+  position: absolute;
+  top: -3px;
+  left: 0;
+  right: 0;
+  height: 7px;
+  z-index: 3;
+  cursor: ns-resize;
+}
+
+#tl-ramp-grip:hover,
+#tl-ramp.resizing #tl-ramp-grip {
+  background: var(--accent-glow);
+}
+
+/* The line the curve snaps to. Drawn under the curve so a ramp sitting on it still reads. */
+#tl-ramp-unity {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 0;
+  border-top: 1px dashed rgba(255, 255, 255, 0.28);
+  pointer-events: none;
+}
+
 #tl-ramp-curve {
   position: absolute;
   inset: 0;

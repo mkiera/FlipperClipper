@@ -27,6 +27,20 @@ import { onZoom, pixelAt, timeAt, trackElement } from './timeline';
  *  logarithm and cheap enough to redraw on every pointer move. */
 const SAMPLE_PIXELS = 4;
 
+/** How close a drag has to come to a resting speed before it lands on one, in lane pixels.
+ *  Wide enough to catch a deliberate move back to normal, narrow enough that a speed just
+ *  either side of it can still be set. */
+const SNAP_PIXELS = 7;
+
+/** What the lane can be dragged between. The floor keeps the points reachable; the ceiling is
+ *  a share of the window, since the lane grows the timeline at the stage's expense. */
+const LANE_MIN = 36;
+const LANE_MAX = 220;
+const LANE_DEFAULT = 54;
+const LANE_WINDOW_SHARE = 0.4;
+
+const LANE_KEY = 'flipperclipper.rampLaneHeight';
+
 const LOG_MIN = Math.log(RAMP_MIN);
 const LOG_SPAN = Math.log(RAMP_MAX) - LOG_MIN;
 
@@ -36,10 +50,16 @@ let line!: SVGPolylineElement;
 let dots!: HTMLElement;
 let readout!: HTMLElement;
 let toggle!: HTMLButtonElement;
+let grip!: HTMLElement;
+let unity!: HTMLElement;
 
 /** The point being dragged, or null. Held here rather than in app state: it is gone the
  *  moment the pointer lifts and nothing else needs to render from it. */
 let dragging: number | null = null;
+
+/** Where a lane resize started, so the drag measures against its own beginning rather than
+ *  against a height it is itself changing. */
+let resizing: { y: number; height: number } | null = null;
 
 function el<T extends Element>(id: string): T {
   const found = document.getElementById(id);
@@ -54,6 +74,14 @@ export function initRampLane(): void {
   dots = el('tl-ramp-points');
   readout = el('tl-ramp-readout');
   toggle = el('tl-ramp-btn');
+  grip = el('tl-ramp-grip');
+  unity = el('tl-ramp-unity');
+
+  applyLaneHeight(rememberedLaneHeight());
+  grip.addEventListener('pointerdown', onGripPointerDown);
+  // The ceiling is a share of the window, so a lane sized on a big screen has to be brought
+  // back in on a small one rather than eating the picture it is there to describe.
+  window.addEventListener('resize', () => applyLaneHeight(lane.offsetHeight));
 
   toggle.addEventListener('click', toggleRampLane);
 
@@ -105,7 +133,31 @@ function yOf(speed: number): number {
 function speedAtY(clientY: number): number {
   const box = lane.getBoundingClientRect();
   if (box.height <= 0) return 1;
-  return speedOf(1 - (clientY - box.top) / box.height);
+  return snapped(speedOf(1 - (clientY - box.top) / box.height), box.height);
+}
+
+/**
+ * A drag that comes close to a resting speed lands on it exactly.
+ *
+ * Real time is one such speed and is the reason this exists: a curve gets bent away from
+ * normal and back, and hitting normal again by eye on a log axis is not something a pointer
+ * can do. The slider's own speed is the other, for a clip already being run fast or slow,
+ * where unchanged-from-the-slider is the resting point rather than 1x.
+ */
+function snapped(speed: number, height: number): number {
+  const targets = [1];
+  if (Math.abs(edit.speed - 1) > 1e-9) targets.push(edit.speed);
+
+  let best = speed;
+  let closest = SNAP_PIXELS;
+  for (const target of targets) {
+    const away = Math.abs(fractionOf(speed) - fractionOf(target)) * height;
+    if (away < closest) {
+      closest = away;
+      best = target;
+    }
+  }
+  return best;
 }
 
 /** What the clip actually runs at, which is the slider with the curve folded in. The lane
@@ -126,6 +178,9 @@ function multiplierFor(speed: number): number {
 function onLanePointerDown(e: PointerEvent): void {
   if (!edit.media) return;
   const target = e.target as HTMLElement;
+  // The grip runs the full width of the lane's top edge, so it would otherwise read as a
+  // click on empty lane and drop a point every time the lane was resized.
+  if (target === grip) return;
   const index = Number(target.dataset.index ?? -1);
 
   if (index >= 0) {
@@ -157,6 +212,13 @@ function onLanePointerDown(e: PointerEvent): void {
 }
 
 function onPointerMove(e: PointerEvent): void {
+  if (resizing) {
+    // Upwards is taller: the lane is anchored at the bottom of the timeline.
+    applyLaneHeight(resizing.height + (resizing.y - e.clientY));
+    render();
+    e.preventDefault();
+    return;
+  }
   if (dragging === null) return;
   const moved = withPointMoved(
     edit.ramp,
@@ -169,14 +231,56 @@ function onPointerMove(e: PointerEvent): void {
 }
 
 function endDrag(e: PointerEvent): void {
+  if (resizing) {
+    resizing = null;
+    lane.classList.remove('resizing');
+    rememberLaneHeight();
+    releaseCapture(e.pointerId);
+    return;
+  }
   if (dragging === null) return;
   dragging = null;
+  releaseCapture(e.pointerId);
+  render();
+}
+
+function releaseCapture(pointerId: number): void {
   try {
-    if (lane.hasPointerCapture(e.pointerId)) lane.releasePointerCapture(e.pointerId);
+    if (lane.hasPointerCapture(pointerId)) lane.releasePointerCapture(pointerId);
   } catch {
     /* nothing was captured, which is the state this wanted anyway */
   }
-  render();
+}
+
+/* --- Resizing --- */
+
+function onGripPointerDown(e: PointerEvent): void {
+  resizing = { y: e.clientY, height: lane.offsetHeight };
+  lane.classList.add('resizing');
+  try {
+    lane.setPointerCapture(e.pointerId);
+  } catch {
+    /* the drag works, it is only released early */
+  }
+  e.preventDefault();
+  e.stopPropagation();
+}
+
+/** The lane's height, clamped and written where the CSS reads it. The timeline is
+ *  `--strip + --ramp-lane` tall, so this grows the row rather than squeezing the filmstrip. */
+function applyLaneHeight(px: number): void {
+  const ceiling = Math.min(LANE_MAX, Math.round(window.innerHeight * LANE_WINDOW_SHARE));
+  const height = Math.round(Math.min(Math.max(px, LANE_MIN), Math.max(ceiling, LANE_MIN)));
+  document.documentElement.style.setProperty('--ramp-lane', `${height}px`);
+}
+
+function rememberedLaneHeight(): number {
+  const raw = Number(localStorage.getItem(LANE_KEY));
+  return Number.isFinite(raw) && raw >= LANE_MIN ? raw : LANE_DEFAULT;
+}
+
+function rememberLaneHeight(): void {
+  localStorage.setItem(LANE_KEY, String(lane.offsetHeight));
 }
 
 /* --- Rendering --- */
@@ -190,6 +294,7 @@ function render(): void {
   document.getElementById('timeline')?.classList.toggle('has-ramp', open);
   if (!open) return;
 
+  unity.style.top = `${yOf(1)}px`;
   drawCurve();
   drawPoints();
 }

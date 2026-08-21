@@ -102,10 +102,26 @@ function onWheel(e: WheelEvent): void {
   setZoom(zoom * factor, e.clientX);
 }
 
+/**
+ * The buttons zoom on the middle of the trim, not on whatever the view happens to be showing.
+ * Anchoring on the viewport centre means the zoom walks away from the part being worked on as
+ * soon as the view has been scrolled, which is most of the time once it is zoomed in at all.
+ */
 function stepZoom(factor: number): void {
   if (!edit.media) return;
-  const box = scroll.getBoundingClientRect();
-  setZoom(zoom * factor, box.left + box.width / 2);
+  const clamped = clamp(zoom * factor, 1, ZOOM_MAX);
+  if (clamped === zoom) return;
+
+  zoom = clamped;
+  track.style.width = `${zoom * 100}%`;
+  centreOn((edit.inPoint + edit.outPoint) / 2);
+  zoomChanged();
+}
+
+/** Scrolls a source time to the middle of the viewport. Reading clientWidth after setting the
+ *  track's width forces the layout, so pixelAt already measures the new zoom. */
+function centreOn(t: number): void {
+  scroll.scrollLeft = pixelAt(t) - scroll.clientWidth / 2;
 }
 
 function resetZoom(): void {
