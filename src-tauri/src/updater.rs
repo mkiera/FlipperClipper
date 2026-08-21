@@ -701,6 +701,23 @@ mod tests {
     }
 
     #[test]
+    fn the_first_stable_release_reaches_the_beta_builds_on_both_channels() {
+        // Every tag before 1.0.0 was a pre-release, so nobody left on the default Stable
+        // channel has ever been offered anything. 1.0.0 is the first, and it has to reach
+        // the pre-release channel as well or those users are stranded on a beta.
+        let payload = r#"[
+          {"html_url":"h","tag_name":"v1.0.0","draft":false,"prerelease":false,
+           "assets":[{"name":"FlipperClipper-Setup.exe","size":10,"browser_download_url":"u"}]}
+        ]"#;
+        for channel in [STABLE, PRERELEASE] {
+            let picked = pick_update(releases(payload), &version("0.1.16-beta"), channel)
+                .expect("1.0.0 outranks every 0.1.x beta on either channel");
+            assert_eq!(picked.version, "1.0.0");
+            assert!(!picked.prerelease);
+        }
+    }
+
+    #[test]
     fn the_stable_release_of_a_version_updates_its_prerelease() {
         let payload = r#"[
           {"html_url":"h","tag_name":"v0.1.0","draft":false,"prerelease":false,
