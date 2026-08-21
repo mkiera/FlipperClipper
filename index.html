@@ -256,11 +256,25 @@
             <div class="tl-shade" id="tl-shade-right"></div>
             <div class="tl-handle" id="tl-in" title="Trim start (I)"><i></i></div>
             <div class="tl-handle" id="tl-out" title="Trim end (O)"><i></i></div>
+            <!-- A second channel under the filmstrip. Inside the track, so it inherits the
+                 zoom width and the scroll and needs no syncing of its own. -->
+            <div id="tl-ramp" hidden>
+              <svg id="tl-ramp-curve" preserveAspectRatio="none" aria-hidden="true">
+                <polyline id="tl-ramp-line" />
+              </svg>
+              <div id="tl-ramp-points"></div>
+              <span id="tl-ramp-readout" hidden></span>
+            </div>
+
             <div id="tl-playhead"></div>
           </div>
         </div>
 
         <div class="tl-zoom">
+          <button id="tl-ramp-btn" class="icon-btn small" type="button" title="Speed ramp: bend the speed across the clip (S)" aria-label="Speed ramp">
+            <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M1.5 12.1c2.7 0 4.5-2.4 6.1-4.9C9.2 4.7 10.6 3.2 14.5 3.2v1.5c-2.9 0-3.7 1.1-5.4 3.6-1.7 2.6-3.8 5.3-7.6 5.3z" /><circle cx="2.6" cy="12.8" r="1.9" /><circle cx="13.4" cy="4" r="1.9" /></svg>
+          </button>
+
           <button id="tl-zoom-out" class="icon-btn small" type="button" title="Zoom out" aria-label="Zoom out">
             <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2 7.25h12v1.5H2z" /></svg>
           </button>

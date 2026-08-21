@@ -62,8 +62,25 @@ function minRange(): number {
   return Math.max(fps > 0 ? 1 / fps : 0.04, 0.05);
 }
 
+/** The track the ramp lane sits in, so it measures against the same box this does. */
+export function trackElement(): HTMLElement {
+  return track;
+}
+
+/** Zoom is local to this module rather than app state, so anything drawn against the track's
+ *  width has to be told when it changes. */
+const zoomListeners = new Set<() => void>();
+
+export function onZoom(listener: () => void): void {
+  zoomListeners.add(listener);
+}
+
+function zoomChanged(): void {
+  for (const listener of zoomListeners) listener();
+}
+
 // Measures the track, not the scroll container: the track's rect already carries the scroll.
-function timeAt(clientX: number): number {
+export function timeAt(clientX: number): number {
   const media = edit.media;
   if (!media) return 0;
   const box = track.getBoundingClientRect();
@@ -72,7 +89,7 @@ function timeAt(clientX: number): number {
   return clamp(fraction * media.duration, 0, media.duration);
 }
 
-function pixelAt(t: number): number {
+export function pixelAt(t: number): number {
   const media = edit.media;
   if (!media || media.duration <= 0) return 0;
   return (t / media.duration) * track.clientWidth;
@@ -95,6 +112,7 @@ function resetZoom(): void {
   zoom = 1;
   track.style.width = '100%';
   scroll.scrollLeft = 0;
+  zoomChanged();
 }
 
 function setZoom(next: number, anchorClientX: number): void {
@@ -107,6 +125,7 @@ function setZoom(next: number, anchorClientX: number): void {
   zoom = clamped;
   track.style.width = `${zoom * 100}%`;
   scroll.scrollLeft = pixelAt(anchorTime) - anchorOffset;
+  zoomChanged();
 }
 
 function onPointerDown(e: PointerEvent): void {

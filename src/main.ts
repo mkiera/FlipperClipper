@@ -15,6 +15,7 @@ import { edit, loadMedia, patchEdit, patchUi, subscribe, ui } from './state';
 import { initPlayer, loadSource, onPreviewTrouble, videoElement } from './player';
 import { initTimeline } from './timeline';
 import { initCrop } from './crop';
+import { initRampLane } from './ramplane';
 import { initOverlay } from './overlay';
 import { initEffectsPanel } from './effectspanel';
 import { describe, hideBanner, initControls, showBanner, showFfmpegBanner, showToast } from './controls';
@@ -48,6 +49,7 @@ function boot(): void {
   initPlayer(el<HTMLVideoElement>('video'));
   initTimeline();
   initCrop();
+  initRampLane();
   // After crop: the overlays are placed on the crop rectangle when there is one.
   initOverlay();
   initEffectsPanel();

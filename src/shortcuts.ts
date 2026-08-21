@@ -7,6 +7,7 @@ import {
 } from './controls';
 import { cancelCrop, confirmCrop, enterCrop, isCropping } from './crop';
 import { closeEffectsPanel, toggleEffectsPanel } from './effectspanel';
+import { closeRampLane, toggleRampLane } from './ramplane';
 import { currentTime, pause, seek, stepFrames, stepSeconds, togglePlay } from './player';
 import { edit, patchEdit } from './state';
 
@@ -132,6 +133,12 @@ function handleKey(e: KeyboardEvent, deps: ShortcutDeps): void {
       toggleEffectsPanel();
       break;
 
+    case 's':
+    case 'S':
+      e.preventDefault();
+      toggleRampLane();
+      break;
+
     case 'c':
     case 'C':
       e.preventDefault();
@@ -151,6 +158,7 @@ function escape(): void {
   }
   if (closeExportPopover()) return;
   if (closeEffectsPanel()) return;
+  if (closeRampLane()) return;
   dismissToast();
 }
 
