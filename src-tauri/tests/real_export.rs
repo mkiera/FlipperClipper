@@ -11,6 +11,7 @@ use flipperclipper_lib::ffmpeg::{
     build_args, output_duration, Effects, ExportFormat, ExportJob, QualityPreset, Rect, TextAnchorX,
     TextAnchorY, TextOverlay, OVERLAY_TEXT_FILE,
 };
+use flipperclipper_lib::ramp::SpeedPoint;
 
 // --- Fixtures ---
 
@@ -129,6 +130,26 @@ fn duration_of(path: &Path) -> f64 {
         path,
     )
     .parse()
+    .unwrap_or(0.0)
+}
+
+/// One stream's own length rather than the container's, which reports the longer of the two.
+/// Read from the packets: a stream-level `duration` tag is optional and mp4 often omits it.
+fn stream_duration(path: &Path, kind: &str) -> f64 {
+    ffprobe(
+        &[
+            "-select_streams",
+            kind,
+            "-show_entries",
+            "stream=duration",
+            "-of",
+            "csv=p=0",
+        ],
+        path,
+    )
+    .lines()
+    .next()
+    .and_then(|line| line.trim().trim_end_matches(',').parse().ok())
     .unwrap_or(0.0)
 }
 
@@ -257,6 +278,7 @@ fn job(input: &Path, name: &str) -> ExportJob {
         in_point: 0.0,
         out_point: 5.0,
         speed: 1.0,
+        ramp: Vec::new(),
         crop: None,
         mute: false,
         reverse: false,
@@ -799,3 +821,99 @@ fn a_fade_applies_to_the_audio_as_well() {
         mean_volume(&reference)
     );
 }
+
+// --- Speed ramping ---
+
+fn ramp(pairs: &[(f64, f64)]) -> Vec<SpeedPoint> {
+    pairs.iter().map(|(t, speed)| SpeedPoint { t: *t, speed: *speed }).collect()
+}
+
+/// The whole point of the closed form: a ramp is not the average of its ends. This curve
+/// averages to 2.5x over its slope, which would predict a shorter clip than the integral of
+/// 1/speed gives, and it is the integral that ffmpeg's own setpts expression produces.
+#[test]
+fn a_speed_ramp_lands_on_the_length_the_integral_predicts() {
+    if ffmpeg_missing() {
+        return;
+    }
+    let src = landscape();
+    let mut j = job(&src, "out-ramp.mp4");
+    j.out_point = 10.0;
+    // 1x held, up to 4x, held, back to 1x - the shape a speed ramp actually gets used in.
+    j.ramp = ramp(&[(0.0, 1.0), (3.0, 1.0), (5.0, 4.0), (8.0, 4.0), (10.0, 1.0)]);
+
+    let predicted = output_duration(&j);
+    let out = run_export(&j, 1920, 1080, 30.0, true);
+    let actual = duration_of(&out);
+
+    // One frame at 30 fps, which is the quantisation of the last timestamp.
+    assert!(
+        (actual - predicted).abs() < 0.05,
+        "ramped clip ran {actual}s against a predicted {predicted}s"
+    );
+    // The averaged-ends answer would be about 5.1s and the arithmetic ramp 5.598s. The
+    // geometric one is 5.914s, and a regression to either lands well outside the frame
+    // tolerance above.
+    assert!((predicted - 5.914).abs() < 0.01, "predicted {predicted}");
+}
+
+/// The audio has to end with the picture. atempo loses a sliver at every tempo change, so
+/// the chain pads and cuts to the length the video works out to.
+#[test]
+fn a_ramped_clip_keeps_its_audio_the_same_length_as_its_picture() {
+    if ffmpeg_missing() {
+        return;
+    }
+    let src = landscape();
+    let mut j = job(&src, "out-ramp-av.mp4");
+    j.out_point = 12.0;
+    j.ramp = ramp(&[(0.0, 1.0), (4.0, 3.0), (8.0, 3.0), (12.0, 0.5)]);
+
+    let out = run_export(&j, 1920, 1080, 30.0, true);
+    assert!(has_audio(&out), "the ramped export dropped its audio");
+
+    let video = stream_duration(&out, "v");
+    let audio = stream_duration(&out, "a");
+    assert!(
+        (video - audio).abs() < 0.1,
+        "picture ran {video}s and audio ran {audio}s"
+    );
+}
+
+/// A curve of all 1s has to leave the argument vector exactly as the speed slider alone would,
+/// or every existing export quietly starts going through the ramp path.
+#[test]
+fn a_flat_curve_produces_the_same_arguments_as_no_curve_at_all() {
+    let src = fixture_dir().join("landscape-1080p.mp4");
+    let mut plain = job(&src, "out-flat-plain.mp4");
+    plain.speed = 2.0;
+    let mut flat = plain.clone();
+    flat.ramp = ramp(&[(0.0, 1.0), (5.0, 1.0)]);
+
+    let a = build_args(&plain, "libx264", true, 1920, 1080, 30.0, None);
+    let b = build_args(&flat, "libx264", true, 1920, 1080, 30.0, None);
+    assert_eq!(a, b);
+}
+
+/// A ramp under reverse still has to produce a playable clip of the right length: the curve
+/// is applied on the source timeline and areverse runs after it, on the retimed stream.
+#[test]
+fn a_ramp_survives_being_reversed() {
+    if ffmpeg_missing() {
+        return;
+    }
+    let src = landscape();
+    let mut j = job(&src, "out-ramp-reverse.mp4");
+    j.out_point = 8.0;
+    j.reverse = true;
+    j.ramp = ramp(&[(0.0, 1.0), (4.0, 2.0), (8.0, 2.0)]);
+
+    let predicted = output_duration(&j);
+    let out = run_export(&j, 1920, 1080, 30.0, true);
+    let actual = duration_of(&out);
+    assert!(
+        (actual - predicted).abs() < 0.2,
+        "reversed ramp ran {actual}s against a predicted {predicted}s"
+    );
+}
+

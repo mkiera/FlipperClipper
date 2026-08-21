@@ -1,6 +1,7 @@
 import { edit, patchUi, refresh, subscribe } from './state';
 import { applyGain, enableBoost } from './audio';
 import { normalizeGain } from './loudness';
+import { speedAt } from './ramp';
 
 const PREVIEW_TIMEOUT_MS = 4000;
 
@@ -31,7 +32,18 @@ let reverseWall = 0;
 
 // Chromium throws outside [0.0625, 16] and the throw would abort the notify loop.
 function previewRate(): number {
-  return Math.min(Math.max(edit.speed, 0.0625), 16);
+  // Under a curve the rate is whatever the playhead is standing on, so the preview speeds up
+  // and slows down where the export will.
+  const wanted = edit.ramp.length > 0 ? speedAt(edit, displayTime()) : edit.speed;
+  return Math.min(Math.max(wanted, 0.0625), 16);
+}
+
+/** Follows the curve while the clip plays. Called per presented frame, and only written when
+ *  the rate has actually moved: assigning playbackRate every frame stutters the audio. */
+function followRamp(): void {
+  if (edit.ramp.length === 0) return;
+  const wanted = previewRate();
+  if (Math.abs(video.playbackRate - wanted) > 0.01) video.playbackRate = wanted;
 }
 
 function playElement(): void {
@@ -299,6 +311,8 @@ function pump(): void {
 
   if (edit.media && !video.paused && t >= edit.outPoint - halfFrame()) rewindToIn();
   else emitTime(t);
+
+  followRamp();
 
   if (useFrameCallback || !video.paused) schedulePump();
 }

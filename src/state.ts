@@ -18,6 +18,7 @@ import {
 export interface UiState {
   ffmpegAvailable: boolean;
   effectsOpen: boolean;
+  rampOpen: boolean;
   playing: boolean;
   cropping: boolean;
   exporting: boolean;
@@ -47,6 +48,7 @@ export const edit: EditState = {
   inPoint: 0,
   outPoint: 0,
   speed: 1,
+  ramp: [],
   crop: null,
   mute: false,
   reverse: false,
@@ -65,6 +67,7 @@ export const edit: EditState = {
 export const ui: UiState = {
   ffmpegAvailable: true,
   effectsOpen: false,
+  rampOpen: false,
   playing: false,
   cropping: false,
   exporting: false,
@@ -139,6 +142,7 @@ export function loadMedia(media: MediaInfo, src: string): void {
     inPoint: 0,
     outPoint: media.duration,
     speed: 1,
+    ramp: [],
     crop: null,
     mute: false,
     reverse: false,

@@ -11,6 +11,8 @@ use std::process::Stdio;
 use std::sync::{Mutex, OnceLock};
 
 use serde::{Deserialize, Serialize};
+
+use crate::ramp::{self, SpeedPoint};
 use serde_json::Value;
 
 /// A rectangle in *source* pixels, in display orientation.
@@ -160,6 +162,9 @@ pub struct ExportJob {
     pub in_point: f64,
     pub out_point: f64,
     pub speed: f64,
+    /// The speed curve on top of `speed`, on the source timeline. Empty is a flat 1.
+    #[serde(default)]
+    pub ramp: Vec<SpeedPoint>,
     pub crop: Option<Rect>,
     pub mute: bool,
     pub reverse: bool,
@@ -213,7 +218,42 @@ pub fn output_duration(job: &ExportJob) -> f64 {
     if job.speed <= 0.0 {
         return 0.0;
     }
-    ((job.out_point - job.in_point) / job.speed).max(0.0)
+    if !ramp::has_ramp(&job.ramp) {
+        return ((job.out_point - job.in_point) / job.speed).max(0.0);
+    }
+    ramp::ramped_duration(&job.ramp, job.speed, job.in_point, job.out_point)
+}
+
+/// The curve cut into pieces across this job's trim. Every ramp-aware caller starts here.
+fn ramp_segments(job: &ExportJob) -> Vec<ramp::Segment> {
+    ramp::segments(&job.ramp, job.speed, job.in_point, job.out_point)
+}
+
+/// The retiming filters: one division at a single speed, a nested expression under a curve,
+/// and nothing at all when neither changes the timing.
+///
+/// A curve also needs its frame rate settling. A single speed leaves a clip that is evenly
+/// spaced, just at a different rate, and the muxer writes that as it stands. A curve leaves
+/// frames bunched where it ran fast and spread where it ran slow, and ffmpeg's own conversion
+/// to a constant rate overshoots: measured on a five-part ramp, 5.967s of picture against a
+/// predicted 5.914s. The audio is padded to the prediction, so that gap is the two of them
+/// coming apart. An explicit fps brings it inside half a frame.
+fn retime_filters(job: &ExportJob, fps: f64) -> Vec<String> {
+    if ramp::has_ramp(&job.ramp) {
+        if let Some(expr) = ramp::setpts_expression(&ramp_segments(job)) {
+            // Quoted inside the graph: the expression is full of commas, which separate
+            // filters, and ffmpeg reads everything after the first one as the next filter.
+            let mut parts = vec![format!("setpts='({})/TB'", expr)];
+            if fps > 0.0 {
+                parts.push(format!("fps={}", fmt_num(fps)));
+            }
+            return parts;
+        }
+    }
+    if (job.speed - 1.0).abs() > 1e-9 {
+        return vec![format!("setpts=PTS/{}", fmt_num(job.speed))];
+    }
+    Vec::new()
 }
 
 /// The source window, which the speed change does not alter. Keeping it separate from
@@ -260,7 +300,16 @@ pub(crate) const LOUDNORM_TARGET_LUFS: f64 = -16.0;
 /// where a sped-up export hands it the shortened stream. volume is omitted at 1.0 for the
 /// same reason atempo is: a no-op filter still costs a resample pass.
 fn audio_filters(job: &ExportJob) -> Vec<String> {
-    let mut parts = atempo_chain(job.speed);
+    let ramped = ramp::has_ramp(&job.ramp);
+    // A curve too wide for atempo to follow falls back to the single speed. export.rs refuses
+    // that job before it gets here, so this only decides what a hand-built one does: run the
+    // audio at the base speed rather than emit a graph ffmpeg would reject.
+    let mut parts = if ramped {
+        ramp::audio_stages(&ramp_segments(job), ramp::AUDIO_STEP_SECONDS)
+            .unwrap_or_else(|| atempo_chain(job.speed))
+    } else {
+        atempo_chain(job.speed)
+    };
     if job.normalize {
         parts.push(LOUDNORM.to_string());
     }
@@ -272,6 +321,18 @@ fn audio_filters(job: &ExportJob) -> Vec<String> {
     }
     // After areverse, where "the start" finally means the start of what will be heard.
     parts.extend(fade_filters(&job.effects, output_duration(job), false));
+    if ramped {
+        // atempo loses a fraction of a millisecond at every tempo change, so the audio comes
+        // out a little short of the length the video's own expression works out to. Padded and
+        // cut to that length, the two end together; asetpts then rebuilds the timestamps from
+        // the sample count, which atrim on its own would leave with a hole where it cut.
+        let duration = output_duration(job);
+        if duration > 0.0 {
+            parts.push("apad".to_string());
+            parts.push(format!("atrim=end={}", fmt_time(duration)));
+            parts.push("asetpts=N/SR/TB".to_string());
+        }
+    }
     parts
 }
 
@@ -871,9 +932,7 @@ pub fn build_args(
         if let Some(r) = crop {
             chain.push(format!("crop={}:{}:{}:{}", r.w, r.h, r.x, r.y));
         }
-        if (job.speed - 1.0).abs() > 1e-9 {
-            chain.push(format!("setpts=PTS/{}", fmt_num(job.speed)));
-        }
+        chain.extend(retime_filters(job, fps));
         // The gif branch owns its own scale, so the effects and the text both go in ahead of
         // it - the same relative order as the video branch, minus the split.
         chain.extend(effect_filters(&job.effects));
@@ -933,9 +992,7 @@ pub fn build_args(
         // the source pixel space the overlay measured them in.
         vfilters.push(format!("crop={}:{}:{}:{}", r.w, r.h, r.x, r.y));
     }
-    if (job.speed - 1.0).abs() > 1e-9 {
-        vfilters.push(format!("setpts=PTS/{}", fmt_num(job.speed)));
-    }
+    vfilters.extend(retime_filters(job, fps));
     // Ahead of the scale, so a sigma given in source pixels means the same thing whatever
     // size the clip is exported at - which is what the preview shows.
     vfilters.extend(effect_filters(&job.effects));
@@ -1137,9 +1194,13 @@ pub fn estimate_output_bytes(
     }
 
     let (cropped_width, cropped_height) = cropped_size(job, width, height);
-    // setpts moves the timestamps and keeps every frame, so a 2x export is
-    // half as long at twice the rate and the frame count does not change.
-    let output_fps = fps * job.speed.max(0.0);
+    // setpts moves the timestamps and keeps every frame, so the rate is the frame count over
+    // the finished length. Under a curve that is an average, which is all an estimate needs.
+    let output_fps = if duration > 0.0 {
+        fps * source_duration(job) / duration
+    } else {
+        0.0
+    };
 
     if job.format == ExportFormat::Gif {
         let (fps_cap, width_cap) = gif_caps(job.quality);
@@ -1629,6 +1690,7 @@ mod tests {
             in_point: 1.5,
             out_point: 11.5,
             speed: 1.0,
+            ramp: Vec::new(),
             crop: None,
             mute: false,
             reverse: false,
@@ -2084,6 +2146,30 @@ mod tests {
     }
 
     // -- speed --------------------------------------------------------------
+
+    #[test]
+    fn a_curve_settles_the_frame_rate_where_a_single_speed_does_not_need_to() {
+        // One speed leaves the clip evenly spaced, just at another rate, and the muxer writes
+        // that as it stands. A curve leaves frames bunched where it ran fast, and ffmpeg's own
+        // conversion to a constant rate overshoots the length the audio is padded to.
+        let mut j = job(QualityPreset::High);
+        j.speed = 2.0;
+        let graph = build_args(&j, "libx264", true, 1920, 1080, 30.0, None).join(" ");
+        assert!(graph.contains("setpts=PTS/2.0"), "{graph}");
+        assert!(!graph.contains("fps=30"), "{graph}");
+
+        j.speed = 1.0;
+        j.ramp = vec![
+            SpeedPoint { t: 0.0, speed: 1.0 },
+            SpeedPoint { t: 2.0, speed: 4.0 },
+        ];
+        let graph = build_args(&j, "libx264", true, 1920, 1080, 30.0, None).join(" ");
+        assert!(graph.contains("setpts='("), "{graph}");
+        assert!(graph.contains("fps=30"), "{graph}");
+        // The expression itself, not a division: a curve has no single speed to divide by.
+        assert!(!graph.contains("setpts=PTS/"), "{graph}");
+    }
+
 
     #[test]
     fn atempo_chains_outside_its_supported_range() {

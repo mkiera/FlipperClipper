@@ -1,3 +1,5 @@
+import { hasRamp, rampedDuration } from './ramp';
+
 // The IPC contract. The Rust structs carry #[serde(rename_all = "camelCase")] to match these
 // names - rename in both places or not at all.
 
@@ -120,6 +122,15 @@ export interface EffectsState {
   settings: EffectSettings;
 }
 
+/** One point on the speed curve: a multiplier on the speed slider, at a moment on the source
+ *  timeline. Between two points the multiplier moves linearly, and outside them it holds. */
+export interface SpeedPoint {
+  /** Seconds into the source, not into the trim. */
+  t: number;
+  /** Multiplier on `speed`. A curve of all 1s is the slider on its own. */
+  speed: number;
+}
+
 export interface ExportJob {
   input: string;
   output: string;
@@ -127,6 +138,8 @@ export interface ExportJob {
   outPoint: number;
   /** 0.05 - 20. 1 means untouched. */
   speed: number;
+  /** The speed curve on top of `speed`, on the source timeline. Empty is a flat 1. */
+  ramp: SpeedPoint[];
   crop: Rect | null;
   mute: boolean;
   reverse: boolean;
@@ -151,6 +164,8 @@ export interface EditState {
   inPoint: number;
   outPoint: number;
   speed: number;
+  /** The speed curve on top of `speed`. Empty is a flat 1: the slider on its own. */
+  ramp: SpeedPoint[];
   crop: Rect | null;
   mute: boolean;
   reverse: boolean;
@@ -254,8 +269,10 @@ export const EVENT = {
   ffmpegProgress: 'ffmpeg-progress',
 } as const;
 
+/** The finished clip's length. ramp.ts owns the integral; callers have been handing an
+ *  EditState to this name since before the curve existed and need not learn a second one. */
 export function outputDuration(state: EditState): number {
-  return Math.max(0, (state.outPoint - state.inPoint) / state.speed);
+  return rampedDuration(state);
 }
 
 export function defaultFormatFor(inputPath: string): VideoFormat {
@@ -299,6 +316,8 @@ export function anyEffectOn(effects: EffectsState): boolean {
 export function isTrimOnly(state: EditState): boolean {
   return (
     state.speed === 1 &&
+    // A curve retimes the clip, and a stream copy never reaches the filter that would do it.
+    !hasRamp(state) &&
     !anyEffectOn(state.effects) &&
     state.crop === null &&
     !state.mute &&

@@ -3,6 +3,7 @@ pub mod ffmpeg;
 mod download;
 mod export;
 mod ffmpeg_install;
+pub mod ramp;
 mod settings;
 mod sysutil;
 mod updater;
