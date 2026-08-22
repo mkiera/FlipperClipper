@@ -260,10 +260,16 @@ export function initControls(controlsDeps: ControlsDeps): void {
 
   void onExportProgress((p) => patchUi({ exportPercent: clamp01(p.percent) }));
   void onExportDone(onExportFinished);
-  void onExportError((message) => {
+  void onExportError((failure) => {
     patchUi({ exporting: false, exportPercent: 0 });
-    recordError(message);
-    showToast(message, [], true);
+    // The panel gets FFmpeg's own words; the toast gets the one line worth reading.
+    recordError(failure.detail ? `${failure.message}
+${failure.detail}` : failure.message);
+    const gone = failure.cleanedUp ? ' The part-written file was removed.' : '';
+    const actions = lastAttempt
+      ? [{ label: 'Try again', run: () => void runExport(lastAttempt as string) }]
+      : [];
+    showToast(`${failure.message}${gone}`, actions, true);
   });
 
   subscribe(render);
@@ -555,6 +561,7 @@ function buildJob(input: string, output: string): ExportJob {
     outPoint: edit.outPoint,
     speed: edit.speed,
     ramp: edit.ramp,
+    orientation: edit.orientation,
     crop: edit.crop,
     mute: edit.mute,
     reverse: edit.reverse,
@@ -570,20 +577,27 @@ function buildJob(input: string, output: string): ExportJob {
   };
 }
 
-async function runExport(): Promise<void> {
+/** Where the last export was headed, so a failure can offer the same path again without
+ *  making the user walk the save dialog a second time. Cleared once one succeeds. */
+let lastAttempt: string | null = null;
+
+async function runExport(retryTarget?: string): Promise<void> {
   const media = edit.media;
   if (!media || ui.exporting) return;
 
   if (!(await ffmpegReady())) return;
 
-  const target = await pickExportTarget(defaultOutputPath(media.path));
+  // A retry already has its path, and asking for it again is the dialog the user just saw.
+  const target = retryTarget ?? (await pickExportTarget(defaultOutputPath(media.path)));
   if (!target) return;
+  lastAttempt = target;
 
   patchUi({ exporting: true, exportPercent: 0 });
   try {
     await startExport(buildJob(media.path, target));
   } catch (error) {
     patchUi({ exporting: false, exportPercent: 0 });
+    recordError(describe(error));
     showToast(describe(error), [], true);
   }
 }
@@ -616,6 +630,7 @@ function cancelRunningExport(): void {
 
 function onExportFinished(outputPath: string): void {
   patchUi({ exporting: false, exportPercent: 0 });
+  lastAttempt = null;
   showToast(`Exported ${baseName(outputPath)}`, [
     { label: 'Reveal', run: () => void revealInExplorer(outputPath).catch(reportFailure) },
     { label: 'Copy file', run: () => void copyFileToClipboard(outputPath).catch(reportFailure) },

@@ -12,6 +12,7 @@ import {
   type AppSettings,
   type DebugReport,
   type DiagnosticResult,
+  type ExportFailure,
   type ExportJob,
   type ExportProgress,
   type FfmpegStatus,
@@ -175,8 +176,8 @@ export function onExportDone(cb: (outputPath: string) => void): Promise<Unlisten
   return listen<string>(EVENT.exportDone, (e) => cb(e.payload));
 }
 
-export function onExportError(cb: (message: string) => void): Promise<UnlistenFn> {
-  return listen<string>(EVENT.exportError, (e) => cb(e.payload));
+export function onExportError(cb: (failure: ExportFailure) => void): Promise<UnlistenFn> {
+  return listen<ExportFailure>(EVENT.exportError, (e) => cb(e.payload));
 }
 
 export function onUpdateProgress(cb: (fraction: number) => void): Promise<UnlistenFn> {
