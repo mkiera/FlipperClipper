@@ -2,9 +2,11 @@
 // re-render the control row with it. player.ts owns it.
 
 import { defaultEffects } from './effects';
+import { afterPatch, beforePatch, clearHistory } from './history';
 import { forgetLoudness } from './loudness';
 import {
   AUDIO_FORMATS,
+  NO_ORIENTATION,
   DEFAULT_SETTINGS,
   defaultFormatFor,
   type AppSettings,
@@ -49,6 +51,7 @@ export const edit: EditState = {
   outPoint: 0,
   speed: 1,
   ramp: [],
+  orientation: NO_ORIENTATION,
   crop: null,
   mute: false,
   reverse: false,
@@ -91,7 +94,16 @@ function notify(): void {
 }
 
 export function patchEdit(patch: Partial<EditState>): void {
+  beforePatch();
   Object.assign(edit, patch);
+  afterPatch();
+  notify();
+}
+
+/** Puts a remembered edit back, for undo and redo. Not patchEdit: this must not be recorded
+ *  as a new edit, and history.ts is the only caller. */
+export function replaceEdit(state: Partial<EditState>): void {
+  Object.assign(edit, state);
   notify();
 }
 
@@ -128,6 +140,9 @@ function dropFilmstrip(): void {
 // size by hand this session.
 export function loadMedia(media: MediaInfo, src: string): void {
   forgetLoudness();
+  // Straight Object.assign below, not patchEdit, so nothing else clears the stack - and the
+  // previous clip's trim points mean nothing against a different file's length anyway.
+  clearHistory();
   let format: ExportFormat =
     settings.defaultFormat === 'source' ? defaultFormatFor(media.path) : settings.defaultFormat;
   let audioOnly = (AUDIO_FORMATS as string[]).includes(format);
@@ -143,6 +158,7 @@ export function loadMedia(media: MediaInfo, src: string): void {
     outPoint: media.duration,
     speed: 1,
     ramp: [],
+    orientation: NO_ORIENTATION,
     crop: null,
     mute: false,
     reverse: false,
