@@ -168,10 +168,11 @@ async fn fetch_releases(current: &semver::Version) -> Result<Vec<GhRelease>, Str
 
 #[tauri::command]
 pub async fn check_for_update(app: tauri::AppHandle) -> Result<Option<UpdateInfo>, String> {
+    // auto_check_updates is not consulted here. It says whether the app should ask on its own,
+    // and this command also answers the Check for updates button, which had been reporting
+    // "This is the newest build" to anyone who had turned the automatic check off. The caller
+    // that checks unprompted is the one that reads the setting.
     let settings = settings::load(&app);
-    if !settings.auto_check_updates {
-        return Ok(None);
-    }
 
     // package_info().version is compiled in from package.json, the same source the tag is written from.
     let current = app.package_info().version.clone();

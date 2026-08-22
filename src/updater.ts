@@ -1,4 +1,5 @@
 import { applyUpdate, checkForUpdate, onUpdateProgress } from './ipc';
+import { settings } from './state';
 import { type UpdateInfo } from './types';
 
 const CHECK_COOLDOWN_MS = 60 * 60 * 1000;
@@ -6,6 +7,10 @@ const CHECK_COOLDOWN_MS = 60 * 60 * 1000;
 const LAST_CHECK_KEY = 'flipperclipper.lastUpdateCheck';
 
 const CHECK_DELAY_MS = 2000;
+
+/** How often the app looks again while it stays open. A clip gets edited over an afternoon and
+ *  the app is rarely restarted, so a check that only ran at launch reached almost nobody. */
+const RECHECK_MS = 60 * 60 * 1000;
 
 const STYLE_ID = 'fc-updater-style';
 
@@ -90,27 +95,45 @@ const STYLE_TEXT = `
 let pill: HTMLDivElement | null = null;
 let unlistenProgress: (() => void) | null = null;
 
+/** The version the user waved away. A later release is a new offer and shows again. */
+let dismissedVersion: string | null = null;
+
 export function initUpdater(): void {
   window.setTimeout(() => {
     void check();
   }, CHECK_DELAY_MS);
+  window.setInterval(() => void check(), RECHECK_MS);
 }
 
 async function check(): Promise<void> {
+  // The Rust command answers the Settings button too, so the setting is read here instead:
+  // switching the automatic check off must not make the button claim the build is current.
+  if (!settings.autoCheckUpdates) return;
   if (!cooldownElapsed()) return;
 
   // Recorded before the request: a machine offline at every launch would re-check at every launch.
-  try {
-    localStorage.setItem(LAST_CHECK_KEY, String(Date.now()));
-  } catch {
-    /* losing the cooldown is not a reason to skip the check */
-  }
+  const previous = stamp(Date.now());
 
   try {
     const info = await checkForUpdate();
-    if (info) showPill(info);
+    if (info) showUpdate(info);
   } catch {
-    /* offline or rate limited; the next launch tries again */
+    // A check that never reached GitHub has not used its turn. Without this an offline launch
+    // burnt the whole hour, and with the recheck timer that meant one lost check per hour.
+    stamp(previous);
+  }
+}
+
+/** Writes the cooldown mark and returns what was there before, so a failure can put it back. */
+function stamp(at: number | null): number | null {
+  try {
+    const had = localStorage.getItem(LAST_CHECK_KEY);
+    if (at === null) localStorage.removeItem(LAST_CHECK_KEY);
+    else localStorage.setItem(LAST_CHECK_KEY, String(at));
+    return had === null ? null : Number(had);
+  } catch {
+    /* losing the cooldown is not a reason to skip the check */
+    return null;
   }
 }
 
@@ -136,8 +159,20 @@ function ensureStyle(): void {
   document.head.appendChild(style);
 }
 
+/** Put the offer on screen. Settings calls this too, so a check the user asked for lands
+ *  somewhere that survives closing the panel. */
+export function showUpdate(info: UpdateInfo, asked = false): void {
+  // A dismissal silences the automatic offer, never an answer the user went and asked for.
+  if (!asked && info.version === dismissedVersion) return;
+  if (pill) {
+    // A newer release than the one already on offer replaces it rather than queueing behind it.
+    pill.remove();
+    pill = null;
+  }
+  showPill(info);
+}
+
 function showPill(info: UpdateInfo): void {
-  if (pill) return;
   ensureStyle();
 
   pill = document.createElement('div');
@@ -167,6 +202,7 @@ function showPill(info: UpdateInfo): void {
   dismiss.setAttribute('aria-label', 'Dismiss');
 
   dismiss.addEventListener('click', () => {
+    dismissedVersion = info.version;
     pill?.remove();
     pill = null;
   });

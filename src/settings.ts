@@ -10,6 +10,8 @@ import {
   listReleases,
   saveSettings,
 } from './ipc';
+import { keyboardDriven } from './focus';
+import { showUpdate } from './updater';
 import { setSettings, settings } from './state';
 import {
   AUDIO_FORMATS,
@@ -243,7 +245,9 @@ export function appSettings(): AppSettings {
 function open(): void {
   modal.hidden = false;
   note.textContent = '';
-  closeBtn.focus();
+  // Focus is for whoever arrived on Tab. Parking it on the close button after a mouse click
+  // would make the next Space shut the panel again.
+  if (keyboardDriven()) closeBtn.focus();
   void loadActiveChannel(false);
 }
 
@@ -251,7 +255,7 @@ function close(): void {
   modal.hidden = true;
   downgradeArmed = false;
   alphaArmed = false;
-  openBtn.focus();
+  if (keyboardDriven()) openBtn.focus();
 }
 
 function showSection(section: 'updates' | 'editing'): void {
@@ -363,6 +367,9 @@ async function checkNow(): Promise<void> {
   let outcome: string;
   try {
     const info = await checkForUpdate();
+    // The pill as well as the sentence: the note goes away with the panel, and a user who came
+    // here to check for an update should not have to find the Install button again afterwards.
+    if (info) showUpdate(info, true);
     outcome = info ? `v${info.version} is available.` : 'This is the newest build.';
   } catch (error) {
     outcome = messageOf(error);
