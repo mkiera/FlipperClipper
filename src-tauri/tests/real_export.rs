@@ -9,7 +9,7 @@ use std::process::Command;
 
 use flipperclipper_lib::ffmpeg::{
     build_args, output_duration, Effects, ExportFormat, ExportJob, QualityPreset, Rect, TextAnchorX,
-    TextAnchorY, TextOverlay, OVERLAY_TEXT_FILE,
+    TextAnchorY, TextOverlay, Orientation, OVERLAY_TEXT_FILE,
 };
 use flipperclipper_lib::ramp::SpeedPoint;
 
@@ -279,6 +279,7 @@ fn job(input: &Path, name: &str) -> ExportJob {
         out_point: 5.0,
         speed: 1.0,
         ramp: Vec::new(),
+        orientation: Orientation::default(),
         crop: None,
         mute: false,
         reverse: false,
@@ -914,6 +915,112 @@ fn a_ramp_survives_being_reversed() {
     assert!(
         (actual - predicted).abs() < 0.2,
         "reversed ramp ran {actual}s against a predicted {predicted}s"
+    );
+}
+
+
+// --- Rotate and flip ---
+
+fn turned(rotate: i64, flip_h: bool, flip_v: bool) -> Orientation {
+    Orientation { rotate, flip_h, flip_v }
+}
+
+/// The whole point of turning at the head of the chain: the finished file is the other way up.
+#[test]
+fn a_quarter_turn_swaps_the_exported_dimensions() {
+    if ffmpeg_missing() {
+        return;
+    }
+    let src = landscape();
+    for rotate in [90, 270] {
+        let mut j = job(&src, &format!("out-rot-{rotate}.mp4"));
+        j.out_point = 1.0;
+        j.orientation = turned(rotate, false, false);
+        let out = run_export(&j, 1920, 1080, 30.0, true);
+        assert_eq!(dimensions_of(&out), (1080, 1920), "rotate {rotate}");
+    }
+}
+
+#[test]
+fn a_half_turn_and_a_flip_leave_the_dimensions_alone() {
+    if ffmpeg_missing() {
+        return;
+    }
+    let src = landscape();
+    for orientation in [turned(180, false, false), turned(0, true, false), turned(0, false, true)] {
+        let mut j = job(&src, "out-rot-same.mp4");
+        j.out_point = 1.0;
+        j.orientation = orientation;
+        let out = run_export(&j, 1920, 1080, 30.0, true);
+        assert_eq!(dimensions_of(&out), (1920, 1080), "{orientation:?}");
+    }
+}
+
+/// The crop rectangle is drawn on the turned picture, so it has to be applied to the turned
+/// frame. Cropping 1080x1920 down to 400x900 only fits if the turn happened first.
+#[test]
+fn the_crop_rectangle_lands_on_the_turned_frame() {
+    if ffmpeg_missing() {
+        return;
+    }
+    let src = landscape();
+    let mut j = job(&src, "out-rot-crop.mp4");
+    j.out_point = 1.0;
+    j.orientation = turned(90, false, false);
+    // Taller than the source is wide: impossible unless the crop runs after the transpose.
+    j.crop = Some(Rect { x: 100, y: 400, w: 400, h: 900 });
+    let out = run_export(&j, 1920, 1080, 30.0, true);
+    assert_eq!(dimensions_of(&out), (400, 900));
+}
+
+/// Turning must actually move the pixels, not just relabel the dimensions.
+#[test]
+fn a_flip_changes_the_picture() {
+    if ffmpeg_missing() {
+        return;
+    }
+    let src = landscape();
+    let mut plain = job(&src, "out-flip-plain.mp4");
+    plain.out_point = 1.0;
+    let before = first_frame_bytes(&run_export(&plain, 1920, 1080, 30.0, true), "frame-flip-plain.bmp");
+
+    let mut flipped = job(&src, "out-flip-h.mp4");
+    flipped.out_point = 1.0;
+    flipped.orientation = turned(0, true, false);
+    let after = first_frame_bytes(&run_export(&flipped, 1920, 1080, 30.0, true), "frame-flip-h.bmp");
+
+    assert_ne!(before, after, "a horizontal flip left the frame untouched");
+}
+
+/// A job with no turn must produce the argument vector it produced before orientation existed,
+/// or every existing export quietly starts going through a new path.
+#[test]
+fn no_turn_leaves_the_arguments_untouched() {
+    let src = fixture_dir().join("landscape-1080p.mp4");
+    let j = job(&src, "out-rot-none.mp4");
+    let args = build_args(&j, "libx264", true, 1920, 1080, 30.0, None).join(" ");
+    assert!(!args.contains("transpose"), "{args}");
+    assert!(!args.contains("hflip"), "{args}");
+    assert!(!args.contains("vflip"), "{args}");
+}
+
+/// The estimate has to reason about the turned frame too, or a portrait export is sized as
+/// though it were still landscape.
+#[test]
+fn the_size_estimate_follows_the_turn() {
+    let src = fixture_dir().join("landscape-1080p.mp4");
+    let mut j = job(&src, "out-rot-estimate.mp4");
+    j.out_point = 5.0;
+    // The same rectangle the render test proves comes out 400x900. It fits the turned frame
+    // exactly; against an unturned 1920x1080 the bottom is clipped away to 400x680.
+    j.crop = Some(Rect { x: 100, y: 400, w: 400, h: 900 });
+    j.orientation = turned(90, false, false);
+    let turned_bytes = flipperclipper_lib::ffmpeg::estimate_output_bytes(&j, 1920, 1080, 30.0, true);
+    j.orientation = Orientation::default();
+    let flat_bytes = flipperclipper_lib::ffmpeg::estimate_output_bytes(&j, 1920, 1080, 30.0, true);
+    assert!(
+        turned_bytes > flat_bytes,
+        "the turned frame keeps more of the crop, so it must estimate larger: {turned_bytes} vs {flat_bytes}"
     );
 }
 

@@ -70,6 +70,8 @@ export function render(): void {
   const video = videoElement();
   const effects = edit.effects;
 
+  applyTurn(video);
+
   const geometry = edit.media ? frameGeometry(stage) : null;
   const scale = geometry?.scale ?? 1;
   // Set before the filter is applied, so the first blurred frame is drawn at the right radius.
@@ -106,6 +108,48 @@ export function render(): void {
 
   fadeShade.hidden = !drawsFade;
   renderFade();
+}
+
+/**
+ * The turn, as a CSS transform on the <video>.
+ *
+ * A quarter turn needs the element sized to the stage's OTHER way round before it is rotated,
+ * or the transform spins a stage-shaped box and the picture inside it hangs off the top and
+ * bottom. Sized H by W and turned, it lands back on exactly W by H.
+ *
+ * crop.ts does not read this. It works the picture out from the stage and the turned aspect,
+ * because a transformed element's own rect is the box after the transform and says nothing
+ * about where the picture inside it went.
+ */
+function applyTurn(video: HTMLVideoElement): void {
+  const { rotate, flipH, flipV } = edit.orientation;
+  const turned = rotate === 90 || rotate === 270;
+
+  if (!turned) {
+    video.style.removeProperty('width');
+    video.style.removeProperty('height');
+    video.style.removeProperty('left');
+    video.style.removeProperty('top');
+    video.style.removeProperty('position');
+  } else {
+    const box = stage.getBoundingClientRect();
+    Object.assign(video.style, {
+      position: 'absolute',
+      width: `${box.height}px`,
+      height: `${box.width}px`,
+      left: `${(box.width - box.height) / 2}px`,
+      top: `${(box.height - box.width) / 2}px`,
+    });
+  }
+
+  const parts: string[] = [];
+  if (rotate !== 0) parts.push(`rotate(${rotate}deg)`);
+  // After the rotate in the transform list, which applies it in the turned frame - the same
+  // order hflip and vflip sit in after transpose in the export chain.
+  if (flipH) parts.push('scaleX(-1)');
+  if (flipV) parts.push('scaleY(-1)');
+  const transform = parts.length > 0 ? parts.join(' ') : '';
+  if (video.style.transform !== transform) video.style.transform = transform;
 }
 
 function renderText(frameHeight: number): void {
