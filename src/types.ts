@@ -124,6 +124,28 @@ export interface EffectsState {
 
 /** One point on the speed curve: a multiplier on the speed slider, at a moment on the source
  *  timeline. Between two points the multiplier moves linearly, and outside them it holds. */
+/** Quarter turns clockwise, as the frame is shown. A file's own rotation tag is already
+ *  applied by ffmpeg and by parse_probe, so this is what the user asked for on top of it. */
+export type Rotation = 0 | 90 | 180 | 270;
+
+/** How the frame is turned before anything else happens to it. */
+export interface Orientation {
+  rotate: Rotation;
+  /** Mirrored left to right, applied after the turn. */
+  flipH: boolean;
+  flipV: boolean;
+}
+
+export const NO_ORIENTATION: Orientation = { rotate: 0, flipH: false, flipV: false };
+
+export function isTurned(orientation: Orientation): boolean {
+  return orientation.rotate === 90 || orientation.rotate === 270;
+}
+
+export function hasOrientation(orientation: Orientation): boolean {
+  return orientation.rotate !== 0 || orientation.flipH || orientation.flipV;
+}
+
 export interface SpeedPoint {
   /** Seconds into the source, not into the trim. */
   t: number;
@@ -140,6 +162,8 @@ export interface ExportJob {
   speed: number;
   /** The speed curve on top of `speed`, on the source timeline. Empty is a flat 1. */
   ramp: SpeedPoint[];
+  /** Applied at the head of the chain, so the crop rectangle is in the turned frame. */
+  orientation: Orientation;
   crop: Rect | null;
   mute: boolean;
   reverse: boolean;
@@ -166,6 +190,7 @@ export interface EditState {
   speed: number;
   /** The speed curve on top of `speed`. Empty is a flat 1: the slider on its own. */
   ramp: SpeedPoint[];
+  orientation: Orientation;
   crop: Rect | null;
   mute: boolean;
   reverse: boolean;
@@ -216,6 +241,15 @@ export interface DiagnosticResult {
 export interface FfmpegStatus {
   available: boolean;
   version: string | null;
+}
+
+/** What a failed export reports. The message goes in the toast; the detail is the tail
+ *  FFmpeg printed, which the debug panel keeps for a report. */
+export interface ExportFailure {
+  message: string;
+  detail: string;
+  /** True when the part-written file was removed, so the toast can say the output is gone. */
+  cleanedUp: boolean;
 }
 
 export interface ExportProgress {
@@ -342,9 +376,24 @@ export function anyEffectOn(effects: EffectsState): boolean {
   return Object.values(effects.on).some(Boolean);
 }
 
+/** The frame's size after the turn, which is the coordinate space the crop rectangle and
+ *  every crop control work in. */
+export function frameWidth(state: EditState): number {
+  const media = state.media;
+  if (!media) return 0;
+  return isTurned(state.orientation) ? media.height : media.width;
+}
+
+export function frameHeight(state: EditState): number {
+  const media = state.media;
+  if (!media) return 0;
+  return isTurned(state.orientation) ? media.width : media.height;
+}
+
 export function isTrimOnly(state: EditState): boolean {
   return (
     state.speed === 1 &&
+    !hasOrientation(state.orientation) &&
     // A curve retimes the clip, and a stream copy never reaches the filter that would do it.
     !hasRamp(state) &&
     !anyEffectOn(state.effects) &&

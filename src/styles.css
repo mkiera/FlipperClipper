@@ -636,6 +636,46 @@ select option:disabled {
   color: var(--accent-glow);
 }
 
+.fx-orientation {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 12px 10px;
+}
+
+/* Drawn in CSS rather than four more inline SVGs: each is one glyph turned, and a border with
+   one heavy edge reads as a frame with a top at this size. */
+.fx-turn::before {
+  content: '';
+  width: 13px;
+  height: 13px;
+  border: 1.5px solid currentColor;
+  border-radius: 2px;
+  border-top-width: 4px;
+}
+
+.fx-turn-rotate-left::before {
+  transform: rotate(-90deg);
+}
+
+.fx-turn-rotate-right::before {
+  transform: rotate(90deg);
+}
+
+.fx-turn-flip-h::before {
+  border-top-width: 1.5px;
+  border-left-width: 4px;
+  border-right-width: 4px;
+}
+
+.fx-turn-flip-v::before {
+  border-bottom-width: 4px;
+}
+
+.fx-orientation .fx-summary {
+  margin-left: 2px;
+}
+
 .fx-list {
   display: flex;
   flex-direction: column;

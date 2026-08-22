@@ -154,6 +154,67 @@ impl Effects {
     }
 }
 
+/// How the frame is turned before anything else happens to it.
+///
+/// At the HEAD of the chain, ahead of crop, so every coordinate downstream - the crop
+/// rectangle, the text anchors, the vignette - is in the frame as the user sees it. The
+/// alternative, turning last, would mean the crop rectangle arriving in one orientation and
+/// being applied in another.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct Orientation {
+    /// Quarter turns clockwise: 0, 90, 180 or 270. Anything else is treated as 0.
+    pub rotate: i64,
+    /// Mirrored left to right, applied after the turn.
+    pub flip_h: bool,
+    pub flip_v: bool,
+}
+
+impl Orientation {
+    pub fn any(&self) -> bool {
+        self.turns() != 0 || self.flip_h || self.flip_v
+    }
+
+    /// Quarter turns, normalised to 0..3. A negative or out-of-range value from a hand-built
+    /// job becomes 0 rather than an invalid filter.
+    fn turns(&self) -> i64 {
+        match self.rotate {
+            90 => 1,
+            180 => 2,
+            270 => 3,
+            _ => 0,
+        }
+    }
+
+    /// Whether width and height swap. Every size calculation downstream keys on this.
+    pub fn swaps_axes(&self) -> bool {
+        self.turns() % 2 == 1
+    }
+
+    /// transpose=1 is 90 clockwise and transpose=2 is 90 anticlockwise. 180 is two of the
+    /// same, which is cheaper than the hflip,vflip pair and keeps one filter's rounding.
+    fn filters(&self) -> Vec<String> {
+        let mut parts: Vec<String> = Vec::new();
+        match self.turns() {
+            1 => parts.push("transpose=1".to_string()),
+            2 => {
+                parts.push("transpose=1".to_string());
+                parts.push("transpose=1".to_string());
+            }
+            3 => parts.push("transpose=2".to_string()),
+            _ => {}
+        }
+        // After the turn, so they mirror what the user is looking at rather than the source.
+        if self.flip_h {
+            parts.push("hflip".to_string());
+        }
+        if self.flip_v {
+            parts.push("vflip".to_string());
+        }
+        parts
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExportJob {
@@ -165,6 +226,9 @@ pub struct ExportJob {
     /// The speed curve on top of `speed`, on the source timeline. Empty is a flat 1.
     #[serde(default)]
     pub ramp: Vec<SpeedPoint>,
+    /// Applied at the head of the chain, so `crop` is in the turned frame.
+    #[serde(default)]
+    pub orientation: Orientation,
     pub crop: Option<Rect>,
     pub mute: bool,
     pub reverse: bool,
@@ -627,6 +691,17 @@ fn gif_caps(quality: QualityPreset) -> (i64, i64) {
 
 /// The frame after crop, which is what both the scale step and the estimator
 /// measure against.
+/// The source size as the frame is shown after the turn. The crop rectangle, the scale
+/// ladder and the size estimate all work in this space, because the user drew the crop on a
+/// turned picture and `transpose` runs before any of them.
+pub fn turned_size(job: &ExportJob, width: i64, height: i64) -> (i64, i64) {
+    if job.orientation.swaps_axes() {
+        (height, width)
+    } else {
+        (width, height)
+    }
+}
+
 fn cropped_size(job: &ExportJob, width: i64, height: i64) -> (i64, i64) {
     match job
         .crop
@@ -856,6 +931,9 @@ pub fn build_args(
 ) -> Vec<String> {
     let mut args: Vec<String> = Vec::new();
     let keep_audio = has_audio && !job.mute;
+    // Everything below reasons about the frame the user was looking at, which is the turned
+    // one. transpose runs at the head of the chain, so crop and scale see these dimensions.
+    let (width, height) = turned_size(job, width, height);
 
     push_all(&mut args, &["-y"]);
     // -nostats suppresses the carriage-return status line that would otherwise interleave with
@@ -929,6 +1007,7 @@ pub fn build_args(
         let (fps_cap, width_cap) = gif_caps(job.quality);
 
         let mut chain: Vec<String> = Vec::new();
+        chain.extend(job.orientation.filters());
         if let Some(r) = crop {
             chain.push(format!("crop={}:{}:{}:{}", r.w, r.h, r.x, r.y));
         }
@@ -987,6 +1066,8 @@ pub fn build_args(
     let (scale_filter, _, _) = scale_step(job, effective_width, effective_height, fps, fit_kbps);
 
     let mut vfilters: Vec<String> = Vec::new();
+    // Ahead of the crop, so the rectangle the UI produced lands on the frame it was drawn on.
+    vfilters.extend(job.orientation.filters());
     if let Some(r) = crop {
         // Crop first, so setpts and scale only see the surviving pixels and the coordinates stay in
         // the source pixel space the overlay measured them in.
@@ -1193,6 +1274,7 @@ pub fn estimate_output_bytes(
         return bytes_from_kbps(audio_only_kbps(job), duration).round() as u64;
     }
 
+    let (width, height) = turned_size(job, width, height);
     let (cropped_width, cropped_height) = cropped_size(job, width, height);
     // setpts moves the timestamps and keeps every frame, so the rate is the frame count over
     // the finished length. Under a curve that is an average, which is all an estimate needs.
@@ -1691,6 +1773,7 @@ mod tests {
             out_point: 11.5,
             speed: 1.0,
             ramp: Vec::new(),
+            orientation: Orientation::default(),
             crop: None,
             mute: false,
             reverse: false,

@@ -19,7 +19,8 @@ import {
   withSwitch,
 } from './effects';
 import { edit, patchEdit, patchUi, subscribe, ui } from './state';
-import type { EffectId, EffectSettings, TextAnchorX, TextAnchorY } from './types';
+import { isTurned } from './types';
+import type { EffectId, EffectSettings, Orientation, TextAnchorX, TextAnchorY } from './types';
 
 const ANCHORS_X: TextAnchorX[] = ['left', 'center', 'right'];
 const ANCHORS_Y: TextAnchorY[] = ['top', 'middle', 'bottom'];
@@ -51,6 +52,7 @@ export function initEffectsPanel(): void {
     patchEdit({ effects: defaultEffects() });
   });
 
+  buildOrientation();
   list.replaceChildren(...EFFECT_IDS.map(buildRow));
 
   subscribe(render);
@@ -66,6 +68,63 @@ export function closeEffectsPanel(): boolean {
   if (!ui.effectsOpen) return false;
   patchUi({ effectsOpen: false });
   return true;
+}
+
+/* --- Orientation --- */
+
+/**
+ * Turning the frame, above the effect rows. Not one of them: it changes the shape of the
+ * frame rather than its pixels, everything downstream is measured in the turned frame, and it
+ * has no strength to switch on and off.
+ */
+function buildOrientation(): void {
+  const host = el('fx-orientation');
+
+  const turn = (by: number) => () => {
+    const rotate = (((edit.orientation.rotate + by) % 360) + 360) % 360;
+    setOrientation({ rotate: rotate as Orientation['rotate'] });
+  };
+
+  const buttons: HTMLButtonElement[] = [
+    chip('rotate-left', 'Turn left', turn(-90)),
+    chip('rotate-right', 'Turn right', turn(90)),
+    chip('flip-h', 'Mirror', () => setOrientation({ flipH: !edit.orientation.flipH })),
+    chip('flip-v', 'Flip', () => setOrientation({ flipV: !edit.orientation.flipV })),
+  ];
+  host.replaceChildren(...buttons);
+
+  const label = document.createElement('span');
+  label.className = 'fx-summary';
+  host.append(label);
+
+  updaters.push(() => {
+    const { rotate, flipH, flipV } = edit.orientation;
+    buttons[2].classList.toggle('active', flipH);
+    buttons[3].classList.toggle('active', flipV);
+    const parts: string[] = [];
+    if (rotate !== 0) parts.push(`${rotate} degrees`);
+    if (flipH) parts.push('mirrored');
+    if (flipV) parts.push('flipped');
+    label.textContent = parts.length > 0 ? parts.join(', ') : 'Upright';
+  });
+}
+
+function chip(name: string, title: string, run: () => void): HTMLButtonElement {
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = `icon-btn small fx-turn fx-turn-${name}`;
+  button.title = title;
+  button.setAttribute('aria-label', title);
+  button.addEventListener('click', run);
+  return button;
+}
+
+/** A turn moves every coordinate the crop was drawn in, so the crop goes with it rather than
+ *  landing somewhere the user never chose. Ctrl+Z puts both back together. */
+function setOrientation(patch: Partial<Orientation>): void {
+  const orientation = { ...edit.orientation, ...patch };
+  const swapped = isTurned(orientation) !== isTurned(edit.orientation);
+  patchEdit({ orientation, ...(swapped && edit.crop ? { crop: null } : {}) });
 }
 
 /* --- Rows --- */

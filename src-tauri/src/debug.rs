@@ -166,6 +166,7 @@ fn diagnose(encoder: &str) -> (bool, String, String) {
         out_point: 1.75,
         speed: 1.5,
         ramp: Vec::new(),
+        orientation: ffmpeg::Orientation::default(),
         crop: None,
         mute: false,
         reverse: false,

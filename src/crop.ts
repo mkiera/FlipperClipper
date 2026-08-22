@@ -1,4 +1,5 @@
 import { edit, patchEdit, patchUi, subscribe, ui } from './state';
+import { frameHeight, frameWidth, isTurned } from './types';
 import { videoElement } from './player';
 import type { Rect } from './types';
 
@@ -254,42 +255,48 @@ function markActiveChip(): void {
 function fullFrame(): Rect {
   const media = edit.media;
   if (!media) return { x: 0, y: 0, w: 0, h: 0 };
-  return { x: 0, y: 0, w: media.width, h: media.height };
+  return { x: 0, y: 0, w: frameWidth(edit), h: frameHeight(edit) };
 }
 
 function coversFrame(r: Rect): boolean {
   const media = edit.media;
   if (!media) return true;
-  return r.x <= 1 && r.y <= 1 && r.w >= media.width - 1 && r.h >= media.height - 1;
+  return r.x <= 1 && r.y <= 1 && r.w >= frameWidth(edit) - 1 && r.h >= frameHeight(edit) - 1;
 }
 
 // Letterbox math uses videoWidth/videoHeight - ffprobe's stored dimensions ignore sample
 // aspect, so on anamorphic footage every crop comes out offset. The rect itself stays in
-// media.width/height, which is the space ffmpeg's crop filter takes.
+// frameWidth(edit)/height, which is the space ffmpeg's crop filter takes.
 function contentBox(host: HTMLElement): Box | null {
   const media = edit.media;
-  if (!media || media.width <= 0 || media.height <= 0) return null;
+  if (!media || frameWidth(edit) <= 0 || frameHeight(edit) <= 0) return null;
 
   const video = videoElement();
-  const videoRect = video.getBoundingClientRect();
   const layerRect = host.getBoundingClientRect();
-  if (videoRect.width <= 0 || videoRect.height <= 0) return null;
+  const stage = video.parentElement;
+  const stageRect = stage ? stage.getBoundingClientRect() : layerRect;
+  if (stageRect.width <= 0 || stageRect.height <= 0) return null;
 
   // Both are 0 until metadata arrives, and crop mode can be entered in that window.
-  const shownWidth = video.videoWidth > 0 ? video.videoWidth : media.width;
-  const shownHeight = video.videoHeight > 0 ? video.videoHeight : media.height;
+  const decodedWidth = video.videoWidth > 0 ? video.videoWidth : frameWidth(edit);
+  const decodedHeight = video.videoHeight > 0 ? video.videoHeight : frameHeight(edit);
+  // The turn is a CSS transform on the element, so its own rect is the box AFTER the transform
+  // and tells us nothing about where the picture inside it landed. The picture is worked out
+  // from the stage and the turned aspect instead, which is true however the turn is achieved.
+  const shownWidth = isTurned(edit.orientation) ? decodedHeight : decodedWidth;
+  const shownHeight = isTurned(edit.orientation) ? decodedWidth : decodedHeight;
 
-  const fit = Math.min(videoRect.width / shownWidth, videoRect.height / shownHeight);
+  const fit = Math.min(stageRect.width / shownWidth, stageRect.height / shownHeight);
   const width = shownWidth * fit;
   const height = shownHeight * fit;
 
   return {
-    left: videoRect.left - layerRect.left + (videoRect.width - width) / 2,
-    top: videoRect.top - layerRect.top + (videoRect.height - height) / 2,
+    left: stageRect.left - layerRect.left + (stageRect.width - width) / 2,
+    top: stageRect.top - layerRect.top + (stageRect.height - height) / 2,
     width,
     height,
-    scaleX: width / media.width,
-    scaleY: height / media.height,
+    scaleX: width / frameWidth(edit),
+    scaleY: height / frameHeight(edit),
   };
 }
 
@@ -341,8 +348,8 @@ function moveBy(dx: number, dy: number): Rect {
   const media = edit.media;
   if (!media) return working;
   return {
-    x: clamp(dragStartRect.x + dx, 0, media.width - dragStartRect.w),
-    y: clamp(dragStartRect.y + dy, 0, media.height - dragStartRect.h),
+    x: clamp(dragStartRect.x + dx, 0, frameWidth(edit) - dragStartRect.w),
+    y: clamp(dragStartRect.y + dy, 0, frameHeight(edit) - dragStartRect.h),
     w: dragStartRect.w,
     h: dragStartRect.h,
   };
@@ -392,16 +399,16 @@ function resizeBy(handle: string, dx: number, dy: number): Rect {
       h += y;
       y = 0;
     }
-    if (x + w > media.width) w = media.width - x;
-    if (y + h > media.height) h = media.height - y;
+    if (x + w > frameWidth(edit)) w = frameWidth(edit) - x;
+    if (y + h > frameHeight(edit)) h = frameHeight(edit) - y;
 
     return { x, y, w: Math.max(MIN_SIZE, w), h: Math.max(MIN_SIZE, h) };
   }
 
   const anchorX = west ? start.x + start.w : start.x;
   const anchorY = north ? start.y + start.h : start.y;
-  const availableW = west ? anchorX : media.width - anchorX;
-  const availableH = north ? anchorY : media.height - anchorY;
+  const availableW = west ? anchorX : frameWidth(edit) - anchorX;
+  const availableH = north ? anchorY : frameHeight(edit) - anchorY;
 
   let w: number;
   let h: number;
@@ -411,20 +418,20 @@ function resizeBy(handle: string, dx: number, dy: number): Rect {
   if (!west && !east) {
     h = clamp(north ? start.h - dy : start.h + dy, MIN_SIZE, availableH);
     w = h * aspect;
-    if (w > media.width) {
-      w = media.width;
+    if (w > frameWidth(edit)) {
+      w = frameWidth(edit);
       h = w / aspect;
     }
-    x = clamp(start.x + start.w / 2 - w / 2, 0, media.width - w);
+    x = clamp(start.x + start.w / 2 - w / 2, 0, frameWidth(edit) - w);
     y = north ? anchorY - h : anchorY;
   } else if (!north && !south) {
     w = clamp(west ? start.w - dx : start.w + dx, MIN_SIZE, availableW);
     h = w / aspect;
-    if (h > media.height) {
-      h = media.height;
+    if (h > frameHeight(edit)) {
+      h = frameHeight(edit);
       w = h * aspect;
     }
-    y = clamp(start.y + start.h / 2 - h / 2, 0, media.height - h);
+    y = clamp(start.y + start.h / 2 - h / 2, 0, frameHeight(edit) - h);
     x = west ? anchorX - w : anchorX;
   } else {
     w = clamp(west ? start.w - dx : start.w + dx, MIN_SIZE, availableW);
@@ -449,13 +456,13 @@ function fitAspect(r: Rect, ratio: number): Rect {
   if (w / h > ratio) w = h * ratio;
   else h = w / ratio;
 
-  const shrink = Math.min(1, media.width / w, media.height / h);
+  const shrink = Math.min(1, frameWidth(edit) / w, frameHeight(edit) / h);
   w *= shrink;
   h *= shrink;
 
   return {
-    x: clamp(r.x + r.w / 2 - w / 2, 0, media.width - w),
-    y: clamp(r.y + r.h / 2 - h / 2, 0, media.height - h),
+    x: clamp(r.x + r.w / 2 - w / 2, 0, frameWidth(edit) - w),
+    y: clamp(r.y + r.h / 2 - h / 2, 0, frameHeight(edit) - h),
     w,
     h,
   };

@@ -4,11 +4,13 @@ import {
   dismissToast,
   toggleNormalize,
   toggleReverse,
+  showToast,
 } from './controls';
 import { cancelCrop, confirmCrop, enterCrop, isCropping } from './crop';
 import { closeEffectsPanel, toggleEffectsPanel } from './effectspanel';
 import { closeRampLane, toggleRampLane } from './ramplane';
 import { closeDevPanel } from './devpanel';
+import { redo, undo } from './history';
 import { currentTime, pause, seek, stepFrames, stepSeconds, togglePlay } from './player';
 import { edit, patchEdit } from './state';
 
@@ -32,6 +34,9 @@ function handleKey(e: KeyboardEvent, deps: ShortcutDeps): void {
   if (e.altKey) return;
 
   if (e.ctrlKey || e.metaKey) {
+    // Ahead of the branch, not after it: a Ctrl shortcut fired from inside the speed box or
+    // the overlay textarea would export the clip instead of reaching the field the caret is in.
+    if (isTypingTarget(e.target)) return;
     const key = e.key.toLowerCase();
     if (key === 'o') {
       e.preventDefault();
@@ -39,6 +44,13 @@ function handleKey(e: KeyboardEvent, deps: ShortcutDeps): void {
     } else if (key === 'e') {
       e.preventDefault();
       beginExport();
+    } else if (key === 'z' && !e.shiftKey) {
+      e.preventDefault();
+      step(undo, 'Nothing left to undo');
+    } else if (key === 'y' || (key === 'z' && e.shiftKey)) {
+      // Both spellings: Ctrl+Y is the Windows one and Ctrl+Shift+Z the one every editor took.
+      e.preventDefault();
+      step(redo, 'Nothing to redo');
     }
     return;
   }
@@ -150,6 +162,13 @@ function handleKey(e: KeyboardEvent, deps: ShortcutDeps): void {
     default:
       break;
   }
+}
+
+/** Undo with a word when there is nothing left, rather than a keypress that does nothing and
+ *  leaves the user wondering whether the shortcut works at all. */
+function step(move: () => boolean, empty: string): void {
+  if (!edit.media) return;
+  if (!move()) showToast(empty);
 }
 
 function escape(): void {

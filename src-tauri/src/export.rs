@@ -269,18 +269,59 @@ pub fn start_export(app: AppHandle, job: ExportJob) -> Result<(), String> {
                 let _ = watcher_app.emit(EVENT_DONE, output_path);
             }
             Some(Ok(_)) => {
-                let _ = watcher_app.emit(EVENT_ERROR, explain_failure(&tail));
+                let _ = watcher_app.emit(
+                    EVENT_ERROR,
+                    // The same reason cancelling removes it: ffmpeg leaves whatever it had
+                    // written under the final name, and a truncated mp4 opens far enough to
+                    // look finished before it stops partway.
+                    ExportFailure::new(explain_failure(&tail), &tail, &output_path),
+                );
             }
             _ => {
                 let _ = watcher_app.emit(
                     EVENT_ERROR,
-                    "FFmpeg stopped unexpectedly and the export did not finish.".to_string(),
+                    ExportFailure::new(
+                        "FFmpeg stopped unexpectedly and the export did not finish.".to_string(),
+                        &tail,
+                        &output_path,
+                    ),
                 );
             }
         }
     });
 
     Ok(())
+}
+
+/// What a failed export tells the UI.
+///
+/// The message is the one line worth putting in a toast; `detail` is the tail ffmpeg actually
+/// printed, which goes to the debug panel and is what a report needs. Sending only the
+/// message throws away the one thing that explains an unfamiliar failure.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportFailure {
+    pub message: String,
+    pub detail: String,
+    /// True when the part-written file was removed, so the UI can say the output is gone.
+    pub cleaned_up: bool,
+}
+
+impl ExportFailure {
+    fn new(message: String, tail: &VecDeque<String>, output: &str) -> Self {
+        // Removed before the event goes out, so the UI never points at a file that is about
+        // to vanish. A missing file is not a failure worth reporting on top of this one.
+        let cleaned_up = match std::fs::metadata(output) {
+            Ok(_) => std::fs::remove_file(output).is_ok(),
+            Err(_) => false,
+        };
+        Self {
+            message,
+            detail: tail.iter().cloned().collect::<Vec<_>>().join("
+"),
+            cleaned_up,
+        }
+    }
 }
 
 #[tauri::command]
@@ -664,6 +705,7 @@ mod tests {
             out_point: 10.0,
             speed: 1.0,
             ramp: Vec::new(),
+            orientation: ffmpeg::Orientation::default(),
             crop: None,
             mute: false,
             reverse: false,
