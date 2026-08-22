@@ -20,6 +20,7 @@ import { initOverlay } from './overlay';
 import { initEffectsPanel } from './effectspanel';
 import { describe, hideBanner, initControls, showBanner, showFfmpegBanner, showToast } from './controls';
 import { initShortcuts } from './shortcuts';
+import { initFocusRelease } from './focus';
 import { initDevPanel, recordError } from './devpanel';
 import { initUpdater } from './updater';
 import { appSettings, buildInfo, initSettings } from './settings';
@@ -42,6 +43,9 @@ function el<T extends HTMLElement>(id: string): T {
 }
 
 function boot(): void {
+  // First, so its capture listeners see a click before anything acts on it.
+  initFocusRelease();
+
   emptyState = el('empty');
   dropHint = el('drop-hint');
   about = el('about');

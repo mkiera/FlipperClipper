@@ -10,6 +10,7 @@ import { cancelCrop, confirmCrop, enterCrop, isCropping } from './crop';
 import { closeEffectsPanel, toggleEffectsPanel } from './effectspanel';
 import { closeRampLane, toggleRampLane } from './ramplane';
 import { closeDevPanel } from './devpanel';
+import { releaseNow } from './focus';
 import { redo, undo } from './history';
 import { currentTime, pause, seek, stepFrames, stepSeconds, togglePlay } from './player';
 import { edit, patchEdit } from './state';
@@ -52,6 +53,16 @@ function handleKey(e: KeyboardEvent, deps: ShortcutDeps): void {
       e.preventDefault();
       step(redo, 'Nothing to redo');
     }
+    return;
+  }
+
+  // A dropdown dismissed without picking anything keeps focus, and Space is how a select
+  // reopens. Play is the key this app cannot afford to lose, so the dropdown gives it back.
+  // Only reachable with the list closed: an open one is a native popup that sends no keys here.
+  if (e.key === ' ' && (e.target as HTMLElement | null)?.tagName === 'SELECT') {
+    e.preventDefault();
+    releaseNow(e.target);
+    togglePlay();
     return;
   }
 
