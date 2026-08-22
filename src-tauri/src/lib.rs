@@ -54,6 +54,14 @@ pub fn run() {
             updater::clear_updates_dir(app.handle());
             Ok(())
         })
+        // Closing the window ends the process, and a running ffmpeg is a child Windows does
+        // not reap - it would keep writing to a file nobody is waiting for. Killing it takes
+        // the same path a cancel does, so the part-written output is removed with it.
+        .on_window_event(|window, event| {
+            if matches!(event, tauri::WindowEvent::CloseRequested { .. }) {
+                export::cancel_export(window.app_handle().clone());
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             sysutil::ffmpeg_status,
             sysutil::ffmpeg_check_log,
@@ -67,6 +75,7 @@ pub fn run() {
             sysutil::app_version,
             sysutil::set_min_window_size,
             sysutil::cli_file_path,
+            ffmpeg::estimate_export_size,
             export::detect_encoder,
             debug::debug_report,
             debug::run_diagnostic,
