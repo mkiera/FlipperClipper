@@ -11,7 +11,7 @@ use flipperclipper_lib::ffmpeg::{
     build_args, output_duration, Effects, ExportFormat, ExportJob, QualityPreset, Rect, TextAnchorX,
     TextAnchorY, TextOverlay, Orientation, OVERLAY_TEXT_FILE,
 };
-use flipperclipper_lib::ramp::SpeedPoint;
+use flipperclipper_lib::ramp::{SpeedPoint, RAMP_MIN};
 
 // --- Fixtures ---
 
@@ -918,6 +918,82 @@ fn a_ramp_survives_being_reversed() {
     );
 }
 
+
+/// A curve that touches the slowest speed the slider allows. The audio chain has to carry the
+/// whole 20x range, and getting the stage order wrong here does not produce a wrong clip, it
+/// aborts ffmpeg on an internal assertion in atempo and the export fails outright.
+#[test]
+fn a_ramp_at_the_slowest_speed_still_exports() {
+    if ffmpeg_missing() {
+        return;
+    }
+    let src = landscape();
+    let mut j = job(&src, "out-ramp-slowest.mp4");
+    j.out_point = 2.0;
+    j.ramp = ramp(&[(0.0, RAMP_MIN), (2.0, 1.0)]);
+
+    let predicted = output_duration(&j);
+    let out = run_export(&j, 1920, 1080, 30.0, true);
+    let actual = duration_of(&out);
+
+    assert!(has_audio(&out), "the slowest ramp dropped its audio");
+    assert!(
+        (actual - predicted).abs() < 0.2,
+        "slowest ramp ran {actual}s against a predicted {predicted}s"
+    );
+}
+
+/// A curve that comes back down again. The tempo commands run in both directions through the
+/// one driven stage, and a downward one is what tripped the second of atempo's two assertions.
+#[test]
+fn a_ramp_that_swings_the_whole_range_still_exports() {
+    if ffmpeg_missing() {
+        return;
+    }
+    let src = landscape();
+    let mut j = job(&src, "out-ramp-swing.mp4");
+    j.out_point = 2.0;
+    j.ramp = ramp(&[(0.0, RAMP_MIN), (1.0, 1.0), (2.0, RAMP_MIN)]);
+
+    let predicted = output_duration(&j);
+    let out = run_export(&j, 1920, 1080, 30.0, true);
+    let actual = duration_of(&out);
+
+    assert!(has_audio(&out), "the swinging ramp dropped its audio");
+    assert!(
+        (actual - predicted).abs() < 0.3,
+        "swinging ramp ran {actual}s against a predicted {predicted}s"
+    );
+}
+
+/// Up and down repeatedly, so the driven stage takes a command in each direction several times
+/// over. Slow to render but it is the shape that shook the assertions out.
+#[test]
+fn a_sawtooth_ramp_still_exports_in_sync() {
+    if ffmpeg_missing() {
+        return;
+    }
+    let src = landscape();
+    let mut j = job(&src, "out-ramp-sawtooth.mp4");
+    j.out_point = 2.0;
+    j.output_height = Some(360);
+    j.ramp = ramp(&[
+        (0.0, RAMP_MIN),
+        (0.5, 1.0),
+        (1.0, RAMP_MIN),
+        (1.5, 1.0),
+        (2.0, RAMP_MIN),
+    ]);
+
+    let out = run_export(&j, 1920, 1080, 30.0, true);
+    let video = stream_duration(&out, "v");
+    let audio = stream_duration(&out, "a");
+    assert!(has_audio(&out), "the sawtooth ramp dropped its audio");
+    assert!(
+        (video - audio).abs() < 0.15,
+        "picture ran {video}s and audio ran {audio}s"
+    );
+}
 
 // --- Rotate and flip ---
 

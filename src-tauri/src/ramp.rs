@@ -39,9 +39,20 @@ pub const AUDIO_STEP_SECONDS: f64 = 0.5;
 /// expression, and an expression ffmpeg cannot parse fails the export rather than the point.
 pub const MAX_POINTS: usize = 24;
 
-/// atempo takes 0.5 to 100 in one stage. The fixed part of the chain is set to the ramp's
-/// slowest moment, so the varying stage runs from 1 upwards and only the top end can overrun.
-pub const MAX_AUDIO_SPAN: f64 = 100.0;
+/// Where the commanded atempo stage sits at the ramp's slowest moment.
+///
+/// atempo aborts the whole export on an internal assertion when a tempo command lands it at or
+/// below 2 - `read_size <= atempo->ring || atempo->tempo > 2.0`, af_atempo.c:445 - and that
+/// assertion carries its own exemption above 2, so the driven stage is kept clear of it and the
+/// fixed stages carry what is left. Measured on ffmpeg 9.0: a curve running 0.05 to 1 and back
+/// drove the stage between 1.9 and 8.6 and died on the way back down; the same curve scaled to
+/// run between 4.8 and 21.6 exported clean.
+pub const AUDIO_DRIVEN_FLOOR: f64 = 2.5;
+
+/// atempo takes up to 100 in one stage, and the driven one starts at AUDIO_DRIVEN_FLOOR rather
+/// than 1, so a curve may span 40 between its slowest and fastest moment before the audio has to
+/// be refused. Wider than that and export.rs asks for the clip to be muted instead.
+pub const MAX_AUDIO_SPAN: f64 = 40.0;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -226,21 +237,25 @@ fn branch(segment: &Segment, offset: f64) -> String {
 /// The audio chain for a ramp: the tempo stepped through each slope, flat pieces left as one
 /// command apiece.
 ///
-/// The fixed stages carry the ramp's slowest speed and the driven stage carries what is left,
-/// so the driven one starts at 1 and only ever climbs - which keeps it inside the single range
-/// atempo accepts without the chain having to change shape partway through the clip.
+/// The fixed stages carry the slow end and the driven stage carries what is left, so the driven
+/// one starts at AUDIO_DRIVEN_FLOOR and only ever climbs. That keeps it inside the single range
+/// atempo accepts without the chain changing shape partway through the clip, and clear of the
+/// two assertions inside atempo that a commanded tempo can otherwise trip.
 pub fn audio_stages(segments: &[Segment], step: f64) -> Option<Vec<String>> {
     let (lo, hi) = speed_bounds(segments)?;
     if lo <= 0.0 || hi / lo > MAX_AUDIO_SPAN {
         return None;
     }
 
+    // What the fixed stages carry. Dividing by the floor is what lifts the driven stage off 1.
+    let fixed = lo / AUDIO_DRIVEN_FLOOR;
+
     let mut commands: Vec<String> = Vec::new();
     let mut push = |at: f64, speed: f64| {
         commands.push(format!(
             "{} atempo@ramp tempo {}",
             num(at.max(0.0)),
-            num(speed / lo)
+            num(speed / fixed)
         ));
     };
 
@@ -285,9 +300,16 @@ pub fn audio_stages(segments: &[Segment], step: f64) -> Option<Vec<String>> {
         .unwrap_or("1")
         .to_string();
 
+    // The driven stage goes ahead of the fixed ones, on the audio at its original rate. Behind
+    // them it reads a stream the chain has already stretched, and a large tempo command
+    // arriving in that state trips an assertion inside atempo and kills the export:
+    // `atempo->position[0] <= stop_here failed at af_atempo.c:494`. Measured against ffmpeg 9.0
+    // on a ramp from 0.05 to 1: behind a 0.05 chain it dies at the first command above about 6,
+    // in front of it the same commands run clean. The product of the stages is the same either
+    // way, so only the order had to move.
     let mut stages = vec![format!("asendcmd=c='{}'", commands.join(";"))];
-    stages.extend(crate::ffmpeg::atempo_chain(lo));
     stages.push(format!("atempo@ramp={}", initial));
+    stages.extend(crate::ffmpeg::atempo_chain(fixed));
     Some(stages)
 }
 
@@ -474,20 +496,62 @@ mod tests {
     }
 
     #[test]
-    fn the_driven_stage_starts_at_one_and_the_fixed_stages_carry_the_slow_end() {
-        // atempo refuses anything under 0.5, so a quarter-speed ramp has to put the 0.25 into
-        // fixed stages and drive only what is left.
+    fn the_driven_stage_clears_two_and_the_fixed_stages_carry_the_slow_end() {
+        // atempo refuses anything under 0.5, so a quarter-speed ramp has to put the slow end
+        // into fixed stages and drive only what is left.
         let p = points(&[(0.0, 0.25), (4.0, 1.0)]);
         let segs = segments(&p, 1.0, 0.0, 4.0);
         let stages = audio_stages(&segs, AUDIO_STEP_SECONDS).expect("a slow ramp still steps");
         let joined = stages.join(",");
         assert!(joined.contains("atempo=0.5"), "{joined}");
         assert!(joined.contains("atempo@ramp="), "{joined}");
-        // Nothing driven below atempo's floor.
+        // Never at or below 2, which is where atempo asserts on a commanded tempo.
         for command in commands_in(&stages[0]) {
             let tempo: f64 = command.rsplit(' ').next().unwrap().parse().unwrap();
-            assert!(tempo >= 0.5, "{command}");
+            assert!(tempo > 2.0, "{command}");
         }
+    }
+
+    /// The order is what keeps a big tempo command off a stream the fixed stages have already
+    /// stretched, which is the other way atempo aborts an export.
+    #[test]
+    fn the_driven_stage_runs_before_the_fixed_ones() {
+        let p = points(&[(0.0, 0.05), (4.0, 1.0)]);
+        let segs = segments(&p, 1.0, 0.0, 4.0);
+        let stages = audio_stages(&segs, AUDIO_STEP_SECONDS).expect("a slow ramp still steps");
+        let driven = stages.iter().position(|s| s.starts_with("atempo@ramp=")).unwrap();
+        let first_fixed = stages.iter().position(|s| s.starts_with("atempo=")).unwrap();
+        assert!(driven < first_fixed, "{stages:?}");
+    }
+
+    /// Both ends of the curve drive the same stage, so a curve that comes back down has to stay
+    /// clear of 2 on the way as well as on the way up.
+    #[test]
+    fn a_curve_that_comes_back_down_never_drives_the_stage_to_two() {
+        let p = points(&[(0.0, 0.05), (1.0, 1.0), (2.0, 0.05)]);
+        let segs = segments(&p, 1.0, 0.0, 2.0);
+        let stages = audio_stages(&segs, AUDIO_STEP_SECONDS).expect("a swinging ramp steps");
+        for command in commands_in(&stages[0]) {
+            let tempo: f64 = command.rsplit(' ').next().unwrap().parse().unwrap();
+            assert!(tempo > 2.0, "{command}");
+            assert!(tempo <= 100.0, "past what one atempo stage takes: {command}");
+        }
+    }
+
+    /// The widest curve the audio still carries, and the first one past it.
+    #[test]
+    fn the_span_limit_is_where_the_driven_stage_reaches_atempos_ceiling() {
+        let widest = points(&[(0.0, 0.5), (4.0, 0.5 * MAX_AUDIO_SPAN)]);
+        let segs = segments(&widest, 1.0, 0.0, 4.0);
+        let stages = audio_stages(&segs, AUDIO_STEP_SECONDS).expect("the widest curve still steps");
+        for command in commands_in(&stages[0]) {
+            let tempo: f64 = command.rsplit(' ').next().unwrap().parse().unwrap();
+            assert!(tempo <= 100.0, "past what one atempo stage takes: {command}");
+        }
+
+        let past = points(&[(0.0, 0.5), (4.0, 0.5 * MAX_AUDIO_SPAN * 1.1)]);
+        let segs = segments(&past, 1.0, 0.0, 4.0);
+        assert!(audio_stages(&segs, AUDIO_STEP_SECONDS).is_none());
     }
 
     #[test]

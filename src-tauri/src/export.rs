@@ -510,8 +510,9 @@ fn validate_ramp(job: &ExportJob) -> Result<(), String> {
                 .to_string(),
         );
     }
-    // atempo follows the curve through one driven stage, and that stage covers a hundredfold
-    // range. Past it the audio would have to change the shape of its own chain mid-clip.
+    // atempo follows the curve through one driven stage. That stage takes up to 100 and starts
+    // at ramp::AUDIO_DRIVEN_FLOOR rather than 1, so what is left for the curve is forty-fold.
+    // Past it the audio would have to change the shape of its own chain mid-clip.
     if !job.mute && hi / lo > ramp::MAX_AUDIO_SPAN {
         return Err(format!(
             "A speed curve this wide cannot carry its audio. Keep the fastest point within {}x of the slowest, or mute the clip.",
