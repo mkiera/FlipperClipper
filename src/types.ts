@@ -226,6 +226,8 @@ export interface DebugReport {
   ffprobe: ToolReport;
   /** What an export would actually encode with, hardware or software. */
   encoder: string;
+  /** Which filter a speed ramp's audio goes through. */
+  rampAudio: string;
   configDir: string | null;
   tempDir: string;
 }

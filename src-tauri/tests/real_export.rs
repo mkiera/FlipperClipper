@@ -9,9 +9,9 @@ use std::process::Command;
 
 use flipperclipper_lib::ffmpeg::{
     build_args, output_duration, Effects, ExportFormat, ExportJob, QualityPreset, Rect, TextAnchorX,
-    TextAnchorY, TextOverlay, Orientation, OVERLAY_TEXT_FILE,
+    TextAnchorY, TextOverlay, Orientation, OVERLAY_TEXT_FILE, surely_has_filter,
 };
-use flipperclipper_lib::ramp::{SpeedPoint, RAMP_MIN};
+use flipperclipper_lib::ramp::{SpeedPoint, RAMP_MAX, RAMP_MIN};
 
 // --- Fixtures ---
 
@@ -993,6 +993,62 @@ fn a_sawtooth_ramp_still_exports_in_sync() {
         (video - audio).abs() < 0.15,
         "picture ran {video}s and audio ran {audio}s"
     );
+}
+
+/// The whole slider range in one curve. atempo refuses this - it is past MAX_AUDIO_SPAN - so on
+/// a build with rubberband it proves the audio took the other path, and on one without it proves
+/// export.rs refused the job before it got here rather than emitting a graph ffmpeg rejects.
+#[test]
+fn a_curve_across_the_whole_range_exports_where_rubberband_can_carry_it() {
+    if ffmpeg_missing() || !surely_has_filter("rubberband") {
+        return;
+    }
+    let src = landscape();
+    let mut j = job(&src, "out-ramp-full-range.mp4");
+    j.out_point = 2.0;
+    j.output_height = Some(360);
+    j.ramp = ramp(&[(0.0, RAMP_MIN), (2.0, RAMP_MAX)]);
+
+    let predicted = output_duration(&j);
+    let out = run_export(&j, 1920, 1080, 30.0, true);
+    let actual = duration_of(&out);
+
+    assert!(has_audio(&out), "the full-range ramp dropped its audio");
+    assert!(
+        (actual - predicted).abs() < 0.2,
+        "full-range ramp ran {actual}s against a predicted {predicted}s"
+    );
+}
+
+/// A moment held at 1x inside a curve has to come out untouched, which is the whole reason the
+/// audio prefers rubberband: the atempo chain reaches 1x by cancelling a large speed-up with a
+/// large slow-down, and that does not come back.
+#[test]
+fn a_ramp_that_holds_at_1x_hands_the_audio_straight_through() {
+    let src = fixture_dir().join("landscape-1080p.mp4");
+    let mut j = job(&src, "out-ramp-hold.mp4");
+    j.out_point = 8.0;
+    j.ramp = ramp(&[(0.0, 0.5), (2.0, 1.0), (6.0, 1.0), (8.0, 0.5)]);
+
+    let args = build_args(&j, "libx264", true, 1920, 1080, 30.0, None);
+    let af = args
+        .iter()
+        .position(|a| a == "-af")
+        .map(|i| args[i + 1].clone())
+        .expect("a ramped job filters its audio");
+
+    if surely_has_filter("rubberband") {
+        let held = af
+            .split(';')
+            .filter_map(|c| c.rsplit(' ').next())
+            .filter_map(|v| v.trim_end_matches("'").parse::<f64>().ok())
+            .any(|v| (v - 1.0).abs() < 1e-9);
+        assert!(held, "no untouched 1x step: {af}");
+        assert!(!af.contains("atempo"), "rubberband needs nothing under it: {af}");
+    } else {
+        // Without it the chain is what it is, but it still must not be silently skipped.
+        assert!(af.contains("atempo@ramp"), "{af}");
+    }
 }
 
 // --- Rotate and flip ---

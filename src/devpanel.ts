@@ -149,6 +149,7 @@ function describeSystem(report: DebugReport, appVer: string): string {
 function describeTools(report: DebugReport): string {
   return [
     `Encoder:   ${report.encoder}`,
+    `Ramp audio: ${report.rampAudio}`,
     '',
     tool('ffmpeg', report.ffmpeg),
     '',

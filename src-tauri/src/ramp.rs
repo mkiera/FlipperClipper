@@ -250,12 +250,60 @@ pub fn audio_stages(segments: &[Segment], step: f64) -> Option<Vec<String>> {
     // What the fixed stages carry. Dividing by the floor is what lifts the driven stage off 1.
     let fixed = lo / AUDIO_DRIVEN_FLOOR;
 
+    let commands = tempo_commands(segments, step, "atempo@ramp", fixed)?;
+    let initial = first_tempo(&commands)?;
+
+    // The driven stage goes ahead of the fixed ones, on the audio at its original rate. Behind
+    // them it reads a stream the chain has already stretched, and a large tempo command
+    // arriving in that state trips an assertion inside atempo and kills the export:
+    // `atempo->position[0] <= stop_here failed at af_atempo.c:494`. Measured against ffmpeg 9.0
+    // on a ramp from 0.05 to 1: behind a 0.05 chain it dies at the first command above about 6,
+    // in front of it the same commands run clean. The product of the stages is the same either
+    // way, so only the order had to move.
+    let mut stages = vec![format!("asendcmd=c='{}'", commands.join(";"))];
+    stages.push(format!("atempo@ramp={}", initial));
+    stages.extend(crate::ffmpeg::atempo_chain(fixed));
+    Some(stages)
+}
+
+/// The audio chain for a ramp on a build that has rubberband.
+///
+/// One stage, driven straight from the curve. rubberband takes 0.01 to 100 in a single instance
+/// and export.rs already holds the combined speed inside 0.05 to 20, so nothing sits underneath
+/// it and nothing has to be cancelled: a moment at 1x is handed tempo 1 and comes through as it
+/// went in. That is the whole reason to prefer it, and it is also why MAX_AUDIO_SPAN does not
+/// apply here - the span that atempo cannot follow is one rubberband does not notice.
+///
+/// Measured against a marked source: every ramp tested landed within 0.16 s of the length the
+/// curve predicts, except one starting at the slowest speed the slider allows, which came out
+/// 0.85 s short. apad and atrim in ffmpeg.rs still put the total right.
+pub fn rubberband_stages(segments: &[Segment], step: f64) -> Option<Vec<String>> {
+    let commands = tempo_commands(segments, step, "rubberband@ramp", 1.0)?;
+    let initial = first_tempo(&commands)?;
+    Some(vec![
+        format!("asendcmd=c='{}'", commands.join(";")),
+        format!("rubberband@ramp=tempo={}", initial),
+    ])
+}
+
+/// The tempo the curve asks for at each step, as asendcmd lines. `divisor` is what the fixed
+/// stages carry, so the caller that has none passes 1.
+fn tempo_commands(
+    segments: &[Segment],
+    step: f64,
+    target: &str,
+    divisor: f64,
+) -> Option<Vec<String>> {
+    if divisor <= 0.0 {
+        return None;
+    }
     let mut commands: Vec<String> = Vec::new();
     let mut push = |at: f64, speed: f64| {
         commands.push(format!(
-            "{} atempo@ramp tempo {}",
+            "{} {} tempo {}",
             num(at.max(0.0)),
-            num(speed / fixed)
+            target,
+            num(speed / divisor)
         ));
     };
 
@@ -291,26 +339,17 @@ pub fn audio_stages(segments: &[Segment], step: f64) -> Option<Vec<String>> {
         }
     }
     if commands.is_empty() {
-        return None;
+        None
+    } else {
+        Some(commands)
     }
+}
 
-    let initial = commands
+fn first_tempo(commands: &[String]) -> Option<String> {
+    commands
         .first()
         .and_then(|c| c.rsplit(' ').next())
-        .unwrap_or("1")
-        .to_string();
-
-    // The driven stage goes ahead of the fixed ones, on the audio at its original rate. Behind
-    // them it reads a stream the chain has already stretched, and a large tempo command
-    // arriving in that state trips an assertion inside atempo and kills the export:
-    // `atempo->position[0] <= stop_here failed at af_atempo.c:494`. Measured against ffmpeg 9.0
-    // on a ramp from 0.05 to 1: behind a 0.05 chain it dies at the first command above about 6,
-    // in front of it the same commands run clean. The product of the stages is the same either
-    // way, so only the order had to move.
-    let mut stages = vec![format!("asendcmd=c='{}'", commands.join(";"))];
-    stages.push(format!("atempo@ramp={}", initial));
-    stages.extend(crate::ffmpeg::atempo_chain(fixed));
-    Some(stages)
+        .map(str::to_string)
 }
 
 /// Six decimals, trailing zeros trimmed. Matches ffmpeg.rs's own formatting so a ramp reads
@@ -536,6 +575,43 @@ mod tests {
             assert!(tempo > 2.0, "{command}");
             assert!(tempo <= 100.0, "past what one atempo stage takes: {command}");
         }
+    }
+
+    /// rubberband needs no fixed stages under it, so the tempo it is handed is the speed
+    /// itself. That is the whole point: a moment at 1x is tempo 1 and is not touched.
+    #[test]
+    fn rubberband_is_driven_by_the_speed_itself() {
+        let p = points(&[(0.0, 0.05), (2.0, 1.0), (12.0, 1.0)]);
+        let segs = segments(&p, 1.0, 0.0, 12.0);
+        let stages = rubberband_stages(&segs, AUDIO_STEP_SECONDS).expect("a curve drives it");
+        // One asendcmd and one filter, and nothing underneath to cancel.
+        assert_eq!(stages.len(), 2, "{stages:?}");
+        assert!(stages[1].starts_with("rubberband@ramp=tempo="), "{stages:?}");
+        assert!(!stages.iter().any(|s| s.contains("atempo")), "{stages:?}");
+
+        let tempos: Vec<f64> = commands_in(&stages[0])
+            .into_iter()
+            .map(|c| c.rsplit(' ').next().unwrap().parse().unwrap())
+            .collect();
+        // The flat 1x tail asks for exactly 1, which is what leaves the audio alone.
+        assert!(
+            tempos.iter().any(|t| (t - 1.0).abs() < 1e-9),
+            "no untouched 1x step: {tempos:?}"
+        );
+        // Everything inside the one range rubberband takes.
+        for t in &tempos {
+            assert!(*t >= 0.01 && *t <= 100.0, "{t} is outside rubberband's range");
+        }
+    }
+
+    /// The span atempo cannot follow is one rubberband does not notice, so the whole of the
+    /// slider's range has to come back as a chain rather than None.
+    #[test]
+    fn rubberband_carries_a_curve_atempo_would_refuse() {
+        let p = points(&[(0.0, 0.05), (4.0, 20.0)]);
+        let segs = segments(&p, 1.0, 0.0, 4.0);
+        assert!(audio_stages(&segs, AUDIO_STEP_SECONDS).is_none());
+        assert!(rubberband_stages(&segs, AUDIO_STEP_SECONDS).is_some());
     }
 
     /// The widest curve the audio still carries, and the first one past it.

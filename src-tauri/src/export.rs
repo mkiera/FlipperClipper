@@ -510,10 +510,11 @@ fn validate_ramp(job: &ExportJob) -> Result<(), String> {
                 .to_string(),
         );
     }
-    // atempo follows the curve through one driven stage. That stage takes up to 100 and starts
-    // at ramp::AUDIO_DRIVEN_FLOOR rather than 1, so what is left for the curve is forty-fold.
-    // Past it the audio would have to change the shape of its own chain mid-clip.
-    if !job.mute && hi / lo > ramp::MAX_AUDIO_SPAN {
+    // Only atempo has a span it cannot follow. It carries the curve on one driven stage that
+    // takes up to 100 and starts at ramp::AUDIO_DRIVEN_FLOOR rather than 1, leaving forty-fold
+    // for the curve; past that the chain would have to change shape mid-clip. rubberband takes
+    // the whole range in one stage, so a build that has it has no limit to report.
+    if !job.mute && !ffmpeg::surely_has_filter("rubberband") && hi / lo > ramp::MAX_AUDIO_SPAN {
         return Err(format!(
             "A speed curve this wide cannot carry its audio. Keep the fastest point within {}x of the slowest, or mute the clip.",
             ramp::MAX_AUDIO_SPAN as i64
@@ -915,13 +916,23 @@ mod tests {
         assert!(validate(&j).unwrap_err().starts_with("The speed slider and the curve"));
     }
 
+    /// The refusal belongs to atempo alone, so what this asserts depends on the ffmpeg the
+    /// machine has. Both branches are checked rather than one skipped, because the wrong one
+    /// firing is exactly the regression worth catching.
     #[test]
-    fn a_curve_too_wide_for_atempo_is_refused_unless_the_clip_is_muted() {
+    fn a_curve_too_wide_for_atempo_is_refused_unless_rubberband_or_mute_settles_it() {
         let mut j = job();
         j.ramp = curve(&[(0.0, 0.05), (4.0, 20.0)]);
-        assert!(validate(&j).unwrap_err().contains("cannot carry its audio"));
+        let refused = validate(&j)
+            .unwrap_err()
+            .contains("cannot carry its audio");
+        assert_eq!(
+            refused,
+            !crate::ffmpeg::surely_has_filter("rubberband"),
+            "a build with rubberband has no span to refuse, and one without has to refuse this"
+        );
 
-        // Muted, there is no audio to fail to follow it.
+        // Muted, there is no audio to fail to follow it either way.
         j.mute = true;
         assert!(!validate(&j).unwrap_err().contains("cannot carry its audio"));
     }
