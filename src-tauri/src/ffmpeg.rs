@@ -360,6 +360,22 @@ pub(crate) const LOUDNORM: &str = "loudnorm=I=-16:TP=-1.5:LRA=11";
 /// measured loudness into one fixed gain.
 pub(crate) const LOUDNORM_TARGET_LUFS: f64 = -16.0;
 
+/// The filters that carry a speed curve through the audio.
+///
+/// rubberband takes the whole of the app's speed range in one stage, so the curve drives it
+/// directly and a moment at 1x passes through at tempo 1. atempo cannot: it needs fixed stages
+/// underneath the driven one, and those fight it - measured on pink noise, a 2x speed-up
+/// cancelled by a 0.5x slow-down already drops waveform correlation with the source to 0.23,
+/// and the chain a slow curve needs took a run of transients down to one detectable in twelve.
+/// So rubberband is used wherever the build has it, and atempo is what is left when it does not.
+fn ramp_audio(job: &ExportJob) -> Option<Vec<String>> {
+    let segments = ramp_segments(job);
+    if surely_has_filter("rubberband") {
+        return ramp::rubberband_stages(&segments, ramp::AUDIO_STEP_SECONDS);
+    }
+    ramp::audio_stages(&segments, ramp::AUDIO_STEP_SECONDS)
+}
+
 /// areverse has to buffer the entire stream before it can emit a sample, so it sits last,
 /// where a sped-up export hands it the shortened stream. volume is omitted at 1.0 for the
 /// same reason atempo is: a no-op filter still costs a resample pass.
@@ -369,8 +385,7 @@ fn audio_filters(job: &ExportJob) -> Vec<String> {
     // that job before it gets here, so this only decides what a hand-built one does: run the
     // audio at the base speed rather than emit a graph ffmpeg would reject.
     let mut parts = if ramped {
-        ramp::audio_stages(&ramp_segments(job), ramp::AUDIO_STEP_SECONDS)
-            .unwrap_or_else(|| atempo_chain(job.speed))
+        ramp_audio(job).unwrap_or_else(|| atempo_chain(job.speed))
     } else {
         atempo_chain(job.speed)
     };
@@ -1527,7 +1542,19 @@ static FILTERS: OnceLock<HashSet<String>> = OnceLock::new();
 /// An unreadable listing answers yes: a probe that failed is not evidence the filter is
 /// missing, and ffmpeg's own error is a better report than a refusal built on a guess.
 pub fn has_filter(name: &str) -> bool {
-    let filters = FILTERS.get_or_init(|| {
+    let filters = filters();
+    filters.is_empty() || filters.contains(name)
+}
+
+/// Whether the filter is definitely there. A probe that failed answers no, which is the right
+/// way round only when there is a fallback: guessing wrong costs nothing but a slower filter,
+/// where `has_filter`'s guess costs the export a job it could have run.
+pub fn surely_has_filter(name: &str) -> bool {
+    filters().contains(name)
+}
+
+fn filters() -> &'static HashSet<String> {
+    FILTERS.get_or_init(|| {
         let Ok(output) = hidden_command("ffmpeg")
             .args(["-hide_banner", "-filters"])
             .stdin(Stdio::null())
@@ -1542,8 +1569,7 @@ pub fn has_filter(name: &str) -> bool {
             .lines()
             .filter_map(|line| line.split_whitespace().nth(1).map(str::to_string))
             .collect()
-    });
-    filters.is_empty() || filters.contains(name)
+    })
 }
 
 pub fn forget_resolved_tools() {

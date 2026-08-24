@@ -9,9 +9,9 @@ use std::process::Command;
 
 use flipperclipper_lib::ffmpeg::{
     build_args, output_duration, Effects, ExportFormat, ExportJob, QualityPreset, Rect, TextAnchorX,
-    TextAnchorY, TextOverlay, Orientation, OVERLAY_TEXT_FILE,
+    TextAnchorY, TextOverlay, Orientation, OVERLAY_TEXT_FILE, surely_has_filter,
 };
-use flipperclipper_lib::ramp::SpeedPoint;
+use flipperclipper_lib::ramp::{SpeedPoint, RAMP_MAX, RAMP_MIN};
 
 // --- Fixtures ---
 
@@ -918,6 +918,138 @@ fn a_ramp_survives_being_reversed() {
     );
 }
 
+
+/// A curve that touches the slowest speed the slider allows. The audio chain has to carry the
+/// whole 20x range, and getting the stage order wrong here does not produce a wrong clip, it
+/// aborts ffmpeg on an internal assertion in atempo and the export fails outright.
+#[test]
+fn a_ramp_at_the_slowest_speed_still_exports() {
+    if ffmpeg_missing() {
+        return;
+    }
+    let src = landscape();
+    let mut j = job(&src, "out-ramp-slowest.mp4");
+    j.out_point = 2.0;
+    j.ramp = ramp(&[(0.0, RAMP_MIN), (2.0, 1.0)]);
+
+    let predicted = output_duration(&j);
+    let out = run_export(&j, 1920, 1080, 30.0, true);
+    let actual = duration_of(&out);
+
+    assert!(has_audio(&out), "the slowest ramp dropped its audio");
+    assert!(
+        (actual - predicted).abs() < 0.2,
+        "slowest ramp ran {actual}s against a predicted {predicted}s"
+    );
+}
+
+/// A curve that comes back down again. The tempo commands run in both directions through the
+/// one driven stage, and a downward one is what tripped the second of atempo's two assertions.
+#[test]
+fn a_ramp_that_swings_the_whole_range_still_exports() {
+    if ffmpeg_missing() {
+        return;
+    }
+    let src = landscape();
+    let mut j = job(&src, "out-ramp-swing.mp4");
+    j.out_point = 2.0;
+    j.ramp = ramp(&[(0.0, RAMP_MIN), (1.0, 1.0), (2.0, RAMP_MIN)]);
+
+    let predicted = output_duration(&j);
+    let out = run_export(&j, 1920, 1080, 30.0, true);
+    let actual = duration_of(&out);
+
+    assert!(has_audio(&out), "the swinging ramp dropped its audio");
+    assert!(
+        (actual - predicted).abs() < 0.3,
+        "swinging ramp ran {actual}s against a predicted {predicted}s"
+    );
+}
+
+/// Up and down repeatedly, so the driven stage takes a command in each direction several times
+/// over. Slow to render but it is the shape that shook the assertions out.
+#[test]
+fn a_sawtooth_ramp_still_exports_in_sync() {
+    if ffmpeg_missing() {
+        return;
+    }
+    let src = landscape();
+    let mut j = job(&src, "out-ramp-sawtooth.mp4");
+    j.out_point = 2.0;
+    j.output_height = Some(360);
+    j.ramp = ramp(&[
+        (0.0, RAMP_MIN),
+        (0.5, 1.0),
+        (1.0, RAMP_MIN),
+        (1.5, 1.0),
+        (2.0, RAMP_MIN),
+    ]);
+
+    let out = run_export(&j, 1920, 1080, 30.0, true);
+    let video = stream_duration(&out, "v");
+    let audio = stream_duration(&out, "a");
+    assert!(has_audio(&out), "the sawtooth ramp dropped its audio");
+    assert!(
+        (video - audio).abs() < 0.15,
+        "picture ran {video}s and audio ran {audio}s"
+    );
+}
+
+/// The whole slider range in one curve. atempo refuses this - it is past MAX_AUDIO_SPAN - so on
+/// a build with rubberband it proves the audio took the other path, and on one without it proves
+/// export.rs refused the job before it got here rather than emitting a graph ffmpeg rejects.
+#[test]
+fn a_curve_across_the_whole_range_exports_where_rubberband_can_carry_it() {
+    if ffmpeg_missing() || !surely_has_filter("rubberband") {
+        return;
+    }
+    let src = landscape();
+    let mut j = job(&src, "out-ramp-full-range.mp4");
+    j.out_point = 2.0;
+    j.output_height = Some(360);
+    j.ramp = ramp(&[(0.0, RAMP_MIN), (2.0, RAMP_MAX)]);
+
+    let predicted = output_duration(&j);
+    let out = run_export(&j, 1920, 1080, 30.0, true);
+    let actual = duration_of(&out);
+
+    assert!(has_audio(&out), "the full-range ramp dropped its audio");
+    assert!(
+        (actual - predicted).abs() < 0.2,
+        "full-range ramp ran {actual}s against a predicted {predicted}s"
+    );
+}
+
+/// A moment held at 1x inside a curve has to come out untouched, which is the whole reason the
+/// audio prefers rubberband: the atempo chain reaches 1x by cancelling a large speed-up with a
+/// large slow-down, and that does not come back.
+#[test]
+fn a_ramp_that_holds_at_1x_hands_the_audio_straight_through() {
+    let src = fixture_dir().join("landscape-1080p.mp4");
+    let mut j = job(&src, "out-ramp-hold.mp4");
+    j.out_point = 8.0;
+    j.ramp = ramp(&[(0.0, 0.5), (2.0, 1.0), (6.0, 1.0), (8.0, 0.5)]);
+
+    let args = build_args(&j, "libx264", true, 1920, 1080, 30.0, None);
+    let af = args
+        .iter()
+        .position(|a| a == "-af")
+        .map(|i| args[i + 1].clone())
+        .expect("a ramped job filters its audio");
+
+    if surely_has_filter("rubberband") {
+        let held = af
+            .split(';')
+            .filter_map(|c| c.rsplit(' ').next())
+            .filter_map(|v| v.trim_end_matches("'").parse::<f64>().ok())
+            .any(|v| (v - 1.0).abs() < 1e-9);
+        assert!(held, "no untouched 1x step: {af}");
+        assert!(!af.contains("atempo"), "rubberband needs nothing under it: {af}");
+    } else {
+        // Without it the chain is what it is, but it still must not be silently skipped.
+        assert!(af.contains("atempo@ramp"), "{af}");
+    }
+}
 
 // --- Rotate and flip ---
 

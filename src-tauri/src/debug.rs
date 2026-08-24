@@ -47,6 +47,9 @@ pub struct DebugReport {
     pub ffprobe: ToolReport,
     /// What an export would actually encode with, hardware or software.
     pub encoder: String,
+    /// Which filter a speed ramp's audio goes through. rubberband keeps a moment at 1x
+    /// untouched; atempo has to reach it by cancelling one stage against another.
+    pub ramp_audio: String,
     pub config_dir: Option<String>,
     pub temp_dir: String,
 }
@@ -74,6 +77,11 @@ pub fn debug_report(app: AppHandle) -> DebugReport {
         ffmpeg: tool("ffmpeg"),
         ffprobe: tool("ffprobe"),
         encoder: crate::export::resolve_encoder(&app.state::<AppState>()),
+        ramp_audio: if ffmpeg::surely_has_filter("rubberband") {
+            "rubberband".to_string()
+        } else {
+            "atempo (this build has no rubberband)".to_string()
+        },
         config_dir: app
             .path()
             .app_config_dir()
