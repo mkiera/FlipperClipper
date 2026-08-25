@@ -5,6 +5,8 @@ for the edit you make right before you send someone a clip. Open a video, trim
 it, crop it, speed it up or slow it down, reverse it, tweak the volume — then
 export it as a video, a GIF, or just the audio. That is the whole app.
 
+![The FlipperClipper window before a video is opened.](docs/screenshot.png)
+
 There are no project files, no timeline of multiple clips, and nothing to save.
 Open, edit, export, done.
 
