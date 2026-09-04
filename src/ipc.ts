@@ -10,6 +10,7 @@ import {
   EVENT,
   type AlphaBuild,
   type AppSettings,
+  type AudioTrackSettings,
   type DebugReport,
   type DiagnosticResult,
   type ExportFailure,
@@ -50,8 +51,8 @@ export function ffmpegCheckLog(): Promise<string | null> {
 }
 
 /** loudnorm's analysis pass, so the preview can stand in for the filter with one gain. */
-export function measureLoudness(path: string): Promise<Loudness> {
-  return invoke<Loudness>('measure_loudness', { path });
+export function measureLoudness(path: string, audioTracks: AudioTrackSettings[] = []): Promise<Loudness> {
+  return invoke<Loudness>('measure_loudness', { path, audioTracks });
 }
 
 /** Also adds the path to the asset-protocol scope; assetUrl() 403s without it. */
@@ -99,6 +100,10 @@ export function makeFilmstrip(path: string, count: number, height: number): Prom
 /** Returns a disk path, which the caller still runs through assetUrl(). */
 export function makePreviewProxy(path: string): Promise<string> {
   return invoke<string>('make_preview_proxy', { path });
+}
+
+export function makeAudioPreviews(path: string): Promise<string[]> {
+  return invoke<string[]>('make_audio_previews', { path });
 }
 
 export function copyFileToClipboard(path: string): Promise<void> {

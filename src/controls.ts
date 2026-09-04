@@ -13,7 +13,7 @@ import {
   startExport,
 } from './ipc';
 import { edit, patchEdit, patchUi, refresh, rememberQuality, rememberTargetMb, settings, subscribe, ui } from './state';
-import { currentTime, onTime, togglePlay } from './player';
+import { currentTime, onTime, togglePlay, trackPreviewStatus } from './player';
 import { toggleCrop } from './crop';
 import { enabledIds, toEffectsJob } from './effects';
 import { toggleEffectsPanel } from './effectspanel';
@@ -85,6 +85,8 @@ let normalizeBtn!: HTMLButtonElement;
 let volumeGroup!: HTMLElement;
 let volumeSlider!: HTMLInputElement;
 let volumeInput!: HTMLInputElement;
+let audioTrackControls!: HTMLElement;
+let audioTrackStatus!: HTMLElement;
 let audioOnlyBtn!: HTMLButtonElement;
 let formatSelect!: HTMLSelectElement;
 let qualitySelect!: HTMLSelectElement;
@@ -112,6 +114,15 @@ let estimateToken = 0;
 let estimateKey = '';
 
 let formatListIsAudio: boolean | null = null;
+const audioTrackRows = new Map<number, AudioTrackRow>();
+
+interface AudioTrackRow {
+  row: HTMLElement;
+  name: HTMLElement;
+  volume: HTMLInputElement;
+  input: HTMLInputElement;
+  mute: HTMLButtonElement;
+}
 
 function el<T extends HTMLElement>(id: string): T {
   const found = document.getElementById(id);
@@ -136,6 +147,11 @@ export function initControls(controlsDeps: ControlsDeps): void {
   volumeGroup = el('volume-group');
   volumeSlider = el<HTMLInputElement>('volume-slider');
   volumeInput = el<HTMLInputElement>('volume-input');
+  audioTrackControls = el('audio-track-controls');
+  audioTrackStatus = document.createElement('span');
+  audioTrackStatus.className = 'audio-track-status';
+  audioTrackStatus.setAttribute('role', 'status');
+  audioTrackControls.appendChild(audioTrackStatus);
   audioOnlyBtn = el<HTMLButtonElement>('audio-only-btn');
   formatSelect = el<HTMLSelectElement>('format-select');
   qualitySelect = el<HTMLSelectElement>('quality-select');
@@ -283,7 +299,7 @@ export function toggleNormalize(): void {
   patchEdit({ normalize });
   // The gain is not known until the file has been measured, so the preview reaches its real
   // level a moment after the button lights up.
-  if (normalize && edit.media) void ensureMeasured(edit.media.path, refresh);
+  if (normalize && edit.media) void ensureMeasured(edit.media.path, refresh, edit.audioTracks);
 }
 
 export function toggleReverse(): void {
@@ -310,6 +326,113 @@ function toggleAudioOnly(): void {
   }
 }
 
+function renderAudioTracks(): void {
+  const tracks = (edit.media?.audioTracks ?? []).filter((track) => track.index >= 0 && track.index < 6);
+  const showTracks = tracks.length > 1;
+  audioTrackControls.hidden = !showTracks;
+  if (!showTracks) return;
+
+  const previewStatus = trackPreviewStatus();
+  audioTrackStatus.hidden = previewStatus === null;
+  audioTrackStatus.textContent = previewStatus ?? '';
+
+  const present = new Set(tracks.map((track) => track.index));
+  for (const [index, controls] of audioTrackRows) {
+    if (!present.has(index)) {
+      controls.row.remove();
+      audioTrackRows.delete(index);
+    }
+  }
+
+  for (const track of tracks) {
+    let controls = audioTrackRows.get(track.index);
+    if (!controls) {
+      controls = createAudioTrackRow(track.index, track.title);
+      audioTrackRows.set(track.index, controls);
+      audioTrackControls.appendChild(controls.row);
+    }
+    const setting = edit.audioTracks.find((item) => item.index === track.index) ?? {
+      index: track.index,
+      volume: 1,
+      mute: false,
+    };
+    const percent = Math.round(setting.volume * 100);
+    const name = track.title?.trim() || `Track ${track.index + 1}`;
+    controls.name.textContent = name;
+    controls.volume.setAttribute('aria-label', `${name} volume`);
+    controls.input.setAttribute('aria-label', `${name} volume percent`);
+    controls.volume.disabled = edit.mute;
+    controls.input.disabled = edit.mute;
+    controls.mute.disabled = edit.mute;
+    controls.mute.classList.toggle('active', setting.mute);
+    controls.mute.textContent = setting.mute ? 'Unmute' : 'Mute';
+    controls.mute.setAttribute('aria-label', `${setting.mute ? 'Unmute' : 'Mute'} ${name}`);
+    controls.mute.setAttribute('aria-pressed', String(setting.mute));
+    controls.volume.value = String(Math.min(percent, 200));
+    if (document.activeElement !== controls.input) controls.input.value = String(percent);
+  }
+}
+
+function createAudioTrackRow(index: number, title: string | null): AudioTrackRow {
+  const row = document.createElement('div');
+  row.className = 'audio-track-row';
+  row.dataset.trackIndex = String(index);
+
+  const label = document.createElement('span');
+  label.className = 'audio-track-name';
+  label.textContent = title?.trim() || `Track ${index + 1}`;
+
+  const volume = document.createElement('input');
+  volume.type = 'range';
+  volume.min = '0';
+  volume.max = '200';
+  volume.step = '1';
+  volume.setAttribute('aria-label', `${label.textContent} volume`);
+
+  const input = document.createElement('input');
+  input.className = 'audio-track-volume';
+  input.type = 'number';
+  input.min = '0';
+  input.max = String(VOLUME_MAX * 100);
+  input.step = '1';
+  input.setAttribute('aria-label', `${label.textContent} volume percent`);
+
+  const mute = document.createElement('button');
+  mute.className = 'btn small audio-track-mute';
+  mute.type = 'button';
+  mute.setAttribute('aria-label', `Mute ${label.textContent}`);
+
+  volume.addEventListener('input', () => updateAudioTrack(index, { volume: Number(volume.value) / 100 }));
+  input.addEventListener('change', () => {
+    const text = input.value.trim();
+    const raw = Number(text);
+    const current = edit.audioTracks.find((track) => track.index === index)?.volume ?? 1;
+    if (text === '' || !Number.isFinite(raw)) {
+      input.value = String(Math.round(current * 100));
+      return;
+    }
+    const percent = Math.round(clamp(raw, 0, VOLUME_MAX * 100));
+    if (percent !== raw) input.value = String(percent);
+    updateAudioTrack(index, { volume: percent / 100 });
+  });
+  mute.addEventListener('click', () => {
+    const current = edit.audioTracks.find((track) => track.index === index);
+    updateAudioTrack(index, { mute: !(current?.mute ?? false) });
+  });
+
+  row.append(label, volume, input, mute);
+  return { row, name: label, volume, input, mute };
+}
+
+function updateAudioTrack(index: number, patch: Partial<{ volume: number; mute: boolean }>): void {
+  const existing = edit.audioTracks.find((track) => track.index === index) ?? { index, volume: 1, mute: false };
+  const next = { ...existing, ...patch };
+  patchEdit({
+    audioTracks: edit.audioTracks.map((track) => (track.index === index ? next : track)),
+  });
+  if (edit.normalize && edit.media) void ensureMeasured(edit.media.path, refresh, edit.audioTracks);
+}
+
 /* --- Rendering --- */
 
 function rebuildFormatOptions(): void {
@@ -334,6 +457,8 @@ function fitAllowed(format: ExportFormat): boolean {
 function render(): void {
   const hasMedia = edit.media !== null;
   const hasAudio = edit.media?.hasAudio ?? false;
+
+  if (edit.normalize && edit.media) void ensureMeasured(edit.media.path, refresh, edit.audioTracks);
 
   // Corrected here, not in the handlers: loadMedia can arrive holding a remembered 'fit'.
   if (edit.quality === 'fit' && !fitAllowed(edit.format)) {
@@ -394,6 +519,8 @@ function render(): void {
   volumeSlider.value = String(Math.min(volumePercent, 200));
   // Left alone while being typed in, the same as the speed input.
   if (document.activeElement !== volumeInput) volumeInput.value = String(volumePercent);
+
+  renderAudioTracks();
 
   audioOnlyBtn.disabled = !hasMedia || !hasAudio || edit.mute;
   audioOnlyBtn.classList.toggle('active', edit.audioOnly);
@@ -475,6 +602,7 @@ function estimateSignature(): string {
     edit.mute,
     edit.reverse,
     edit.volume,
+    edit.audioTracks.map((track) => `${track.index}:${track.volume}:${track.mute}`).join(','),
     edit.format,
     edit.audioOnly,
     edit.quality,
@@ -567,6 +695,7 @@ function buildJob(input: string, output: string): ExportJob {
     reverse: edit.reverse,
     normalize: edit.normalize,
     volume: edit.volume,
+    audioTracks: edit.audioTracks.length > 1 ? edit.audioTracks : [],
     format: edit.format,
     quality: edit.quality,
     targetMb: edit.quality === 'fit' ? edit.targetMb : null,

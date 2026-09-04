@@ -70,6 +70,7 @@ pub fn run() {
             sysutil::measure_loudness,
             sysutil::make_filmstrip,
             sysutil::make_preview_proxy,
+            sysutil::make_audio_previews,
             sysutil::copy_file_to_clipboard,
             sysutil::reveal_in_explorer,
             sysutil::app_version,

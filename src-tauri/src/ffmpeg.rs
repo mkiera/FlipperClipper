@@ -36,7 +36,17 @@ pub struct MediaInfo {
     pub has_audio: bool,
     pub video_codec: String,
     pub audio_codec: Option<String>,
+    pub audio_tracks: Vec<AudioTrackInfo>,
     pub size_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AudioTrackInfo {
+    pub index: usize,
+    pub title: Option<String>,
+    pub codec: String,
+    pub channels: i64,
 }
 
 /// The lowercase serde names are the exact strings the frontend's ExportFormat union uses.
@@ -236,6 +246,8 @@ pub struct ExportJob {
     pub normalize: bool,
     /// Linear gain, 1.0 = unchanged. export.rs bounds it to [0.0, 10.0].
     pub volume: f64,
+    #[serde(default)]
+    pub audio_tracks: Vec<AudioTrackEdit>,
     pub format: ExportFormat,
     pub quality: QualityPreset,
     /// Only read when quality is Fit. Decimal megabytes, not MiB - see
@@ -249,6 +261,14 @@ pub struct ExportJob {
     pub video_kbps: Option<i64>,
     #[serde(default)]
     pub effects: Effects,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AudioTrackEdit {
+    pub index: usize,
+    pub volume: f64,
+    pub mute: bool,
 }
 
 /// Below this, H.264 stops holding detail and a fit-under-10-MB export turns into mush.
@@ -413,6 +433,55 @@ fn audio_filters(job: &ExportJob) -> Vec<String> {
         }
     }
     parts
+}
+
+fn active_audio_tracks(job: &ExportJob) -> Vec<&AudioTrackEdit> {
+    job.audio_tracks.iter().filter(|track| !track.mute).collect()
+}
+
+pub fn audio_mix_filter(tracks: &[AudioTrackEdit]) -> Option<(String, String)> {
+    let active: Vec<&AudioTrackEdit> = tracks.iter().filter(|track| !track.mute).collect();
+    if active.is_empty() {
+        return None;
+    }
+
+    let mut stages = Vec::new();
+    let mut labels = Vec::new();
+    for (position, track) in active.iter().enumerate() {
+        let label = format!("track{}", position);
+        stages.push(format!(
+            "[0:a:{}]aresample=async=1:first_pts=0,aformat=channel_layouts=stereo,volume={}[{}]",
+            track.index,
+            fmt_num(track.volume),
+            label
+        ));
+        labels.push(format!("[{}]", label));
+    }
+
+    if labels.len() == 1 {
+        stages.push(format!("{}anull[mixed]", labels[0]));
+    } else {
+        stages.push(format!(
+            "{}amix=inputs={}:normalize=0[mixed]",
+            labels.join(""),
+            labels.len()
+        ));
+    }
+    Some((stages.join(";"), "[mixed]".to_string()))
+}
+
+fn custom_audio_graph(job: &ExportJob) -> Option<(String, String)> {
+    if job.audio_tracks.is_empty() || job.mute {
+        return None;
+    }
+    let (mut graph, input) = audio_mix_filter(&job.audio_tracks)?;
+    let filters = audio_filters(job);
+    if !filters.is_empty() {
+        graph.push(';');
+        graph.push_str(&format!("{}{}[aout]", input, filters.join(",")));
+        return Some((graph, "[aout]".to_string()));
+    }
+    Some((graph, input))
 }
 
 // --- Quick effects ---
@@ -945,7 +1014,10 @@ pub fn build_args(
     font: Option<&Path>,
 ) -> Vec<String> {
     let mut args: Vec<String> = Vec::new();
-    let keep_audio = has_audio && !job.mute;
+    let keep_audio = has_audio
+        && !job.mute
+        && (job.audio_tracks.is_empty() || !active_audio_tracks(job).is_empty());
+    let custom_audio = custom_audio_graph(job);
     // Everything below reasons about the frame the user was looking at, which is the turned
     // one. transpose runs at the head of the chain, so crop and scale see these dimensions.
     let (width, height) = turned_size(job, width, height);
@@ -972,7 +1044,7 @@ pub fn build_args(
         // timestamps after the keyframe seek, or the first packet carries a negative PTS.
         push_all(&mut args, &["-map", "0:v:0"]);
         if keep_audio {
-            push_all(&mut args, &["-map", "0:a:0?"]);
+            push_all(&mut args, &["-map", "0:a?"]);
         }
         push_all(
             &mut args,
@@ -989,12 +1061,16 @@ pub fn build_args(
         // -vn beside an audio-only -map is what keeps an embedded cover art stream (an attached_pic
         // is a video stream) out of the container. job.mute is ignored here: -an beside -vn would ask
         // ffmpeg for a file with no streams at all.
-        push_all(&mut args, &["-vn", "-map", "0:a:0"]);
-
-        let afilters = audio_filters(job);
-        if !afilters.is_empty() {
-            args.push("-af".to_string());
-            args.push(afilters.join(","));
+        push_all(&mut args, &["-vn"]);
+        if let Some((graph, output)) = custom_audio.as_ref() {
+            push_all(&mut args, &["-filter_complex", graph, "-map", output]);
+        } else {
+            push_all(&mut args, &["-map", "0:a:0"]);
+            let afilters = audio_filters(job);
+            if !afilters.is_empty() {
+                args.push("-af".to_string());
+                args.push(afilters.join(","));
+            }
         }
 
         push_audio_codec(&mut args, job);
@@ -1058,7 +1134,11 @@ pub fn build_args(
     // encode. The `?` makes the audio map optional, for a file that turns out to have none.
     push_all(&mut args, &["-map", "0:v:0"]);
     if keep_audio {
-        push_all(&mut args, &["-map", "0:a:0?"]);
+        if let Some((graph, output)) = custom_audio.as_ref() {
+            push_all(&mut args, &["-filter_complex", graph, "-map", output]);
+        } else {
+            push_all(&mut args, &["-map", "0:a:0?"]);
+        }
     }
 
     if job.mute {
@@ -1113,7 +1193,7 @@ pub fn build_args(
         args.push(vfilters.join(","));
     }
 
-    if keep_audio {
+    if keep_audio && custom_audio.is_none() {
         let afilters = audio_filters(job);
         if !afilters.is_empty() {
             args.push("-af".to_string());
@@ -1424,9 +1504,26 @@ pub fn parse_probe(json: &str, path: &str, size_bytes: u64) -> Result<MediaInfo,
         })
         .ok_or_else(|| "this file has no video track".to_string())?;
 
-    let audio = streams
+    let audio_tracks: Vec<AudioTrackInfo> = streams
         .iter()
-        .find(|s| s.get("codec_type").and_then(|v| v.as_str()) == Some("audio"));
+        .filter(|s| s.get("codec_type").and_then(|v| v.as_str()) == Some("audio"))
+        .take(6)
+        .enumerate()
+        .map(|(index, stream)| AudioTrackInfo {
+            index,
+            title: stream
+                .get("tags")
+                .and_then(|tags| tags.get("title"))
+                .and_then(|value| value.as_str())
+                .map(str::to_string),
+            codec: stream
+                .get("codec_name")
+                .and_then(|value| value.as_str())
+                .unwrap_or("")
+                .to_string(),
+            channels: as_i64(stream.get("channels")).unwrap_or(0),
+        })
+        .collect();
 
     // The format-level duration is the one a player's seek bar uses; a stream-level one only
     // exists on some containers. Each candidate is checked for usability before the next is
@@ -1460,16 +1557,14 @@ pub fn parse_probe(json: &str, path: &str, size_bytes: u64) -> Result<MediaInfo,
         height,
         fps,
         rotation,
-        has_audio: audio.is_some(),
+        has_audio: !audio_tracks.is_empty(),
         video_codec: video
             .get("codec_name")
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string(),
-        audio_codec: audio
-            .and_then(|s| s.get("codec_name"))
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string()),
+        audio_codec: audio_tracks.first().map(|track| track.codec.clone()),
+        audio_tracks,
         size_bytes,
     })
 }
@@ -1805,6 +1900,7 @@ mod tests {
             reverse: false,
             normalize: false,
             volume: 1.0,
+            audio_tracks: Vec::new(),
             format: ExportFormat::Mp4,
             quality,
             target_mb: None,
@@ -2182,7 +2278,7 @@ mod tests {
                 "-map",
                 "0:v:0",
                 "-map",
-                "0:a:0?",
+                "0:a?",
                 "-c",
                 "copy",
                 "-avoid_negative_ts",
@@ -3722,6 +3818,56 @@ mod tests {
         assert_eq!(info.audio_codec, None);
         assert!((info.fps - 60.0).abs() < 1e-9);
         assert!((info.duration - 3.25).abs() < 1e-9);
+    }
+
+    #[test]
+    fn parse_probe_reports_six_recording_tracks_with_titles() {
+        let audio = (0..6)
+            .map(|index| {
+                format!(
+                    r#"{{"codec_type":"audio","codec_name":"aac","channels":2,"tags":{{"title":"Track {}"}}}}"#,
+                    index + 1
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        let json = format!(
+            r#"{{"streams":[{{"codec_type":"video","codec_name":"h264","width":1280,"height":720,"r_frame_rate":"30/1"}},{audio}],"format":{{"duration":"2"}}}}"#
+        );
+        let info = parse_probe(&json, "six.mkv", 10).unwrap();
+        assert_eq!(info.audio_tracks.len(), 6);
+        assert_eq!(info.audio_tracks[5].index, 5);
+        assert_eq!(info.audio_tracks[5].title.as_deref(), Some("Track 6"));
+        assert_eq!(info.audio_tracks[5].channels, 2);
+    }
+
+    #[test]
+    fn selected_audio_tracks_are_aligned_gained_and_mixed_before_master_filters() {
+        let mut j = job(QualityPreset::High);
+        j.audio_tracks = vec![
+            AudioTrackEdit { index: 0, volume: 0.5, mute: false },
+            AudioTrackEdit { index: 1, volume: 1.0, mute: true },
+            AudioTrackEdit { index: 5, volume: 2.0, mute: false },
+        ];
+        j.normalize = true;
+        j.volume = 0.8;
+        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0, None);
+        let graph = value_after(&args, "-filter_complex").unwrap();
+        assert!(graph.contains("[0:a:0]aresample=async=1:first_pts=0,aformat=channel_layouts=stereo,volume=0.5[track0]"));
+        assert!(!graph.contains("[0:a:1]"));
+        assert!(graph.contains("[0:a:5]aresample=async=1:first_pts=0,aformat=channel_layouts=stereo,volume=2.0[track1]"));
+        assert!(graph.contains("amix=inputs=2:normalize=0[mixed]"));
+        assert!(graph.contains("[mixed]loudnorm=I=-16:TP=-1.5:LRA=11,volume=0.8[aout]"));
+        assert_eq!(value_after(&args, "-map"), Some("0:v:0"));
+        assert!(!has(&args, "-af"));
+    }
+
+    #[test]
+    fn lossless_copy_maps_every_audio_track() {
+        let mut j = job(QualityPreset::High);
+        j.lossless = true;
+        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0, None);
+        assert!(args.windows(2).any(|pair| pair == ["-map", "0:a?"]));
     }
 
     #[test]

@@ -295,20 +295,36 @@ pub struct Loudness {
 /// Measures the whole file rather than the trim: it is one pass either way, and the difference
 /// a trim makes is a fraction of a LU, which is under what anyone can hear on a preview.
 #[tauri::command(async)]
-pub fn measure_loudness(path: String) -> Result<Loudness, String> {
-    let output = ffmpeg::hidden_command("ffmpeg")
-        .args(["-hide_banner", "-nostats", "-i"])
-        .arg(&path)
-        .args([
+pub fn measure_loudness(path: String, audio_tracks: Option<Vec<ffmpeg::AudioTrackEdit>>) -> Result<Loudness, String> {
+    let tracks = audio_tracks.unwrap_or_default();
+    let mut indices = HashSet::new();
+    if tracks.len() > 6 || tracks.iter().any(|track| track.index >= 6
+        || !indices.insert(track.index) || !track.volume.is_finite()
+        || !(0.0..=10.0).contains(&track.volume)) {
+        return Err("The audio track settings are invalid.".to_string());
+    }
+    let mut command = ffmpeg::hidden_command("ffmpeg");
+    command.args(["-hide_banner", "-nostats", "-i"]).arg(&path);
+    if tracks.len() > 1 {
+        let (graph, label) = ffmpeg::audio_mix_filter(&tracks)
+            .ok_or_else(|| "That mix has no audible tracks.".to_string())?;
+        command.args(["-filter_complex", &format!("{graph};{label}{}:print_format=json[measured]", ffmpeg::LOUDNORM),
+            "-map", "[measured]"]);
+    } else {
+        command.args([
             "-af",
             &format!("{}:print_format=json", ffmpeg::LOUDNORM),
-            "-f",
-            "null",
-            "-",
-        ])
+            "-map", "0:a:0",
+        ]);
+    }
+    let output = command.args(["-vn", "-f", "null", "-"])
         .stdin(Stdio::null())
         .output()
         .map_err(|_| "FFmpeg could not be started to measure the audio.".to_string())?;
+
+    if !output.status.success() {
+        return Err("FFmpeg could not measure that audio mix.".to_string());
+    }
 
     // loudnorm prints its analysis to stderr, after everything else ffmpeg has to say.
     parse_loudness(&String::from_utf8_lossy(&output.stderr))
@@ -498,6 +514,90 @@ fn path_key(path: &str) -> String {
 }
 
 #[tauri::command(async)]
+pub fn make_audio_previews(app: AppHandle, path: String) -> Result<Vec<String>, String> {
+    static CACHE: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, Vec<String>>>,
+    > = std::sync::OnceLock::new();
+    let canonical = std::fs::canonicalize(&path)
+        .map_err(|_| "That file is no longer there.".to_string())?;
+    let metadata = std::fs::metadata(&canonical)
+        .map_err(|_| "That file is no longer there.".to_string())?;
+    let source_key = format!("{}:", path_key(&canonical.to_string_lossy()));
+    let key = format!("{source_key}{}:{:?}", metadata.len(), metadata.modified().ok());
+    let cache = CACHE.get_or_init(Default::default);
+    let cached = cache.lock()
+        .map_err(|_| "The audio preview cache could not be opened.".to_string())?
+        .get(&key).cloned();
+    if let Some(paths) = cached {
+        if paths.iter().all(|p| Path::new(p).is_file()) {
+            return Ok(paths);
+        }
+    }
+    let media = probe_media(&path)?;
+    if media.audio_tracks.len() < 2 {
+        return Ok(Vec::new());
+    }
+    let dir = temp_subdir("audio")?;
+    let outputs: Vec<PathBuf> = (0..media.audio_tracks.len())
+        .map(|index| dir.join(format!("track-{index}.m4a")))
+        .collect();
+    let result = render_audio_previews(&path, &outputs, media.duration);
+    if let Err(error) = result {
+        let _ = std::fs::remove_dir_all(&dir);
+        return Err(error);
+    }
+    let paths: Vec<String> = outputs.iter().map(|p| p.to_string_lossy().into_owned()).collect();
+    for output in &paths {
+        app.asset_protocol_scope().allow_file(output)
+            .map_err(|_| "The audio preview could not be opened for playback.".to_string())?;
+    }
+    let mut cached = cache.lock()
+        .map_err(|_| "The audio preview cache could not be opened.".to_string())?;
+    if let Some(existing) = cached.get(&key) {
+        if existing.iter().all(|p| Path::new(p).is_file()) {
+            remove_audio_previews(&paths);
+            return Ok(existing.clone());
+        }
+    }
+    cached.retain(|old_key, old_paths| {
+        if old_key.starts_with(&source_key) {
+            remove_audio_previews(old_paths);
+            false
+        } else {
+            true
+        }
+    });
+    cached.insert(key, paths.clone());
+    Ok(paths)
+}
+
+fn remove_audio_previews(paths: &[String]) {
+    for path in paths {
+        let _ = std::fs::remove_file(path);
+    }
+    if let Some(dir) = paths.first().and_then(|path| Path::new(path).parent()) {
+        let _ = std::fs::remove_dir(dir);
+    }
+}
+
+fn render_audio_previews(path: &str, outputs: &[PathBuf], duration: f64) -> Result<(), String> {
+    let mut command = ffmpeg::hidden_command("ffmpeg");
+    command.args(["-hide_banner", "-loglevel", "error", "-y", "-copyts", "-start_at_zero", "-i", path]);
+    for (index, output) in outputs.iter().enumerate() {
+        command.args(["-map", &format!("0:a:{index}"), "-vn", "-sn", "-dn"])
+            .args(["-af", "aresample=async=1:first_pts=0,apad", "-t", &duration.to_string()])
+            .args(["-ac", "2", "-ar", "48000", "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart"])
+            .arg(output);
+    }
+    let result = command.stdin(Stdio::null()).stdout(Stdio::null()).output()
+        .map_err(|_| "FFmpeg could not be started to prepare the audio tracks.".to_string())?;
+    if !result.status.success() {
+        return Err("FFmpeg could not prepare the audio tracks for playback.".to_string());
+    }
+    Ok(())
+}
+
+#[tauri::command(async)]
 pub fn copy_file_to_clipboard(path: String) -> Result<(), String> {
     if !Path::new(&path).is_file() {
         return Err("That file is no longer there.".to_string());
@@ -666,6 +766,38 @@ frame=  600 fps=0.0
         assert!(parse_loudness("no json here").is_err());
     }
     use super::*;
+
+    #[test]
+    #[ignore]
+    fn audio_previews_preserve_delayed_tracks_and_pad_to_video_duration() {
+        let dir = temp_subdir("audio-test").unwrap();
+        let source = dir.join("source.mkv");
+        let fixture = ffmpeg::hidden_command("ffmpeg")
+            .args(["-hide_banner", "-loglevel", "error", "-y",
+                "-f", "lavfi", "-i", "color=size=160x90:rate=10:duration=3",
+                "-f", "lavfi", "-i", "sine=frequency=440:duration=3",
+                "-itsoffset", "1", "-f", "lavfi", "-i", "sine=frequency=880:duration=1",
+                "-map", "0:v", "-map", "1:a", "-map", "2:a",
+                "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "pcm_s16le"])
+            .arg(&source).output().unwrap();
+        assert!(fixture.status.success(), "{}", String::from_utf8_lossy(&fixture.stderr));
+        let outputs = vec![dir.join("first.m4a"), dir.join("delayed.m4a")];
+        render_audio_previews(source.to_str().unwrap(), &outputs, 3.0).unwrap();
+        let decoded = ffmpeg::hidden_command("ffmpeg")
+            .args(["-hide_banner", "-loglevel", "error", "-i"])
+            .arg(&outputs[1]).args(["-ac", "1", "-ar", "8000", "-f", "f32le", "-"])
+            .output().unwrap();
+        assert!(decoded.status.success());
+        let samples: Vec<f32> = decoded.stdout.chunks_exact(4)
+            .map(|bytes| f32::from_le_bytes(bytes.try_into().unwrap())).collect();
+        assert!((24_000..24_400).contains(&samples.len()));
+        assert!(samples[0..4_000].iter().all(|sample| sample.abs() < 0.001));
+        assert!(samples[10_000..14_000].iter().any(|sample| sample.abs() > 0.02));
+        assert!(samples[20_000..23_000].iter().all(|sample| sample.abs() < 0.001));
+        for output in outputs { std::fs::remove_file(output).unwrap(); }
+        std::fs::remove_file(source).unwrap();
+        std::fs::remove_dir(dir).unwrap();
+    }
     use std::time::Duration;
 
     fn at(secs: u64) -> String {

@@ -344,6 +344,54 @@ input[type='range']:disabled::-webkit-slider-thumb {
   width: 88px;
 }
 
+#audio-track-controls {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  align-items: center;
+  gap: 5px 8px;
+  flex: 1 0 100%;
+  min-width: 0;
+  padding-top: 2px;
+}
+
+.audio-track-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 64px 5.5rem 48px;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+}
+
+.audio-track-name {
+  max-width: 92px;
+  overflow: hidden;
+  color: var(--fg-dim);
+  font-size: 0.75rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.audio-track-row input[type='range'] {
+  width: 64px;
+}
+
+.audio-track-volume {
+  width: 5.5rem;
+}
+
+.audio-track-mute {
+  min-width: 48px;
+  height: 24px;
+  padding: 0 6px;
+  font-size: 0.7rem;
+}
+
+.audio-track-status {
+  grid-column: 1 / -1;
+  color: var(--fg-dim);
+  font-size: 0.7rem;
+}
+
 #fit-mb {
   width: 74px;
 }

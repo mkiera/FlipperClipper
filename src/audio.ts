@@ -30,13 +30,20 @@ const PROBE_RATE = 8000;
 const PROBE_SECONDS = 2;
 const PROBE_AMPLITUDE = 0.5;
 
-let context: AudioContext | null = null;
-let boost: GainNode | null = null;
-let attaching = false;
+interface ElementGain {
+  context: AudioContext;
+  node: GainNode;
+}
+
+const gains = new WeakMap<HTMLMediaElement, ElementGain>();
+const attaching = new WeakSet<HTMLMediaElement>();
+const disposed = new WeakSet<HTMLMediaElement>();
+let anyBoost = false;
 
 /** null until the probe has run. Whether a graph carries audio is a property of the machine,
  *  so the answer holds for the session either way. */
 let supported: boolean | null = null;
+let supportProbe: Promise<boolean> | null = null;
 
 function rmsOf(analyser: AnalyserNode): number {
   const buf = new Float32Array(analyser.fftSize);
@@ -144,44 +151,68 @@ async function resumed(ctx: AudioContext): Promise<void> {
  * it returns immediately after the first attempt resolves.
  */
 /** Returns true only on the call that attached it, which is the caller's cue to re-render. */
-export async function enableBoost(video: HTMLVideoElement): Promise<boolean> {
-  if (boost || attaching || supported === false) return false;
-  attaching = true;
+export async function enableElementBoost(element: HTMLMediaElement): Promise<boolean> {
+  if (disposed.has(element) || gains.has(element) || attaching.has(element) || supported === false) {
+    return false;
+  }
+  attaching.add(element);
   try {
-    if (supported === null) supported = await graphCarriesAudio();
-    if (!supported) return false;
+    if (supported === null) {
+      supportProbe ??= graphCarriesAudio();
+      supported = await supportProbe;
+    }
+    if (!supported || disposed.has(element)) return false;
 
-    context = new AudioContext();
-    boost = context.createGain();
-    context.createMediaElementSource(video).connect(boost);
-    boost.connect(context.destination);
+    const context = new AudioContext();
+    const node = context.createGain();
+    context.createMediaElementSource(element).connect(node);
+    node.connect(context.destination);
+    gains.set(element, { context, node });
+    anyBoost = true;
     await resumed(context);
     return true;
   } catch {
-    supported = false;
     return false;
   } finally {
-    attaching = false;
+    attaching.delete(element);
   }
+}
+
+export function enableBoost(video: HTMLVideoElement): Promise<boolean> {
+  return enableElementBoost(video);
 }
 
 /**
  * Sets the preview gain by whichever route exists. Without the graph this is the old ceiling;
  * with it, the number is applied as asked.
  */
-export function applyGain(video: HTMLVideoElement, gain: number): void {
-  if (boost && context) {
+export function applyElementGain(element: HTMLMediaElement, gain: number): void {
+  const attached = gains.get(element);
+  if (attached) {
     // The element stays at unity and the node does the work, so the two never multiply.
-    if (video.volume !== 1) video.volume = 1;
-    if (boost.gain.value !== gain) boost.gain.value = gain;
-    if (context.state === 'suspended') void context.resume();
+    if (element.volume !== 1) element.volume = 1;
+    if (attached.node.gain.value !== gain) attached.node.gain.value = gain;
+    if (attached.context.state === 'suspended') void attached.context.resume();
     return;
   }
   const capped = Math.min(gain, 1);
-  if (video.volume !== capped) video.volume = capped;
+  if (element.volume !== capped) element.volume = capped;
+}
+
+export function applyGain(video: HTMLVideoElement, gain: number): void {
+  applyElementGain(video, gain);
+}
+
+export function disposeElementGain(element: HTMLMediaElement): void {
+  disposed.add(element);
+  const attached = gains.get(element);
+  if (!attached) return;
+  attached.node.disconnect();
+  void attached.context.close();
+  gains.delete(element);
 }
 
 /** Whether a boost above 100% is actually audible, for the UI to say so honestly. */
 export function boostReady(): boolean {
-  return boost !== null;
+  return anyBoost;
 }

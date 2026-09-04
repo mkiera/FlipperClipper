@@ -2,6 +2,18 @@ import { edit, patchUi, refresh, subscribe } from './state';
 import { applyGain, enableBoost } from './audio';
 import { normalizeGain } from './loudness';
 import { speedAt } from './ramp';
+import {
+  clearTrackPreviews,
+  hasTrackPreview,
+  initTrackPreview,
+  pauseTrackPreview,
+  playTrackPreview,
+  seekTrackPreview,
+  syncTrackPreview,
+  tickTrackPreview,
+} from './track-preview';
+
+export { loadTrackPreviews, trackPreviewStatus } from './track-preview';
 
 const PREVIEW_TIMEOUT_MS = 4000;
 
@@ -56,6 +68,7 @@ function playElement(): void {
 
 export function initPlayer(el: HTMLVideoElement): void {
   video = el;
+  initTrackPreview(video);
   useFrameCallback = typeof video.requestVideoFrameCallback === 'function';
   hasFastSeek = typeof video.fastSeek === 'function';
 
@@ -65,14 +78,17 @@ export function initPlayer(el: HTMLVideoElement): void {
 
   video.addEventListener('play', () => {
     patchUi({ playing: true });
+    playTrackPreview();
     schedulePump();
   });
   video.addEventListener('pause', () => {
+    pauseTrackPreview();
     if (!reverseActive) patchUi({ playing: false });
   });
   video.addEventListener('seeked', () => {
     seekInFlight = false;
     if (pendingTarget !== null) issueSeek();
+    seekTrackPreview(displayTime());
     emitTime(displayTime());
   });
   video.addEventListener('timeupdate', () => emitTime(displayTime()));
@@ -82,7 +98,7 @@ export function initPlayer(el: HTMLVideoElement): void {
     // preservesPitch survives a src swap, but the proxy path replaces the source mid-session.
     video.preservesPitch = true;
     video.playbackRate = previewRate();
-    video.muted = edit.mute;
+    syncTrackPreview();
     emitTime(video.currentTime);
   });
 
@@ -95,6 +111,7 @@ export function initPlayer(el: HTMLVideoElement): void {
     // A dead element never fires 'seeked', and every later seek would queue behind it.
     seekInFlight = false;
     pendingTarget = null;
+    pauseTrackPreview();
     reportPreviewTrouble();
   });
 
@@ -117,6 +134,7 @@ export function loadSource(url: string): void {
   resetSeekMachinery();
 
   video.pause();
+  syncTrackPreview();
   video.src = url;
   video.load();
 
@@ -129,6 +147,7 @@ export function clearSource(): void {
   window.clearTimeout(previewTimer);
   resetSeekMachinery();
   video.pause();
+  clearTrackPreviews();
   video.removeAttribute('src');
   video.load();
 }
@@ -179,6 +198,7 @@ export function seek(t: number): void {
     reverseWall = performance.now();
   }
   requestSeek(clamped);
+  seekTrackPreview(clamped);
   emitTime(clamped);
 }
 
@@ -243,6 +263,7 @@ function startReverse(): void {
   if (!edit.media) return;
   stopReverse();
   video.pause();
+  pauseTrackPreview();
 
   let from = displayTime();
   if (from <= edit.inPoint + halfFrame()) from = edit.outPoint;
@@ -313,6 +334,7 @@ function pump(): void {
   else emitTime(t);
 
   followRamp();
+  tickTrackPreview(t);
 
   if (useFrameCallback || !video.paused) schedulePump();
 }
@@ -329,18 +351,18 @@ function syncFromState(): void {
 
   const rate = previewRate();
   if (video.playbackRate !== rate) video.playbackRate = rate;
-  if (video.muted !== edit.mute) video.muted = edit.mute;
+  syncTrackPreview();
   // Normalise first, then the slider trims from there - the same order the export emits.
   const wanted = edit.volume * (edit.normalize ? normalizeGain() : 1);
   // Only a boost needs the graph, so a session that never asks for one never attaches it.
   // Attaching lands after this render, so the one call that succeeds asks for another - and
   // only that call, or re-rendering would chase itself.
-  if (wanted > 1 && edit.src) {
+  if (!hasTrackPreview() && wanted > 1 && edit.src) {
     void enableBoost(video).then((attached) => {
       if (attached) refresh();
     });
   }
-  applyGain(video, wanted);
+  if (!hasTrackPreview()) applyGain(video, wanted);
 
   if (!edit.media) {
     stopReverse();
