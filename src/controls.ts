@@ -13,7 +13,7 @@ import {
   startExport,
 } from './ipc';
 import { edit, patchEdit, patchUi, refresh, rememberQuality, rememberTargetMb, settings, subscribe, ui } from './state';
-import { currentTime, onTime, togglePlay, trackPreviewStatus } from './player';
+import { currentTime, onTime, onTrackLevels, togglePlay, trackPreviewStatus } from './player';
 import { toggleCrop } from './crop';
 import { enabledIds, toEffectsJob } from './effects';
 import { toggleEffectsPanel } from './effectspanel';
@@ -119,10 +119,12 @@ let estimateKey = '';
 
 let formatListIsAudio: boolean | null = null;
 const audioTrackRows = new Map<number, AudioTrackRow>();
+const audioTrackLevels = new Map<number, number>();
 
 interface AudioTrackRow {
   row: HTMLElement;
   name: HTMLElement;
+  meter: HTMLElement;
   volume: HTMLInputElement;
   input: HTMLInputElement;
   mute: HTMLButtonElement;
@@ -162,6 +164,7 @@ export function initControls(controlsDeps: ControlsDeps): void {
   audioTrackStatus.className = 'audio-track-status';
   audioTrackStatus.setAttribute('role', 'status');
   audioTrackControls.appendChild(audioTrackStatus);
+  onTrackLevels(renderAudioLevels);
   audioOnlyBtn = el<HTMLButtonElement>('audio-only-btn');
   formatSelect = el<HTMLSelectElement>('format-select');
   qualitySelect = el<HTMLSelectElement>('quality-select');
@@ -340,6 +343,7 @@ function renderAudioTracks(): void {
   if (audioTrackMedia !== edit.media) {
     audioTrackMedia = edit.media;
     audioTracksOpen = false;
+    audioTrackLevels.clear();
   }
   const tracks = (edit.media?.audioTracks ?? []).filter((track) => track.index >= 0 && track.index < 6);
   const showTracks = tracks.length > 1;
@@ -389,6 +393,7 @@ function renderAudioTracks(): void {
     controls.mute.setAttribute('aria-pressed', String(setting.mute));
     controls.volume.value = String(Math.min(percent, 200));
     controls.volume.style.setProperty('--track-volume', `${Math.min(percent, 200) / 2}%`);
+    setTrackMeter(controls, audioTrackLevels.get(track.index) ?? 0, edit.mute || setting.mute);
     if (document.activeElement !== controls.input) controls.input.value = String(percent);
   }
 }
@@ -408,6 +413,13 @@ function createAudioTrackRow(index: number, title: string | null): AudioTrackRow
   volume.max = '200';
   volume.step = '1';
   volume.setAttribute('aria-label', `${label.textContent} volume`);
+
+  const slider = document.createElement('div');
+  slider.className = 'audio-track-slider';
+  const meter = document.createElement('span');
+  meter.className = 'audio-track-meter';
+  meter.setAttribute('aria-hidden', 'true');
+  slider.append(meter, volume);
 
   const input = document.createElement('input');
   input.className = 'audio-track-volume';
@@ -446,8 +458,21 @@ function createAudioTrackRow(index: number, title: string | null): AudioTrackRow
   unit.textContent = '%';
   unit.setAttribute('aria-hidden', 'true');
   value.append(input, unit);
-  row.append(label, volume, value, mute);
-  return { row, name: label, volume, input, mute };
+  row.append(label, slider, value, mute);
+  return { row, name: label, meter, volume, input, mute };
+}
+
+function renderAudioLevels(levels: ReadonlyMap<number, number>): void {
+  audioTrackLevels.clear();
+  for (const [index, level] of levels) audioTrackLevels.set(index, clamp01(level));
+  for (const [index, controls] of audioTrackRows) {
+    const setting = edit.audioTracks.find((track) => track.index === index);
+    setTrackMeter(controls, audioTrackLevels.get(index) ?? 0, edit.mute || Boolean(setting?.mute));
+  }
+}
+
+function setTrackMeter(controls: AudioTrackRow, level: number, muted: boolean): void {
+  controls.meter.style.width = `${muted ? 0 : clamp01(level) * 100}%`;
 }
 
 function updateAudioTrack(index: number, patch: Partial<{ volume: number; mute: boolean }>): void {

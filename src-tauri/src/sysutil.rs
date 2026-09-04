@@ -513,62 +513,99 @@ fn path_key(path: &str) -> String {
     format!("{:016x}", hasher.finish())
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AudioPreviewWindow {
+    pub paths: Vec<String>,
+    pub start: f64,
+    pub duration: f64,
+}
+
+#[derive(Default)]
+struct AudioPreviewCache {
+    entries: std::collections::VecDeque<(String, AudioPreviewWindow)>,
+}
+
+fn cached_audio_preview(
+    cache: &std::sync::Mutex<AudioPreviewCache>,
+    key: String,
+    render: impl FnOnce() -> Result<AudioPreviewWindow, String>,
+) -> Result<AudioPreviewWindow, String> {
+    let mut cache = cache
+        .lock()
+        .map_err(|_| "The audio preview cache could not be opened.".to_string())?;
+    if let Some(index) = cache.entries.iter().position(|(stored, window)| {
+        stored == &key && window.paths.iter().all(|path| Path::new(path).is_file())
+    }) {
+        let entry = cache.entries.remove(index).unwrap();
+        let window = entry.1.clone();
+        cache.entries.push_back(entry);
+        return Ok(window);
+    }
+    let window = render()?;
+    cache.entries.push_back((key, window.clone()));
+    while cache.entries.len() > 8 {
+        if let Some((_, expired)) = cache.entries.pop_front() {
+            remove_audio_previews(&expired.paths);
+        }
+    }
+    Ok(window)
+}
+
 #[tauri::command(async)]
-pub fn make_audio_previews(app: AppHandle, path: String) -> Result<Vec<String>, String> {
-    static CACHE: std::sync::OnceLock<
-        std::sync::Mutex<std::collections::HashMap<String, Vec<String>>>,
-    > = std::sync::OnceLock::new();
+pub fn make_audio_previews(
+    app: AppHandle,
+    path: String,
+    start: f64,
+) -> Result<AudioPreviewWindow, String> {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<AudioPreviewCache>> = std::sync::OnceLock::new();
+    if !start.is_finite() || start < 0.0 {
+        return Err("The audio preview position is invalid.".to_string());
+    }
     let canonical = std::fs::canonicalize(&path)
         .map_err(|_| "That file is no longer there.".to_string())?;
     let metadata = std::fs::metadata(&canonical)
         .map_err(|_| "That file is no longer there.".to_string())?;
-    let source_key = format!("{}:", path_key(&canonical.to_string_lossy()));
-    let key = format!("{source_key}{}:{:?}", metadata.len(), metadata.modified().ok());
-    let cache = CACHE.get_or_init(Default::default);
-    let cached = cache.lock()
-        .map_err(|_| "The audio preview cache could not be opened.".to_string())?
-        .get(&key).cloned();
-    if let Some(paths) = cached {
-        if paths.iter().all(|p| Path::new(p).is_file()) {
-            return Ok(paths);
+    let key = format!(
+        "{}:{}:{:?}:{start}",
+        path_key(&canonical.to_string_lossy()),
+        metadata.len(),
+        metadata.modified().ok()
+    );
+    let window = cached_audio_preview(CACHE.get_or_init(Default::default), key, || {
+        let media = probe_media(&path)?;
+        let start = start.min(media.duration.max(0.0));
+        let duration = (media.duration - start).clamp(0.0, 60.0);
+        if media.audio_tracks.len() < 2 || duration == 0.0 {
+            return Ok(AudioPreviewWindow {
+                paths: Vec::new(),
+                start,
+                duration,
+            });
         }
-    }
-    let media = probe_media(&path)?;
-    if media.audio_tracks.len() < 2 {
-        return Ok(Vec::new());
-    }
-    let dir = temp_subdir("audio")?;
-    let outputs: Vec<PathBuf> = (0..media.audio_tracks.len())
-        .map(|index| dir.join(format!("track-{index}.m4a")))
-        .collect();
-    let result = render_audio_previews(&path, &outputs, media.duration);
-    if let Err(error) = result {
-        let _ = std::fs::remove_dir_all(&dir);
-        return Err(error);
-    }
-    let paths: Vec<String> = outputs.iter().map(|p| p.to_string_lossy().into_owned()).collect();
-    for output in &paths {
-        app.asset_protocol_scope().allow_file(output)
+        let dir = temp_subdir("audio")?;
+        let outputs: Vec<PathBuf> = (0..media.audio_tracks.len())
+            .map(|index| dir.join(format!("track-{index}.m4a")))
+            .collect();
+        if let Err(error) = render_audio_previews(&path, &outputs, start, duration) {
+            let _ = std::fs::remove_dir_all(&dir);
+            return Err(error);
+        }
+        Ok(AudioPreviewWindow {
+            paths: outputs
+                .iter()
+                .map(|p| p.to_string_lossy().into_owned())
+                .collect(),
+            start,
+            duration,
+        })
+    })?;
+    for output in &window.paths {
+        app.asset_protocol_scope()
+            .allow_file(output)
             .map_err(|_| "The audio preview could not be opened for playback.".to_string())?;
     }
-    let mut cached = cache.lock()
-        .map_err(|_| "The audio preview cache could not be opened.".to_string())?;
-    if let Some(existing) = cached.get(&key) {
-        if existing.iter().all(|p| Path::new(p).is_file()) {
-            remove_audio_previews(&paths);
-            return Ok(existing.clone());
-        }
-    }
-    cached.retain(|old_key, old_paths| {
-        if old_key.starts_with(&source_key) {
-            remove_audio_previews(old_paths);
-            false
-        } else {
-            true
-        }
-    });
-    cached.insert(key, paths.clone());
-    Ok(paths)
+    Ok(window)
 }
 
 fn remove_audio_previews(paths: &[String]) {
@@ -580,21 +617,77 @@ fn remove_audio_previews(paths: &[String]) {
     }
 }
 
-fn render_audio_previews(path: &str, outputs: &[PathBuf], duration: f64) -> Result<(), String> {
+fn render_audio_previews(
+    path: &str,
+    outputs: &[PathBuf],
+    start: f64,
+    duration: f64,
+) -> Result<(), String> {
+    let args = audio_preview_args(path, outputs, start, duration);
     let mut command = ffmpeg::hidden_command("ffmpeg");
-    command.args(["-hide_banner", "-loglevel", "error", "-y", "-copyts", "-start_at_zero", "-i", path]);
-    for (index, output) in outputs.iter().enumerate() {
-        command.args(["-map", &format!("0:a:{index}"), "-vn", "-sn", "-dn"])
-            .args(["-af", "aresample=async=1:first_pts=0,apad", "-t", &duration.to_string()])
-            .args(["-ac", "2", "-ar", "48000", "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart"])
-            .arg(output);
-    }
-    let result = command.stdin(Stdio::null()).stdout(Stdio::null()).output()
+    command.args(args);
+    let result = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .output()
         .map_err(|_| "FFmpeg could not be started to prepare the audio tracks.".to_string())?;
     if !result.status.success() {
         return Err("FFmpeg could not prepare the audio tracks for playback.".to_string());
     }
     Ok(())
+}
+
+fn audio_preview_args(path: &str, outputs: &[PathBuf], start: f64, duration: f64) -> Vec<String> {
+    let mut args = [
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-y",
+        "-copyts",
+        "-start_at_zero",
+        "-ss",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect::<Vec<_>>();
+    args.extend([
+        start.to_string(),
+        "-threads".to_string(),
+        "1".to_string(),
+        "-i".to_string(),
+        path.to_string(),
+    ]);
+    for (index, output) in outputs.iter().enumerate() {
+        args.extend([
+            "-map".to_string(),
+            format!("0:a:{index}"),
+            "-vn".to_string(),
+            "-sn".to_string(),
+            "-dn".to_string(),
+        ]);
+        args.extend([
+            "-af".to_string(),
+            format!("asetpts=PTS-{start}/TB,aresample=async=1:first_pts=0,apad"),
+            "-t".to_string(),
+            duration.clamp(0.0, 60.0).to_string(),
+        ]);
+        args.extend([
+            "-ac".to_string(),
+            "2".to_string(),
+            "-ar".to_string(),
+            "48000".to_string(),
+            "-c:a".to_string(),
+            "aac".to_string(),
+            "-threads".to_string(),
+            "1".to_string(),
+            "-b:a".to_string(),
+            "192k".to_string(),
+            "-movflags".to_string(),
+            "+faststart".to_string(),
+        ]);
+        args.push(output.to_string_lossy().into_owned());
+    }
+    args
 }
 
 #[tauri::command(async)]
@@ -773,31 +866,163 @@ frame=  600 fps=0.0
         let dir = temp_subdir("audio-test").unwrap();
         let source = dir.join("source.mkv");
         let fixture = ffmpeg::hidden_command("ffmpeg")
-            .args(["-hide_banner", "-loglevel", "error", "-y",
-                "-f", "lavfi", "-i", "color=size=160x90:rate=10:duration=3",
-                "-f", "lavfi", "-i", "sine=frequency=440:duration=3",
-                "-itsoffset", "1", "-f", "lavfi", "-i", "sine=frequency=880:duration=1",
-                "-map", "0:v", "-map", "1:a", "-map", "2:a",
-                "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "pcm_s16le"])
-            .arg(&source).output().unwrap();
-        assert!(fixture.status.success(), "{}", String::from_utf8_lossy(&fixture.stderr));
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=size=160x90:rate=10:duration=3",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:duration=3",
+                "-itsoffset",
+                "1",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=880:duration=1",
+                "-map",
+                "0:v",
+                "-map",
+                "1:a",
+                "-map",
+                "2:a",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "ultrafast",
+                "-c:a",
+                "pcm_s16le",
+            ])
+            .arg(&source)
+            .output()
+            .unwrap();
+        assert!(
+            fixture.status.success(),
+            "{}",
+            String::from_utf8_lossy(&fixture.stderr)
+        );
         let outputs = vec![dir.join("first.m4a"), dir.join("delayed.m4a")];
-        render_audio_previews(source.to_str().unwrap(), &outputs, 3.0).unwrap();
+        render_audio_previews(source.to_str().unwrap(), &outputs, 0.0, 3.0).unwrap();
         let decoded = ffmpeg::hidden_command("ffmpeg")
             .args(["-hide_banner", "-loglevel", "error", "-i"])
-            .arg(&outputs[1]).args(["-ac", "1", "-ar", "8000", "-f", "f32le", "-"])
-            .output().unwrap();
+            .arg(&outputs[1])
+            .args(["-ac", "1", "-ar", "8000", "-f", "f32le", "-"])
+            .output()
+            .unwrap();
         assert!(decoded.status.success());
-        let samples: Vec<f32> = decoded.stdout.chunks_exact(4)
-            .map(|bytes| f32::from_le_bytes(bytes.try_into().unwrap())).collect();
+        let samples: Vec<f32> = decoded
+            .stdout
+            .chunks_exact(4)
+            .map(|bytes| f32::from_le_bytes(bytes.try_into().unwrap()))
+            .collect();
         assert!((24_000..24_400).contains(&samples.len()));
         assert!(samples[0..4_000].iter().all(|sample| sample.abs() < 0.001));
         assert!(samples[10_000..14_000].iter().any(|sample| sample.abs() > 0.02));
         assert!(samples[20_000..23_000].iter().all(|sample| sample.abs() < 0.001));
-        for output in outputs { std::fs::remove_file(output).unwrap(); }
+        render_audio_previews(source.to_str().unwrap(), &outputs, 1.25, 1.75).unwrap();
+        let decoded = ffmpeg::hidden_command("ffmpeg")
+            .args(["-hide_banner", "-loglevel", "error", "-i"])
+            .arg(&outputs[1])
+            .args(["-ac", "1", "-ar", "8000", "-f", "f32le", "-"])
+            .output()
+            .unwrap();
+        assert!(decoded.status.success());
+        let samples: Vec<f32> = decoded
+            .stdout
+            .chunks_exact(4)
+            .map(|bytes| f32::from_le_bytes(bytes.try_into().unwrap()))
+            .collect();
+        assert!((14_000..14_400).contains(&samples.len()));
+        assert!(samples[1_000..4_000].iter().any(|sample| sample.abs() > 0.02));
+        assert!(samples[8_000..13_000].iter().all(|sample| sample.abs() < 0.001));
+        for output in outputs {
+            std::fs::remove_file(output).unwrap();
+        }
         std::fs::remove_file(source).unwrap();
         std::fs::remove_dir(dir).unwrap();
     }
+
+    #[test]
+    fn audio_preview_work_is_bounded_for_long_media() {
+        let outputs: Vec<PathBuf> = (0..6)
+            .map(|index| PathBuf::from(format!("track-{index}.m4a")))
+            .collect();
+        let args = audio_preview_args("long.mkv", &outputs, 45.0, 20.0 * 60.0);
+        let durations: Vec<f64> = args
+            .windows(2)
+            .filter(|pair| pair[0] == "-t")
+            .map(|pair| pair[1].parse().unwrap())
+            .collect();
+        assert_eq!(durations.len(), 6);
+        assert!(durations.iter().all(|duration| *duration <= 60.0));
+    }
+    #[test]
+    fn concurrent_preview_requests_share_one_render() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::{Arc, Barrier, Mutex};
+        let dir = temp_subdir("audio-cache-test").unwrap();
+        let output = dir.join("track.m4a");
+        std::fs::write(&output, b"cached").unwrap();
+        let cache = Arc::new(Mutex::new(AudioPreviewCache::default()));
+        let renders = Arc::new(AtomicUsize::new(0));
+        let barrier = Arc::new(Barrier::new(8));
+        let workers: Vec<_> = (0..8)
+            .map(|_| {
+                let cache = Arc::clone(&cache);
+                let renders = Arc::clone(&renders);
+                let barrier = Arc::clone(&barrier);
+                let output = output.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    cached_audio_preview(&cache, "same-window".to_string(), || {
+                        renders.fetch_add(1, Ordering::SeqCst);
+                        std::thread::sleep(Duration::from_millis(20));
+                        Ok(AudioPreviewWindow {
+                            paths: vec![output.to_string_lossy().into_owned()],
+                            start: 0.0,
+                            duration: 60.0,
+                        })
+                    })
+                    .unwrap()
+                })
+            })
+            .collect();
+        for worker in workers {
+            assert_eq!(worker.join().unwrap().duration, 60.0);
+        }
+        assert_eq!(renders.load(Ordering::SeqCst), 1);
+        std::fs::remove_file(&output).unwrap();
+        let window = cached_audio_preview(&cache, "same-window".to_string(), || {
+            renders.fetch_add(1, Ordering::SeqCst);
+            std::fs::write(&output, b"rebuilt").unwrap();
+            Ok(AudioPreviewWindow {
+                paths: vec![output.to_string_lossy().into_owned()],
+                start: 0.0,
+                duration: 60.0,
+            })
+        })
+        .unwrap();
+        assert_eq!(renders.load(Ordering::SeqCst), 2);
+        remove_audio_previews(&window.paths);
+    }
+
+    #[test]
+    fn preview_seek_happens_before_input_and_rebases_audio_timestamps() {
+        let args = audio_preview_args("long.mkv", &[PathBuf::from("track.m4a")], 900.0, 60.0);
+        assert!(
+            args.iter().position(|arg| arg == "-ss").unwrap()
+                < args.iter().position(|arg| arg == "-i").unwrap()
+        );
+        assert!(args
+            .iter()
+            .any(|arg| arg == "asetpts=PTS-900/TB,aresample=async=1:first_pts=0,apad"));
+    }
+
     use std::time::Duration;
 
     fn at(secs: u64) -> String {

@@ -1,4 +1,4 @@
-import { applyElementGain, disposeElementGain, enableElementBoost } from './audio';
+import { applyElementGain, disposeElementGain, elementLevel, enableElementBoost } from './audio';
 import { assetUrl, makeAudioPreviews } from './ipc';
 import { normalizeGain } from './loudness';
 import { edit, refresh } from './state';
@@ -6,17 +6,40 @@ import type { AudioTrackInfo } from './types';
 
 const LOAD_TIMEOUT_MS = 15_000;
 const DRIFT_SECONDS = 0.08;
+const WINDOW_STEP_SECONDS = 45;
 
 interface TrackState {
   info: AudioTrackInfo;
   element: HTMLAudioElement;
 }
 
+interface PreviewWindow {
+  start: number;
+  duration: number;
+  tracks: TrackState[];
+}
+
+interface WindowRequest {
+  path: string;
+  start: number;
+  generation: number;
+  expected: AudioTrackInfo[];
+}
+
 let video: HTMLVideoElement | null = null;
-let tracks: TrackState[] = [];
+let active: PreviewWindow | null = null;
+let standby: PreviewWindow | null = null;
 let status: string | null = null;
 let generation = 0;
 let loadedPath: string | null = null;
+let desiredTime = 0;
+let wanted: WindowRequest | null = null;
+let loading: Promise<void> | null = null;
+let failedStart: number | null = null;
+let meterFrame = 0;
+let meterTime = 0;
+const levels = new Map<number, number>();
+const levelListeners = new Set<(levels: ReadonlyMap<number, number>) => void>();
 
 function mediaTracks(): AudioTrackInfo[] {
   return edit.media?.audioTracks ?? [];
@@ -34,45 +57,38 @@ export function trackPreviewStatus(): string | null {
   return status;
 }
 
-export async function loadTrackPreviews(path: string): Promise<void> {
-  const expected = mediaTracks();
-  const loadGeneration = ++generation;
-  disposeElements();
+export function onTrackLevels(listener: (levels: ReadonlyMap<number, number>) => void): () => void {
+  levelListeners.add(listener);
+  listener(levels);
+  scheduleMeters();
+  return () => {
+    levelListeners.delete(listener);
+    if (levelListeners.size === 0) stopMeters();
+  };
+}
 
-  if (expected.length <= 1) {
+export async function loadTrackPreviews(path: string): Promise<void> {
+  generation += 1;
+  wanted = null;
+  disposeWindows();
+  failedStart = null;
+  desiredTime = video?.currentTime ?? 0;
+  if (!hasTrackPreview()) {
     setStatus(null);
     syncTrackPreview();
     return;
   }
-
+  loadedPath = path;
   setStatus('Preparing audio preview...');
   syncTrackPreview();
-
-  try {
-    const paths = await makeAudioPreviews(path);
-    if (loadGeneration !== generation || edit.media?.path !== path) return;
-    if (paths.length < expected.length) throw new Error('Audio preview returned too few tracks');
-
-    loadedPath = path;
-    tracks = expected.map((info, ordinal) => createTrack(info, assetUrl(paths[ordinal])));
-    await Promise.all(tracks.map(({ element }) => waitUntilReady(element)));
-    if (loadGeneration !== generation || edit.media?.path !== path) return;
-
-    setStatus(null);
-    seekTrackPreview(video?.currentTime ?? 0);
-    syncTrackPreview();
-    if (video && !video.paused && !edit.reverse) playTrackPreview();
-  } catch {
-    if (loadGeneration !== generation) return;
-    disposeElements();
-    setStatus('Audio preview unavailable');
-    syncTrackPreview();
-  }
+  await requestWindow(windowStart(desiredTime));
 }
 
 export function clearTrackPreviews(): void {
   generation += 1;
-  disposeElements();
+  wanted = null;
+  disposeWindows();
+  failedStart = null;
   setStatus(null);
   syncTrackPreview();
 }
@@ -81,74 +97,159 @@ export function syncTrackPreview(): void {
   if (!video) return;
   const multitrack = hasTrackPreview();
   video.muted = multitrack || edit.mute;
-  if (!multitrack) return;
-  if (loadedPath !== edit.media?.path) {
+  if (!multitrack || loadedPath !== edit.media?.path) {
     pauseTrackPreview();
     return;
   }
-
-  const edits = edit.audioTracks;
-  const rate = video.playbackRate;
-  for (const track of tracks) {
-    const trackEdit = edits.find((candidate) => candidate.index === track.info.index);
-    const gain = edit.mute || trackEdit?.mute
-      ? 0
-      : edit.volume * (trackEdit?.volume ?? 1) * (edit.normalize ? normalizeGain() : 1);
-    track.element.playbackRate = rate;
-    track.element.preservesPitch = true;
-    if (gain > 1) {
-      void enableElementBoost(track.element).then((attached) => {
-        if (attached) {
-          applyElementGain(track.element, currentGain(track.info.index));
-          refresh();
-        }
-      });
+  for (const track of active?.tracks ?? []) {
+    if (track.element.playbackRate !== video.playbackRate) {
+      track.element.playbackRate = video.playbackRate;
     }
-    applyElementGain(track.element, gain);
+    applyElementGain(track.element, currentGain(track.info.index));
   }
-
   if (edit.reverse) pauseTrackPreview();
 }
 
 export function playTrackPreview(): void {
   if (!hasTrackPreview() || loadedPath !== edit.media?.path || edit.reverse) return;
+  desiredTime = video?.currentTime ?? 0;
+  failedStart = null;
+  ensureWindow(desiredTime);
+  if (!contains(active, desiredTime)) return;
   syncTrackPreview();
-  const at = video?.currentTime ?? 0;
+  alignTracks(desiredTime);
   const playGeneration = generation;
-  for (const { element } of tracks) {
-    if (Math.abs(element.currentTime - at) > DRIFT_SECONDS) element.currentTime = at;
+  for (const { element } of active?.tracks ?? []) {
+    void enableElementBoost(element).then((attached) => {
+      if (attached && active?.tracks.some((track) => track.element === element)) syncTrackPreview();
+    });
+    if (!element.paused) continue;
     void element.play().catch((error: unknown) => {
       if (error instanceof DOMException && error.name === 'AbortError') return;
-      if (playGeneration !== generation || !tracks.some((track) => track.element === element)) return;
+      if (playGeneration !== generation || !active?.tracks.some((track) => track.element === element)) return;
       pauseTrackPreview();
       setStatus('Audio preview unavailable');
     });
   }
+  scheduleMeters();
 }
 
 export function pauseTrackPreview(): void {
-  for (const { element } of tracks) element.pause();
+  for (const { element } of active?.tracks ?? []) element.pause();
+  stopMeters();
+  clearLevels();
 }
 
 export function seekTrackPreview(time: number): void {
-  for (const { element } of tracks) {
-    if (Number.isFinite(element.duration)) {
-      element.currentTime = Math.min(Math.max(time, 0), element.duration);
+  desiredTime = time;
+  failedStart = null;
+  if (edit.reverse) return;
+  ensureWindow(time);
+  alignTracks(time);
+  if (video && !video.paused && contains(active, time)) playTrackPreview();
+}
+
+export function tickTrackPreview(time: number): void {
+  if (!video || video.paused || edit.reverse || !hasTrackPreview()) return;
+  desiredTime = time;
+  ensureWindow(time);
+  alignTracks(time);
+  syncTrackPreview();
+}
+
+function windowStart(time: number): number {
+  return Math.floor(Math.max(0, time) / WINDOW_STEP_SECONDS) * WINDOW_STEP_SECONDS;
+}
+
+function contains(window: PreviewWindow | null, time: number): boolean {
+  return window !== null && time >= window.start && time < window.start + window.duration;
+}
+
+function ensureWindow(time: number): void {
+  if (!hasTrackPreview() || loadedPath !== edit.media?.path) return;
+  if (contains(standby, time)) activateStandby();
+  if (!contains(active, time)) {
+    pauseTrackPreview();
+    if (failedStart !== windowStart(time)) setStatus('Preparing audio preview...');
+    void requestWindow(windowStart(time));
+    return;
+  }
+  const current = active!;
+  const lead = Math.max(30, (video?.playbackRate ?? 1) * 3);
+  const nextStart = current.start + WINDOW_STEP_SECONDS;
+  const mediaEnd = edit.media?.duration ?? current.start + current.duration;
+  if (time >= current.start + current.duration - lead && nextStart < mediaEnd) {
+    void requestWindow(nextStart);
+  }
+}
+
+function requestWindow(start: number): Promise<void> {
+  const path = loadedPath;
+  if (!path || !hasTrackPreview() || failedStart === start
+    || active?.start === start || standby?.start === start) return Promise.resolve();
+  if (wanted?.path !== path || wanted.start !== start || wanted.generation !== generation) {
+    wanted = { path, start, generation, expected: [...mediaTracks()] };
+  }
+  loading ??= drainRequests().finally(() => { loading = null; });
+  return loading;
+}
+
+async function drainRequests(): Promise<void> {
+  while (wanted) {
+    const request = wanted;
+    let created: TrackState[] = [];
+    try {
+      const result = await makeAudioPreviews(request.path, request.start);
+      if (request !== wanted || request.generation !== generation) continue;
+      if (result.paths.length < request.expected.length || result.duration <= 0) {
+        throw new Error('Audio preview returned incomplete tracks');
+      }
+      created = request.expected.map((info, ordinal) => createTrack(info, assetUrl(result.paths[ordinal])));
+      await Promise.all(created.map(({ element }) => waitUntilReady(element)));
+      if (request !== wanted || request.generation !== generation) {
+        disposeTracks(created);
+        continue;
+      }
+      disposeTracks(standby?.tracks ?? []);
+      standby = { start: result.start, duration: result.duration, tracks: created };
+      created = [];
+      wanted = null;
+      if (contains(standby, desiredTime)) activateStandby();
+    } catch {
+      disposeTracks(created);
+      if (request !== wanted || request.generation !== generation) continue;
+      wanted = null;
+      failedStart = request.start;
+      if (!contains(active, desiredTime)) setStatus('Audio preview unavailable');
     }
   }
 }
 
-export function tickTrackPreview(time: number): void {
-  if (!video || video.paused || edit.reverse) return;
-  for (const { element } of tracks) {
-    if (Math.abs(element.currentTime - time) > DRIFT_SECONDS) element.currentTime = time;
-  }
+function activateStandby(): void {
+  if (!standby) return;
+  disposeTracks(active?.tracks ?? []);
+  active = standby;
+  standby = null;
+  setStatus(null);
   syncTrackPreview();
+  alignTracks(desiredTime);
+  if (video && !video.paused && !edit.reverse) playTrackPreview();
+}
+
+function alignTracks(time: number): void {
+  if (!contains(active, time)) return;
+  const localTime = time - active!.start;
+  for (const { element } of active!.tracks) {
+    if (Math.abs(element.currentTime - localTime) > DRIFT_SECONDS) {
+      element.currentTime = Math.min(localTime, element.duration);
+    }
+  }
 }
 
 function createTrack(info: AudioTrackInfo, url: string): TrackState {
   const element = document.createElement('audio');
   element.preload = 'auto';
+  element.crossOrigin = 'anonymous';
   element.preservesPitch = true;
   element.src = url;
   element.load();
@@ -161,7 +262,6 @@ function waitUntilReady(element: HTMLAudioElement): Promise<void> {
       resolve();
       return;
     }
-
     let timer = 0;
     const finish = (error?: Error) => {
       window.clearTimeout(timer);
@@ -185,15 +285,51 @@ function currentGain(index: number): number {
     : edit.volume * (track?.volume ?? 1) * (edit.normalize ? normalizeGain() : 1);
 }
 
-function disposeElements(): void {
+function disposeTracks(tracks: TrackState[]): void {
   for (const { element } of tracks) {
     element.pause();
     disposeElementGain(element);
     element.removeAttribute('src');
     element.load();
   }
-  tracks = [];
+}
+
+function disposeWindows(): void {
+  disposeTracks(active?.tracks ?? []);
+  disposeTracks(standby?.tracks ?? []);
+  active = null;
+  standby = null;
   loadedPath = null;
+  stopMeters();
+  clearLevels();
+}
+
+function scheduleMeters(): void {
+  if (meterFrame || !levelListeners.size || !active || !video || video.paused || edit.reverse) return;
+  meterFrame = requestAnimationFrame(updateMeters);
+}
+
+function updateMeters(now: number): void {
+  meterFrame = 0;
+  const decay = Math.exp(-Math.min(100, now - meterTime) / 160);
+  meterTime = now;
+  for (const { info, element } of active?.tracks ?? []) {
+    levels.set(info.index, Math.max(elementLevel(element), (levels.get(info.index) ?? 0) * decay));
+  }
+  for (const listener of levelListeners) listener(levels);
+  scheduleMeters();
+}
+
+function stopMeters(): void {
+  if (meterFrame) cancelAnimationFrame(meterFrame);
+  meterFrame = 0;
+  meterTime = 0;
+}
+
+function clearLevels(): void {
+  levels.clear();
+  for (const info of mediaTracks()) levels.set(info.index, 0);
+  for (const listener of levelListeners) listener(levels);
 }
 
 function setStatus(next: string | null): void {

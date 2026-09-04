@@ -102,8 +102,14 @@ export function makePreviewProxy(path: string): Promise<string> {
   return invoke<string>('make_preview_proxy', { path });
 }
 
-export function makeAudioPreviews(path: string): Promise<string[]> {
-  return invoke<string[]>('make_audio_previews', { path });
+export interface AudioPreviewWindow {
+  paths: string[];
+  start: number;
+  duration: number;
+}
+
+export function makeAudioPreviews(path: string, start: number): Promise<AudioPreviewWindow> {
+  return invoke<AudioPreviewWindow>('make_audio_previews', { path, start });
 }
 
 export function copyFileToClipboard(path: string): Promise<void> {

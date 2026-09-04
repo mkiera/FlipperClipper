@@ -13,7 +13,7 @@ import {
   tickTrackPreview,
 } from './track-preview';
 
-export { loadTrackPreviews, trackPreviewStatus } from './track-preview';
+export { loadTrackPreviews, onTrackLevels, trackPreviewStatus } from './track-preview';
 
 const PREVIEW_TIMEOUT_MS = 4000;
 
