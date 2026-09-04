@@ -19,6 +19,7 @@ import { enabledIds, toEffectsJob } from './effects';
 import { toggleEffectsPanel } from './effectspanel';
 import { ensureMeasured } from './loudness';
 import { recordError } from './devpanel';
+import { initMixerWindowResize, type MixerWindowResize } from './mixer-window';
 import {
   AUDIO_FORMATS,
   OUTPUT_HEIGHTS,
@@ -91,6 +92,8 @@ let audioTracksToggle!: HTMLButtonElement;
 let audioTracksCount!: HTMLElement;
 let audioTracksOpen = false;
 let audioTrackMedia: typeof edit.media = null;
+let mixerWindowResize: MixerWindowResize | null = null;
+let audioTracksTransition = false;
 let audioOnlyBtn!: HTMLButtonElement;
 let formatSelect!: HTMLSelectElement;
 let qualitySelect!: HTMLSelectElement;
@@ -156,14 +159,12 @@ export function initControls(controlsDeps: ControlsDeps): void {
   audioTrackControls = el('audio-track-controls');
   audioTracksToggle = el<HTMLButtonElement>('audio-tracks-toggle');
   audioTracksCount = el('audio-tracks-count');
-  audioTracksToggle.addEventListener('click', () => {
-    audioTracksOpen = !audioTracksOpen;
-    renderAudioTracks();
-  });
+  audioTracksToggle.addEventListener('click', () => void toggleAudioTracks());
   audioTrackStatus = document.createElement('span');
   audioTrackStatus.className = 'audio-track-status';
   audioTrackStatus.setAttribute('role', 'status');
   audioTrackControls.appendChild(audioTrackStatus);
+  mixerWindowResize = initMixerWindowResize();
   onTrackLevels(renderAudioLevels);
   audioOnlyBtn = el<HTMLButtonElement>('audio-only-btn');
   formatSelect = el<HTMLSelectElement>('format-select');
@@ -341,9 +342,14 @@ function toggleAudioOnly(): void {
 
 function renderAudioTracks(): void {
   if (audioTrackMedia !== edit.media) {
+    const wasOpen = audioTracksOpen;
     audioTrackMedia = edit.media;
     audioTracksOpen = false;
     audioTrackLevels.clear();
+    if (wasOpen) {
+      const releaseWorkspace = pinWorkspace();
+      void closeMixerAfterMediaChange(releaseWorkspace);
+    }
   }
   const tracks = (edit.media?.audioTracks ?? []).filter((track) => track.index >= 0 && track.index < 6);
   const showTracks = tracks.length > 1;
@@ -395,6 +401,68 @@ function renderAudioTracks(): void {
     controls.volume.style.setProperty('--track-volume', `${Math.min(percent, 200) / 2}%`);
     setTrackMeter(controls, audioTrackLevels.get(track.index) ?? 0, edit.mute || setting.mute);
     if (document.activeElement !== controls.input) controls.input.value = String(percent);
+  }
+}
+
+async function toggleAudioTracks(): Promise<void> {
+  if (audioTracksTransition) return;
+  audioTracksTransition = true;
+  const releaseWorkspace = pinWorkspace();
+  if (audioTracksOpen) {
+    try {
+      audioTracksOpen = false;
+      renderAudioTracks();
+      await mixerWindowResize?.close();
+      await nextFrame();
+    } finally {
+      releaseWorkspace();
+      audioTracksTransition = false;
+    }
+    return;
+  }
+
+  try {
+    const controls = document.getElementById('controls');
+    const closedHeight = controls?.getBoundingClientRect().height ?? 0;
+    audioTracksOpen = true;
+    renderAudioTracks();
+    audioTrackControls.style.visibility = 'hidden';
+    await nextFrame();
+    const addedHeight = (controls?.getBoundingClientRect().height ?? closedHeight) - closedHeight;
+    await mixerWindowResize?.open(addedHeight);
+    audioTrackControls.style.visibility = '';
+    await nextFrame();
+  } finally {
+    audioTrackControls.style.visibility = '';
+    releaseWorkspace();
+    audioTracksTransition = false;
+  }
+}
+
+function pinWorkspace(): () => void {
+  const workspace = document.getElementById('workspace');
+  if (!workspace) return () => {};
+  const flex = workspace.style.flex;
+  const height = workspace.style.height;
+  const pixelHeight = workspace.getBoundingClientRect().height;
+  workspace.style.flex = `0 0 ${pixelHeight}px`;
+  workspace.style.height = `${pixelHeight}px`;
+  return () => {
+    workspace.style.flex = flex;
+    workspace.style.height = height;
+  };
+}
+
+function nextFrame(): Promise<void> {
+  return new Promise((resolve) => requestAnimationFrame(() => resolve()));
+}
+
+async function closeMixerAfterMediaChange(releaseWorkspace: () => void): Promise<void> {
+  try {
+    await mixerWindowResize?.close();
+    await nextFrame();
+  } finally {
+    releaseWorkspace();
   }
 }
 

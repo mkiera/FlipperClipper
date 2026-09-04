@@ -129,6 +129,24 @@ export function setMinWindowSize(width: number, height: number): Promise<void> {
   return invoke<void>('set_min_window_size', { width, height });
 }
 
+export interface MixerWindowResize {
+  addedHeight: number;
+  originalY: number | null;
+  openedY: number | null;
+}
+
+export function growWindowForMixer(addedHeight: number): Promise<MixerWindowResize> {
+  return invoke<MixerWindowResize>('grow_window_for_mixer', { addedHeight });
+}
+
+export function shrinkWindowAfterMixer(
+  addedHeight: number,
+  originalY: number | null,
+  openedY: number | null,
+): Promise<void> {
+  return invoke<void>('shrink_window_after_mixer', { addedHeight, originalY, openedY });
+}
+
 export function installFfmpeg(): Promise<void> {
   return invoke<void>('install_ffmpeg');
 }

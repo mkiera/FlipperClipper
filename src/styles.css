@@ -365,6 +365,7 @@ input[type='range']:disabled::-webkit-slider-thumb {
 }
 
 #audio-track-controls {
+  position: relative;
   flex: 1 0 100%;
   min-width: 0;
   max-height: min(300px, 40vh);
@@ -465,9 +466,17 @@ input[type='range']:disabled::-webkit-slider-thumb {
 }
 
 .audio-track-status {
-  display: block;
-  padding: 4px 0 8px;
-  color: var(--fg-dim);
+  position: fixed;
+  top: 14px;
+  right: 14px;
+  z-index: 45;
+  max-width: min(320px, calc(100vw - 28px));
+  padding: 5px 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--float);
+  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.3);
+  color: var(--fg);
   font-size: 12px;
 }
 

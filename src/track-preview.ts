@@ -5,6 +5,8 @@ import { edit, refresh } from './state';
 import type { AudioTrackInfo } from './types';
 
 const LOAD_TIMEOUT_MS = 15_000;
+const PREPARING_DELAY_MS = 5000;
+const PREPARING_STATUS = 'Preparing audio preview...';
 const DRIFT_SECONDS = 0.08;
 const WINDOW_STEP_SECONDS = 45;
 
@@ -24,6 +26,7 @@ interface WindowRequest {
   start: number;
   generation: number;
   expected: AudioTrackInfo[];
+  slow: boolean;
 }
 
 let video: HTMLVideoElement | null = null;
@@ -36,6 +39,7 @@ let desiredTime = 0;
 let wanted: WindowRequest | null = null;
 let loading: Promise<void> | null = null;
 let failedStart: number | null = null;
+let preparingTimer = 0;
 let meterFrame = 0;
 let meterTime = 0;
 const levels = new Map<number, number>();
@@ -79,7 +83,7 @@ export async function loadTrackPreviews(path: string): Promise<void> {
     return;
   }
   loadedPath = path;
-  setStatus('Preparing audio preview...');
+  setStatus(null);
   syncTrackPreview();
   await requestWindow(windowStart(desiredTime));
 }
@@ -98,6 +102,7 @@ export function syncTrackPreview(): void {
   const multitrack = hasTrackPreview();
   video.muted = multitrack || edit.mute;
   if (!multitrack || loadedPath !== edit.media?.path) {
+    clearPreparingStatus();
     pauseTrackPreview();
     return;
   }
@@ -128,6 +133,7 @@ export function playTrackPreview(): void {
       if (error instanceof DOMException && error.name === 'AbortError') return;
       if (playGeneration !== generation || !active?.tracks.some((track) => track.element === element)) return;
       pauseTrackPreview();
+      clearPreparingStatus();
       setStatus('Audio preview unavailable');
     });
   }
@@ -170,10 +176,11 @@ function ensureWindow(time: number): void {
   if (contains(standby, time)) activateStandby();
   if (!contains(active, time)) {
     pauseTrackPreview();
-    if (failedStart !== windowStart(time)) setStatus('Preparing audio preview...');
     void requestWindow(windowStart(time));
+    updatePreparingStatus();
     return;
   }
+  updatePreparingStatus();
   const current = active!;
   const lead = Math.max(30, (video?.playbackRate ?? 1) * 3);
   const nextStart = current.start + WINDOW_STEP_SECONDS;
@@ -188,7 +195,16 @@ function requestWindow(start: number): Promise<void> {
   if (!path || !hasTrackPreview() || failedStart === start
     || active?.start === start || standby?.start === start) return Promise.resolve();
   if (wanted?.path !== path || wanted.start !== start || wanted.generation !== generation) {
-    wanted = { path, start, generation, expected: [...mediaTracks()] };
+    clearPreparingStatus();
+    setStatus(null);
+    const request = { path, start, generation, expected: [...mediaTracks()], slow: false };
+    wanted = request;
+    preparingTimer = window.setTimeout(() => {
+      preparingTimer = 0;
+      if (wanted !== request || request.generation !== generation || edit.media?.path !== request.path) return;
+      request.slow = true;
+      updatePreparingStatus();
+    }, PREPARING_DELAY_MS);
   }
   loading ??= drainRequests().finally(() => { loading = null; });
   return loading;
@@ -214,11 +230,13 @@ async function drainRequests(): Promise<void> {
       standby = { start: result.start, duration: result.duration, tracks: created };
       created = [];
       wanted = null;
+      clearPreparingStatus();
       if (contains(standby, desiredTime)) activateStandby();
     } catch {
       disposeTracks(created);
       if (request !== wanted || request.generation !== generation) continue;
       wanted = null;
+      clearPreparingStatus();
       failedStart = request.start;
       if (!contains(active, desiredTime)) setStatus('Audio preview unavailable');
     }
@@ -295,6 +313,7 @@ function disposeTracks(tracks: TrackState[]): void {
 }
 
 function disposeWindows(): void {
+  clearPreparingStatus();
   disposeTracks(active?.tracks ?? []);
   disposeTracks(standby?.tracks ?? []);
   active = null;
@@ -330,6 +349,19 @@ function clearLevels(): void {
   levels.clear();
   for (const info of mediaTracks()) levels.set(info.index, 0);
   for (const listener of levelListeners) listener(levels);
+}
+
+function clearPreparingStatus(): void {
+  window.clearTimeout(preparingTimer);
+  preparingTimer = 0;
+  if (status === PREPARING_STATUS) setStatus(null);
+}
+
+function updatePreparingStatus(): void {
+  const needed = wanted?.slow && wanted.generation === generation
+    && wanted.path === edit.media?.path && !contains(active, desiredTime) && !contains(standby, desiredTime);
+  if (needed && status !== 'Audio preview unavailable') setStatus(PREPARING_STATUS);
+  else if (status === PREPARING_STATUS) setStatus(null);
 }
 
 function setStatus(next: string | null): void {

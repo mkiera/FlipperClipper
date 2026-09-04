@@ -68,6 +68,29 @@ async function harness() {
   const code = ts.transpileModule(source, {
     compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2020 },
   }).outputText;
+  let clockTime = 0;
+  let timerId = 0;
+  const timers = new Map();
+  const clock = {
+    setTimeout(callback, delay) {
+      const id = ++timerId;
+      timers.set(id, { callback, at: clockTime + delay });
+      return id;
+    },
+    clearTimeout(id) { timers.delete(id); },
+    advance(milliseconds) {
+      const target = clockTime + milliseconds;
+      while (true) {
+        const next = [...timers.entries()].filter(([, timer]) => timer.at <= target)
+          .sort((a, b) => a[1].at - b[1].at)[0];
+        if (!next) break;
+        clockTime = next[1].at;
+        timers.delete(next[0]);
+        next[1].callback();
+      }
+      clockTime = target;
+    },
+  };
   const created = [];
   const gains = new Map();
   const disposed = [];
@@ -92,7 +115,7 @@ async function harness() {
     cancelAnimationFrame: (id) => frames.delete(id),
     setTimeout,
     clearTimeout,
-    window: { setTimeout, clearTimeout },
+    window: clock,
     document: {
       createElement() {
         const audio = new FakeAudio();
@@ -135,7 +158,7 @@ async function harness() {
   await main.evaluate();
   const video = new FakeAudio();
   main.namespace.initTrackPreview(video);
-  return { api: main.namespace, created, disposed, edit, extractions, gains, video, frames, readings, attachments };
+  return { api: main.namespace, created, disposed, edit, extractions, gains, video, frames, readings, attachments, clock, timers };
 }
 
 function media(path) {
@@ -248,7 +271,7 @@ test('ignores stale extraction and playback failures from an old clip', async ()
   void run.api.loadTrackPreviews('third.mkv');
   rejectedPlay.reject(new Error('old decoder failed'));
   await Promise.resolve();
-  assert.equal(run.api.trackPreviewStatus(), 'Preparing audio preview...');
+  assert.equal(run.api.trackPreviewStatus(), null);
 });
 
 test('coalesces rapid seeks into one pending window and uses local timestamps', async () => {
@@ -342,4 +365,97 @@ test('single track media keeps native playback and skips previews and meter work
   assert.equal(run.created.length, 0);
   assert.equal(run.frames.size, 0);
   assert.equal(run.video.muted, false);
+});
+
+
+test('fast audio windows never publish preparation status', async () => {
+  const run = await harness();
+  run.edit.media = media('fast.mp4');
+  const loading = run.api.loadTrackPreviews('fast.mp4');
+  assert.equal(run.api.trackPreviewStatus(), null);
+  run.clock.advance(4999);
+  assert.equal(run.api.trackPreviewStatus(), null);
+  await finishLoad(run);
+  await loading;
+  run.clock.advance(10000);
+  assert.equal(run.api.trackPreviewStatus(), null);
+  assert.equal(run.timers.size, 0);
+  run.api.clearTrackPreviews();
+});
+
+test('a slow needed window reports preparation after five seconds and clears on success', async () => {
+  const run = await harness();
+  run.edit.media = media('slow.mp4');
+  const loading = run.api.loadTrackPreviews('slow.mp4');
+  run.clock.advance(4999);
+  assert.equal(run.api.trackPreviewStatus(), null);
+  run.clock.advance(1);
+  assert.equal(run.api.trackPreviewStatus(), 'Preparing audio preview...');
+  await finishLoad(run);
+  await loading;
+  assert.equal(run.api.trackPreviewStatus(), null);
+  assert.equal(run.timers.size, 0);
+});
+
+test('slow prefetch stays quiet while the active window covers playback', async () => {
+  const run = await harness();
+  run.edit.media = media('prefetch.mp4');
+  const loading = run.api.loadTrackPreviews('prefetch.mp4');
+  await finishLoad(run);
+  await loading;
+  run.video.paused = false;
+  run.video.currentTime = 30;
+  run.api.playTrackPreview();
+  run.clock.advance(5000);
+  assert.equal(run.api.trackPreviewStatus(), null);
+  run.video.currentTime = 61;
+  run.api.tickTrackPreview(61);
+  assert.equal(run.api.trackPreviewStatus(), 'Preparing audio preview...');
+  run.api.clearTrackPreviews();
+  assert.equal(run.api.trackPreviewStatus(), null);
+  assert.equal(run.timers.size, 0);
+});
+
+test('replacing requests resets the delay and failures retain the unavailable status', async () => {
+  const run = await harness();
+  run.edit.media = media('seek.mp4');
+  const loading = run.api.loadTrackPreviews('seek.mp4');
+  run.clock.advance(4000);
+  run.api.seekTrackPreview(200);
+  run.clock.advance(1000);
+  assert.equal(run.api.trackPreviewStatus(), null);
+  run.extractions[0].reject(new Error('stale failure'));
+  await new Promise((resolve) => setImmediate(resolve));
+  run.clock.advance(3999);
+  assert.equal(run.api.trackPreviewStatus(), null);
+  run.clock.advance(1);
+  assert.equal(run.api.trackPreviewStatus(), 'Preparing audio preview...');
+  run.extractions[1].reject(new Error('current failure'));
+  await loading;
+  assert.equal(run.api.trackPreviewStatus(), 'Audio preview unavailable');
+  assert.equal(run.timers.size, 0);
+  run.clock.advance(10000);
+  assert.equal(run.api.trackPreviewStatus(), 'Audio preview unavailable');
+  run.api.clearTrackPreviews();
+  assert.equal(run.api.trackPreviewStatus(), null);
+});
+
+test('media changes clear a slow status and prevent stale timer updates', async () => {
+  const run = await harness();
+  run.edit.media = media('first.mp4');
+  const loading = run.api.loadTrackPreviews('first.mp4');
+  run.clock.advance(5000);
+  assert.equal(run.api.trackPreviewStatus(), 'Preparing audio preview...');
+  run.edit.media = media('second.mp4');
+  const nextLoading = run.api.loadTrackPreviews('second.mp4');
+  assert.equal(run.api.trackPreviewStatus(), null);
+  run.clock.advance(4999);
+  assert.equal(run.api.trackPreviewStatus(), null);
+  run.api.clearTrackPreviews();
+  run.clock.advance(10000);
+  assert.equal(run.api.trackPreviewStatus(), null);
+  assert.equal(run.timers.size, 0);
+  run.extractions[0].reject(new Error('cleared'));
+  await loading;
+  await nextLoading;
 });

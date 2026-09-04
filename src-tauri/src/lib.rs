@@ -75,6 +75,8 @@ pub fn run() {
             sysutil::reveal_in_explorer,
             sysutil::app_version,
             sysutil::set_min_window_size,
+            sysutil::grow_window_for_mixer,
+            sysutil::shrink_window_after_mixer,
             sysutil::cli_file_path,
             ffmpeg::estimate_export_size,
             export::detect_encoder,

@@ -766,6 +766,126 @@ pub fn set_min_window_size(window: tauri::Window, width: f64, height: f64) -> Re
     Ok(())
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MixerWindowResize {
+    pub added_height: u32,
+    pub original_y: Option<i32>,
+    pub opened_y: Option<i32>,
+}
+
+#[tauri::command]
+pub fn grow_window_for_mixer(
+    window: tauri::Window,
+    added_height: f64,
+) -> Result<MixerWindowResize, String> {
+    if !added_height.is_finite() || added_height <= 0.0 {
+        return Ok(MixerWindowResize {
+            added_height: 0,
+            original_y: None,
+            opened_y: None,
+        });
+    }
+    if window.is_maximized().unwrap_or(false) || window.is_fullscreen().unwrap_or(false) {
+        return Ok(MixerWindowResize {
+            added_height: 0,
+            original_y: None,
+            opened_y: None,
+        });
+    }
+
+    let scale = window.scale_factor().unwrap_or(1.0);
+    let outer = window
+        .outer_size()
+        .map_err(|_| "The window size could not be read.".to_string())?;
+    let inner = window
+        .inner_size()
+        .map_err(|_| "The window size could not be read.".to_string())?;
+    let requested = (added_height * scale).ceil().max(0.0) as u32;
+    let position = window
+        .outer_position()
+        .map_err(|_| "The window position could not be read.".to_string())?;
+    let work_area = window
+        .current_monitor()
+        .ok()
+        .flatten()
+        .map(|monitor| {
+            let area = monitor.work_area();
+            (area.position.y, area.size.height)
+        });
+    let wanted_outer_height = outer.height.saturating_add(requested);
+    let (target_outer_height, opened_y) = match work_area {
+        Some((work_top, work_height)) => {
+            let work_top = i64::from(work_top);
+            let work_bottom = work_top + i64::from(work_height);
+            let wanted_bottom = i64::from(position.y) + i64::from(wanted_outer_height);
+            let shift = (wanted_bottom - work_bottom).max(0);
+            let opened_y = (i64::from(position.y) - shift).max(work_top);
+            let room = u32::try_from(work_bottom - opened_y).unwrap_or(outer.height);
+            (wanted_outer_height.min(room).max(outer.height), opened_y as i32)
+        }
+        None => (wanted_outer_height, position.y),
+    };
+    let frame_height = outer.height.saturating_sub(inner.height);
+    let target_inner_height = target_outer_height.saturating_sub(frame_height).max(1);
+    if opened_y != position.y {
+        window
+            .set_position(tauri::PhysicalPosition::new(position.x, opened_y))
+            .map_err(|_| "The window position could not be changed.".to_string())?;
+    }
+    if target_inner_height != inner.height {
+        if let Err(error) = window.set_size(tauri::PhysicalSize::new(inner.width, target_inner_height)) {
+            if opened_y != position.y {
+                let _ = window.set_position(tauri::PhysicalPosition::new(position.x, position.y));
+            }
+            return Err(error.to_string());
+        }
+    }
+    Ok(MixerWindowResize {
+        added_height: target_outer_height.saturating_sub(outer.height),
+        original_y: Some(position.y),
+        opened_y: Some(opened_y),
+    })
+}
+
+#[tauri::command]
+pub fn shrink_window_after_mixer(
+    window: tauri::Window,
+    added_height: u32,
+    original_y: Option<i32>,
+    opened_y: Option<i32>,
+) -> Result<(), String> {
+    if added_height == 0
+        || window.is_maximized().unwrap_or(false)
+        || window.is_fullscreen().unwrap_or(false)
+    {
+        return Ok(());
+    }
+    let outer = window
+        .outer_size()
+        .map_err(|_| "The window size could not be read.".to_string())?;
+    let inner = window
+        .inner_size()
+        .map_err(|_| "The window size could not be read.".to_string())?;
+    let frame_height = outer.height.saturating_sub(inner.height);
+    let target_outer_height = outer.height.saturating_sub(added_height).max(frame_height + 1);
+    let target_inner_height = target_outer_height.saturating_sub(frame_height).max(1);
+    window
+        .set_size(tauri::PhysicalSize::new(inner.width, target_inner_height))
+        .map_err(|_| "The window size could not be changed.".to_string())?;
+    if let (Some(original_y), Some(opened_y)) = (original_y, opened_y) {
+        if let Ok(position) = window.outer_position() {
+            if position.y != opened_y {
+                return Ok(());
+            }
+            window
+                .set_position(tauri::PhysicalPosition::new(position.x, original_y))
+                .map_err(|_| "The window position could not be changed.".to_string())?;
+        }
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub fn app_version(app: AppHandle) -> String {
     app.package_info().version.to_string()
