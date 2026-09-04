@@ -87,6 +87,10 @@ let volumeSlider!: HTMLInputElement;
 let volumeInput!: HTMLInputElement;
 let audioTrackControls!: HTMLElement;
 let audioTrackStatus!: HTMLElement;
+let audioTracksToggle!: HTMLButtonElement;
+let audioTracksCount!: HTMLElement;
+let audioTracksOpen = false;
+let audioTrackMedia: typeof edit.media = null;
 let audioOnlyBtn!: HTMLButtonElement;
 let formatSelect!: HTMLSelectElement;
 let qualitySelect!: HTMLSelectElement;
@@ -148,6 +152,12 @@ export function initControls(controlsDeps: ControlsDeps): void {
   volumeSlider = el<HTMLInputElement>('volume-slider');
   volumeInput = el<HTMLInputElement>('volume-input');
   audioTrackControls = el('audio-track-controls');
+  audioTracksToggle = el<HTMLButtonElement>('audio-tracks-toggle');
+  audioTracksCount = el('audio-tracks-count');
+  audioTracksToggle.addEventListener('click', () => {
+    audioTracksOpen = !audioTracksOpen;
+    renderAudioTracks();
+  });
   audioTrackStatus = document.createElement('span');
   audioTrackStatus.className = 'audio-track-status';
   audioTrackStatus.setAttribute('role', 'status');
@@ -327,10 +337,17 @@ function toggleAudioOnly(): void {
 }
 
 function renderAudioTracks(): void {
+  if (audioTrackMedia !== edit.media) {
+    audioTrackMedia = edit.media;
+    audioTracksOpen = false;
+  }
   const tracks = (edit.media?.audioTracks ?? []).filter((track) => track.index >= 0 && track.index < 6);
   const showTracks = tracks.length > 1;
-  audioTrackControls.hidden = !showTracks;
-  if (!showTracks) return;
+  audioTracksToggle.hidden = !showTracks;
+  audioTracksToggle.setAttribute('aria-expanded', String(showTracks && audioTracksOpen));
+  audioTracksCount.textContent = String(tracks.length);
+  audioTrackControls.hidden = !showTracks || !audioTracksOpen;
+  if (audioTrackControls.hidden) return;
 
   const previewStatus = trackPreviewStatus();
   audioTrackStatus.hidden = previewStatus === null;
@@ -359,6 +376,8 @@ function renderAudioTracks(): void {
     const percent = Math.round(setting.volume * 100);
     const name = track.title?.trim() || `Track ${track.index + 1}`;
     controls.name.textContent = name;
+    controls.name.title = name;
+    controls.row.classList.toggle('is-muted', setting.mute);
     controls.volume.setAttribute('aria-label', `${name} volume`);
     controls.input.setAttribute('aria-label', `${name} volume percent`);
     controls.volume.disabled = edit.mute;
@@ -369,6 +388,7 @@ function renderAudioTracks(): void {
     controls.mute.setAttribute('aria-label', `${setting.mute ? 'Unmute' : 'Mute'} ${name}`);
     controls.mute.setAttribute('aria-pressed', String(setting.mute));
     controls.volume.value = String(Math.min(percent, 200));
+    controls.volume.style.setProperty('--track-volume', `${Math.min(percent, 200) / 2}%`);
     if (document.activeElement !== controls.input) controls.input.value = String(percent);
   }
 }
@@ -420,7 +440,13 @@ function createAudioTrackRow(index: number, title: string | null): AudioTrackRow
     updateAudioTrack(index, { mute: !(current?.mute ?? false) });
   });
 
-  row.append(label, volume, input, mute);
+  const value = document.createElement('div');
+  value.className = 'audio-track-value';
+  const unit = document.createElement('span');
+  unit.textContent = '%';
+  unit.setAttribute('aria-hidden', 'true');
+  value.append(input, unit);
+  row.append(label, volume, value, mute);
   return { row, name: label, volume, input, mute };
 }
 
