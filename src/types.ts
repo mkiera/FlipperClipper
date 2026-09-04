@@ -22,7 +22,21 @@ export interface MediaInfo {
   hasAudio: boolean;
   videoCodec: string;
   audioCodec: string | null;
+  audioTracks: AudioTrackInfo[];
   sizeBytes: number;
+}
+
+export interface AudioTrackInfo {
+  index: number;
+  title: string | null;
+  codec: string;
+  channels: number;
+}
+
+export interface AudioTrackSettings {
+  index: number;
+  volume: number;
+  mute: boolean;
 }
 
 export type VideoFormat = 'mp4' | 'mkv' | 'mov' | 'webm' | 'gif';
@@ -171,6 +185,7 @@ export interface ExportJob {
   normalize: boolean;
   /** 0 - 10. Above 1 is a boost the preview cannot show. */
   volume: number;
+  audioTracks: AudioTrackSettings[];
   format: ExportFormat;
   quality: QualityPreset;
   /** Decimal megabytes; only read when quality is 'fit'. */
@@ -197,6 +212,7 @@ export interface EditState {
   normalize: boolean;
   /** 0 - 10, 1 = unchanged. */
   volume: number;
+  audioTracks: AudioTrackSettings[];
   format: ExportFormat;
   /** UI only: swaps the format dropdown to AudioFormats. Not sent to Rust. */
   audioOnly: boolean;
@@ -404,6 +420,7 @@ export function isTrimOnly(state: EditState): boolean {
     !state.reverse &&
     !state.normalize &&
     state.volume === 1 &&
+    state.audioTracks.every((track) => track.volume === 1 && !track.mute) &&
     !scalesDown(state) &&
     state.videoKbps === null
   );

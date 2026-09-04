@@ -10,6 +10,7 @@ import {
   DEFAULT_SETTINGS,
   defaultFormatFor,
   type AppSettings,
+  type AudioTrackSettings,
   type EditState,
   type ExportFormat,
   type MediaInfo,
@@ -57,6 +58,7 @@ export const edit: EditState = {
   reverse: false,
   normalize: false,
   volume: 1,
+  audioTracks: [],
   format: 'mp4',
   audioOnly: false,
   targetMb: rememberedTargetMb() ?? settings.defaultTargetMb,
@@ -164,6 +166,7 @@ export function loadMedia(media: MediaInfo, src: string): void {
     reverse: false,
     normalize: false,
     volume: 1,
+    audioTracks: defaultAudioTracks(media),
     format,
     audioOnly,
     quality: rememberedQuality() ?? settings.defaultQuality,
@@ -180,6 +183,12 @@ export function loadMedia(media: MediaInfo, src: string): void {
     filmstrip: [],
   } satisfies Partial<UiState>);
   notify();
+}
+
+function defaultAudioTracks(media: MediaInfo): AudioTrackSettings[] {
+  return (media.audioTracks ?? [])
+    .filter((track) => track.index >= 0 && track.index < 6)
+    .map((track) => ({ index: track.index, volume: 1, mute: false }));
 }
 
 function seedOutputHeight(media: MediaInfo): OutputHeight {

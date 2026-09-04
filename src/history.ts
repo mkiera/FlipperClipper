@@ -39,6 +39,7 @@ const TRACKED = [
   'reverse',
   'normalize',
   'volume',
+  'audioTracks',
   'orientation',
   'effects',
 ] as const;
@@ -70,7 +71,20 @@ function snapshot(): EditSnapshot {
  *  object is replaced rather than mutated, so two snapshots share a reference exactly when
  *  nothing changed. */
 function changedKeys(a: EditSnapshot, b: EditSnapshot): string {
-  return TRACKED.filter((key) => a[key] !== b[key]).join(',');
+  return TRACKED.flatMap((key) => {
+    if (key !== 'audioTracks') return a[key] !== b[key] ? [key] : [];
+    const before = new Map(a.audioTracks.map((track) => [track.index, track]));
+    const after = new Map(b.audioTracks.map((track) => [track.index, track]));
+    return [...new Set([...before.keys(), ...after.keys()])]
+      .flatMap((index) => {
+        const oldTrack = before.get(index);
+        const newTrack = after.get(index);
+        const fields: string[] = [];
+        if (oldTrack?.volume !== newTrack?.volume) fields.push(`audioTracks:${index}:volume`);
+        if (oldTrack?.mute !== newTrack?.mute) fields.push(`audioTracks:${index}:mute`);
+        return fields;
+      });
+  }).join(',');
 }
 
 /** Called by state.ts before a patch lands, and again after. Splitting it in two is what lets

@@ -13,12 +13,13 @@ import {
   startExport,
 } from './ipc';
 import { edit, patchEdit, patchUi, refresh, rememberQuality, rememberTargetMb, settings, subscribe, ui } from './state';
-import { currentTime, onTime, togglePlay } from './player';
+import { currentTime, onTime, onTrackLevels, togglePlay, trackPreviewStatus } from './player';
 import { toggleCrop } from './crop';
 import { enabledIds, toEffectsJob } from './effects';
 import { toggleEffectsPanel } from './effectspanel';
 import { ensureMeasured } from './loudness';
 import { recordError } from './devpanel';
+import { initMixerWindowResize, type MixerWindowResize } from './mixer-window';
 import {
   AUDIO_FORMATS,
   OUTPUT_HEIGHTS,
@@ -85,6 +86,14 @@ let normalizeBtn!: HTMLButtonElement;
 let volumeGroup!: HTMLElement;
 let volumeSlider!: HTMLInputElement;
 let volumeInput!: HTMLInputElement;
+let audioTrackControls!: HTMLElement;
+let audioTrackStatus!: HTMLElement;
+let audioTracksToggle!: HTMLButtonElement;
+let audioTracksCount!: HTMLElement;
+let audioTracksOpen = false;
+let audioTrackMedia: typeof edit.media = null;
+let mixerWindowResize: MixerWindowResize | null = null;
+let audioTracksTransition = false;
 let audioOnlyBtn!: HTMLButtonElement;
 let formatSelect!: HTMLSelectElement;
 let qualitySelect!: HTMLSelectElement;
@@ -112,6 +121,17 @@ let estimateToken = 0;
 let estimateKey = '';
 
 let formatListIsAudio: boolean | null = null;
+const audioTrackRows = new Map<number, AudioTrackRow>();
+const audioTrackLevels = new Map<number, number>();
+
+interface AudioTrackRow {
+  row: HTMLElement;
+  name: HTMLElement;
+  meter: HTMLElement;
+  volume: HTMLInputElement;
+  input: HTMLInputElement;
+  mute: HTMLButtonElement;
+}
 
 function el<T extends HTMLElement>(id: string): T {
   const found = document.getElementById(id);
@@ -136,6 +156,16 @@ export function initControls(controlsDeps: ControlsDeps): void {
   volumeGroup = el('volume-group');
   volumeSlider = el<HTMLInputElement>('volume-slider');
   volumeInput = el<HTMLInputElement>('volume-input');
+  audioTrackControls = el('audio-track-controls');
+  audioTracksToggle = el<HTMLButtonElement>('audio-tracks-toggle');
+  audioTracksCount = el('audio-tracks-count');
+  audioTracksToggle.addEventListener('click', () => void toggleAudioTracks());
+  audioTrackStatus = document.createElement('span');
+  audioTrackStatus.className = 'audio-track-status';
+  audioTrackStatus.setAttribute('role', 'status');
+  audioTrackControls.appendChild(audioTrackStatus);
+  mixerWindowResize = initMixerWindowResize();
+  onTrackLevels(renderAudioLevels);
   audioOnlyBtn = el<HTMLButtonElement>('audio-only-btn');
   formatSelect = el<HTMLSelectElement>('format-select');
   qualitySelect = el<HTMLSelectElement>('quality-select');
@@ -283,7 +313,7 @@ export function toggleNormalize(): void {
   patchEdit({ normalize });
   // The gain is not known until the file has been measured, so the preview reaches its real
   // level a moment after the button lights up.
-  if (normalize && edit.media) void ensureMeasured(edit.media.path, refresh);
+  if (normalize && edit.media) void ensureMeasured(edit.media.path, refresh, edit.audioTracks);
 }
 
 export function toggleReverse(): void {
@@ -310,6 +340,218 @@ function toggleAudioOnly(): void {
   }
 }
 
+function renderAudioTracks(): void {
+  if (audioTrackMedia !== edit.media) {
+    const wasOpen = audioTracksOpen;
+    audioTrackMedia = edit.media;
+    audioTracksOpen = false;
+    audioTrackLevels.clear();
+    if (wasOpen) {
+      const releaseWorkspace = pinWorkspace();
+      void closeMixerAfterMediaChange(releaseWorkspace);
+    }
+  }
+  const tracks = (edit.media?.audioTracks ?? []).filter((track) => track.index >= 0 && track.index < 6);
+  const showTracks = tracks.length > 1;
+  audioTracksToggle.hidden = !showTracks;
+  audioTracksToggle.setAttribute('aria-expanded', String(showTracks && audioTracksOpen));
+  audioTracksCount.textContent = String(tracks.length);
+  audioTrackControls.hidden = !showTracks || !audioTracksOpen;
+  if (audioTrackControls.hidden) return;
+
+  const previewStatus = trackPreviewStatus();
+  audioTrackStatus.hidden = previewStatus === null;
+  audioTrackStatus.textContent = previewStatus ?? '';
+
+  const present = new Set(tracks.map((track) => track.index));
+  for (const [index, controls] of audioTrackRows) {
+    if (!present.has(index)) {
+      controls.row.remove();
+      audioTrackRows.delete(index);
+    }
+  }
+
+  for (const track of tracks) {
+    let controls = audioTrackRows.get(track.index);
+    if (!controls) {
+      controls = createAudioTrackRow(track.index, track.title);
+      audioTrackRows.set(track.index, controls);
+      audioTrackControls.appendChild(controls.row);
+    }
+    const setting = edit.audioTracks.find((item) => item.index === track.index) ?? {
+      index: track.index,
+      volume: 1,
+      mute: false,
+    };
+    const percent = Math.round(setting.volume * 100);
+    const name = track.title?.trim() || `Track ${track.index + 1}`;
+    controls.name.textContent = name;
+    controls.name.title = name;
+    controls.row.classList.toggle('is-muted', setting.mute);
+    controls.volume.setAttribute('aria-label', `${name} volume`);
+    controls.input.setAttribute('aria-label', `${name} volume percent`);
+    controls.volume.disabled = edit.mute;
+    controls.input.disabled = edit.mute;
+    controls.mute.disabled = edit.mute;
+    controls.mute.classList.toggle('active', setting.mute);
+    controls.mute.textContent = setting.mute ? 'Unmute' : 'Mute';
+    controls.mute.setAttribute('aria-label', `${setting.mute ? 'Unmute' : 'Mute'} ${name}`);
+    controls.mute.setAttribute('aria-pressed', String(setting.mute));
+    controls.volume.value = String(Math.min(percent, 200));
+    controls.volume.style.setProperty('--track-volume', `${Math.min(percent, 200) / 2}%`);
+    setTrackMeter(controls, audioTrackLevels.get(track.index) ?? 0, edit.mute || setting.mute);
+    if (document.activeElement !== controls.input) controls.input.value = String(percent);
+  }
+}
+
+async function toggleAudioTracks(): Promise<void> {
+  if (audioTracksTransition) return;
+  audioTracksTransition = true;
+  const releaseWorkspace = pinWorkspace();
+  if (audioTracksOpen) {
+    try {
+      audioTracksOpen = false;
+      renderAudioTracks();
+      await mixerWindowResize?.close();
+      await nextFrame();
+    } finally {
+      releaseWorkspace();
+      audioTracksTransition = false;
+    }
+    return;
+  }
+
+  try {
+    const controls = document.getElementById('controls');
+    const closedHeight = controls?.getBoundingClientRect().height ?? 0;
+    audioTracksOpen = true;
+    renderAudioTracks();
+    audioTrackControls.style.visibility = 'hidden';
+    await nextFrame();
+    const addedHeight = (controls?.getBoundingClientRect().height ?? closedHeight) - closedHeight;
+    await mixerWindowResize?.open(addedHeight);
+    audioTrackControls.style.visibility = '';
+    await nextFrame();
+  } finally {
+    audioTrackControls.style.visibility = '';
+    releaseWorkspace();
+    audioTracksTransition = false;
+  }
+}
+
+function pinWorkspace(): () => void {
+  const workspace = document.getElementById('workspace');
+  if (!workspace) return () => {};
+  const flex = workspace.style.flex;
+  const height = workspace.style.height;
+  const pixelHeight = workspace.getBoundingClientRect().height;
+  workspace.style.flex = `0 0 ${pixelHeight}px`;
+  workspace.style.height = `${pixelHeight}px`;
+  return () => {
+    workspace.style.flex = flex;
+    workspace.style.height = height;
+  };
+}
+
+function nextFrame(): Promise<void> {
+  return new Promise((resolve) => requestAnimationFrame(() => resolve()));
+}
+
+async function closeMixerAfterMediaChange(releaseWorkspace: () => void): Promise<void> {
+  try {
+    await mixerWindowResize?.close();
+    await nextFrame();
+  } finally {
+    releaseWorkspace();
+  }
+}
+
+function createAudioTrackRow(index: number, title: string | null): AudioTrackRow {
+  const row = document.createElement('div');
+  row.className = 'audio-track-row';
+  row.dataset.trackIndex = String(index);
+
+  const label = document.createElement('span');
+  label.className = 'audio-track-name';
+  label.textContent = title?.trim() || `Track ${index + 1}`;
+
+  const volume = document.createElement('input');
+  volume.type = 'range';
+  volume.min = '0';
+  volume.max = '200';
+  volume.step = '1';
+  volume.setAttribute('aria-label', `${label.textContent} volume`);
+
+  const slider = document.createElement('div');
+  slider.className = 'audio-track-slider';
+  const meter = document.createElement('span');
+  meter.className = 'audio-track-meter';
+  meter.setAttribute('aria-hidden', 'true');
+  slider.append(meter, volume);
+
+  const input = document.createElement('input');
+  input.className = 'audio-track-volume';
+  input.type = 'number';
+  input.min = '0';
+  input.max = String(VOLUME_MAX * 100);
+  input.step = '1';
+  input.setAttribute('aria-label', `${label.textContent} volume percent`);
+
+  const mute = document.createElement('button');
+  mute.className = 'btn small audio-track-mute';
+  mute.type = 'button';
+  mute.setAttribute('aria-label', `Mute ${label.textContent}`);
+
+  volume.addEventListener('input', () => updateAudioTrack(index, { volume: Number(volume.value) / 100 }));
+  input.addEventListener('change', () => {
+    const text = input.value.trim();
+    const raw = Number(text);
+    const current = edit.audioTracks.find((track) => track.index === index)?.volume ?? 1;
+    if (text === '' || !Number.isFinite(raw)) {
+      input.value = String(Math.round(current * 100));
+      return;
+    }
+    const percent = Math.round(clamp(raw, 0, VOLUME_MAX * 100));
+    if (percent !== raw) input.value = String(percent);
+    updateAudioTrack(index, { volume: percent / 100 });
+  });
+  mute.addEventListener('click', () => {
+    const current = edit.audioTracks.find((track) => track.index === index);
+    updateAudioTrack(index, { mute: !(current?.mute ?? false) });
+  });
+
+  const value = document.createElement('div');
+  value.className = 'audio-track-value';
+  const unit = document.createElement('span');
+  unit.textContent = '%';
+  unit.setAttribute('aria-hidden', 'true');
+  value.append(input, unit);
+  row.append(label, slider, value, mute);
+  return { row, name: label, meter, volume, input, mute };
+}
+
+function renderAudioLevels(levels: ReadonlyMap<number, number>): void {
+  audioTrackLevels.clear();
+  for (const [index, level] of levels) audioTrackLevels.set(index, clamp01(level));
+  for (const [index, controls] of audioTrackRows) {
+    const setting = edit.audioTracks.find((track) => track.index === index);
+    setTrackMeter(controls, audioTrackLevels.get(index) ?? 0, edit.mute || Boolean(setting?.mute));
+  }
+}
+
+function setTrackMeter(controls: AudioTrackRow, level: number, muted: boolean): void {
+  controls.meter.style.width = `${muted ? 0 : clamp01(level) * 100}%`;
+}
+
+function updateAudioTrack(index: number, patch: Partial<{ volume: number; mute: boolean }>): void {
+  const existing = edit.audioTracks.find((track) => track.index === index) ?? { index, volume: 1, mute: false };
+  const next = { ...existing, ...patch };
+  patchEdit({
+    audioTracks: edit.audioTracks.map((track) => (track.index === index ? next : track)),
+  });
+  if (edit.normalize && edit.media) void ensureMeasured(edit.media.path, refresh, edit.audioTracks);
+}
+
 /* --- Rendering --- */
 
 function rebuildFormatOptions(): void {
@@ -334,6 +576,8 @@ function fitAllowed(format: ExportFormat): boolean {
 function render(): void {
   const hasMedia = edit.media !== null;
   const hasAudio = edit.media?.hasAudio ?? false;
+
+  if (edit.normalize && edit.media) void ensureMeasured(edit.media.path, refresh, edit.audioTracks);
 
   // Corrected here, not in the handlers: loadMedia can arrive holding a remembered 'fit'.
   if (edit.quality === 'fit' && !fitAllowed(edit.format)) {
@@ -394,6 +638,8 @@ function render(): void {
   volumeSlider.value = String(Math.min(volumePercent, 200));
   // Left alone while being typed in, the same as the speed input.
   if (document.activeElement !== volumeInput) volumeInput.value = String(volumePercent);
+
+  renderAudioTracks();
 
   audioOnlyBtn.disabled = !hasMedia || !hasAudio || edit.mute;
   audioOnlyBtn.classList.toggle('active', edit.audioOnly);
@@ -475,6 +721,7 @@ function estimateSignature(): string {
     edit.mute,
     edit.reverse,
     edit.volume,
+    edit.audioTracks.map((track) => `${track.index}:${track.volume}:${track.mute}`).join(','),
     edit.format,
     edit.audioOnly,
     edit.quality,
@@ -567,6 +814,7 @@ function buildJob(input: string, output: string): ExportJob {
     reverse: edit.reverse,
     normalize: edit.normalize,
     volume: edit.volume,
+    audioTracks: edit.audioTracks.length > 1 ? edit.audioTracks : [],
     format: edit.format,
     quality: edit.quality,
     targetMb: edit.quality === 'fit' ? edit.targetMb : null,

@@ -30,13 +30,22 @@ const PROBE_RATE = 8000;
 const PROBE_SECONDS = 2;
 const PROBE_AMPLITUDE = 0.5;
 
-let context: AudioContext | null = null;
-let boost: GainNode | null = null;
-let attaching = false;
+interface ElementGain {
+  context: AudioContext;
+  node: GainNode;
+  source: MediaElementAudioSourceNode;
+  analyser: AnalyserNode;
+  samples: Float32Array;
+}
 
-/** null until the probe has run. Whether a graph carries audio is a property of the machine,
- *  so the answer holds for the session either way. */
+const gains = new WeakMap<HTMLMediaElement, ElementGain>();
+const attaching = new WeakSet<HTMLMediaElement>();
+const disposed = new WeakSet<HTMLMediaElement>();
+let anyBoost = false;
+let sharedContext: AudioContext | null = null;
+
 let supported: boolean | null = null;
+let supportProbe: Promise<boolean | null> | null = null;
 
 function rmsOf(analyser: AnalyserNode): number {
   const buf = new Float32Array(analyser.fftSize);
@@ -84,7 +93,7 @@ function sleep(ms: number): Promise<void> {
  * Plays a tone into a graph that goes nowhere, and reports whether any of it arrived. The
  * element is thrown away either way, which is what makes this safe to run.
  */
-async function graphCarriesAudio(): Promise<boolean> {
+async function graphCarriesAudio(): Promise<boolean | null> {
   const url = toneUrl();
   const probe = document.createElement('audio');
   probe.preload = 'auto';
@@ -113,6 +122,7 @@ async function graphCarriesAudio(): Promise<boolean> {
     silence.connect(ctx.destination);
 
     await resumed(ctx);
+    if (ctx.state !== 'running') return null;
     await probe.play();
 
     // Polled rather than read once: a single window landing early enough to be empty is the
@@ -123,7 +133,8 @@ async function graphCarriesAudio(): Promise<boolean> {
       await sleep(PROBE_POLL_MS);
     }
     return false;
-  } catch {
+  } catch (error) {
+    if (ctx?.state === 'suspended' || (error instanceof DOMException && error.name === 'NotAllowedError')) return null;
     return false;
   } finally {
     probe.pause();
@@ -144,44 +155,87 @@ async function resumed(ctx: AudioContext): Promise<void> {
  * it returns immediately after the first attempt resolves.
  */
 /** Returns true only on the call that attached it, which is the caller's cue to re-render. */
-export async function enableBoost(video: HTMLVideoElement): Promise<boolean> {
-  if (boost || attaching || supported === false) return false;
-  attaching = true;
+export async function enableElementBoost(element: HTMLMediaElement): Promise<boolean> {
+  if (disposed.has(element) || gains.has(element) || attaching.has(element) || supported === false) {
+    return false;
+  }
+  attaching.add(element);
   try {
-    if (supported === null) supported = await graphCarriesAudio();
-    if (!supported) return false;
+    if (supported === null) {
+      supportProbe ??= graphCarriesAudio();
+      supported = await supportProbe;
+      if (supported === null) supportProbe = null;
+    }
+    if (!supported || disposed.has(element)) return false;
 
-    context = new AudioContext();
-    boost = context.createGain();
-    context.createMediaElementSource(video).connect(boost);
-    boost.connect(context.destination);
+    const context = sharedContext ??= new AudioContext();
     await resumed(context);
+    if (context.state !== 'running' || disposed.has(element)) return false;
+    const node = context.createGain();
+    const source = context.createMediaElementSource(element);
+    const analyser = context.createAnalyser();
+    analyser.fftSize = 1024;
+    source.connect(analyser);
+    analyser.connect(node);
+    node.connect(context.destination);
+    node.gain.value = element.volume;
+    element.volume = 1;
+    gains.set(element, { context, node, source, analyser, samples: new Float32Array(analyser.fftSize) });
+    anyBoost = true;
     return true;
   } catch {
-    supported = false;
     return false;
   } finally {
-    attaching = false;
+    attaching.delete(element);
   }
+}
+
+export function enableBoost(video: HTMLVideoElement): Promise<boolean> {
+  return enableElementBoost(video);
 }
 
 /**
  * Sets the preview gain by whichever route exists. Without the graph this is the old ceiling;
  * with it, the number is applied as asked.
  */
-export function applyGain(video: HTMLVideoElement, gain: number): void {
-  if (boost && context) {
+export function applyElementGain(element: HTMLMediaElement, gain: number): void {
+  const attached = gains.get(element);
+  if (attached) {
     // The element stays at unity and the node does the work, so the two never multiply.
-    if (video.volume !== 1) video.volume = 1;
-    if (boost.gain.value !== gain) boost.gain.value = gain;
-    if (context.state === 'suspended') void context.resume();
+    if (element.volume !== 1) element.volume = 1;
+    if (attached.node.gain.value !== gain) attached.node.gain.value = gain;
+    if (attached.context.state === 'suspended') void attached.context.resume();
     return;
   }
   const capped = Math.min(gain, 1);
-  if (video.volume !== capped) video.volume = capped;
+  if (element.volume !== capped) element.volume = capped;
+}
+
+export function applyGain(video: HTMLVideoElement, gain: number): void {
+  applyElementGain(video, gain);
+}
+
+export function disposeElementGain(element: HTMLMediaElement): void {
+  disposed.add(element);
+  const attached = gains.get(element);
+  if (!attached) return;
+  attached.node.disconnect();
+  attached.source.disconnect();
+  attached.analyser.disconnect();
+  gains.delete(element);
+}
+
+export function elementLevel(element: HTMLMediaElement): number {
+  const attached = gains.get(element);
+  if (!attached || element.paused || attached.context.state !== 'running') return 0;
+  attached.analyser.getFloatTimeDomainData(attached.samples);
+  let peak = 0;
+  for (const sample of attached.samples) peak = Math.max(peak, Math.abs(sample));
+  if (peak < 0.001) return 0;
+  return Math.min(1, Math.max(0, (20 * Math.log10(peak) + 60) / 60));
 }
 
 /** Whether a boost above 100% is actually audible, for the UI to say so honestly. */
 export function boostReady(): boolean {
-  return boost !== null;
+  return anyBoost;
 }

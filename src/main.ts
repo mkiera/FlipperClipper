@@ -12,7 +12,7 @@ import {
   probe,
 } from './ipc';
 import { edit, loadMedia, patchEdit, patchUi, subscribe, ui } from './state';
-import { initPlayer, loadSource, onPreviewTrouble, videoElement } from './player';
+import { initPlayer, loadSource, loadTrackPreviews, onPreviewTrouble, videoElement } from './player';
 import { initTimeline } from './timeline';
 import { initCrop } from './crop';
 import { initRampLane } from './ramplane';
@@ -115,6 +115,7 @@ async function openPath(path: string): Promise<void> {
     hideBanner('preview');
     loadMedia(media, src);
     loadSource(src);
+    void loadTrackPreviews(path);
     void loadFilmstrip(path);
   } catch (error) {
     recordError(describe(error));
@@ -252,9 +253,11 @@ function offerPreviewProxy(): void {
     onAction: async () => {
       try {
         const proxy = await makePreviewProxy(media.path);
+        if (edit.media !== media) return;
         const src = assetUrl(proxy);
         patchEdit({ src });
         loadSource(src);
+        void loadTrackPreviews(media.path);
         hideBanner('preview');
       } catch (error) {
         recordError(describe(error));

@@ -164,6 +164,7 @@ pub fn start_export(app: AppHandle, job: ExportJob) -> Result<(), String> {
     // The job carries what the user asked for, not what is in the file. Without this probe a
     // clip recorded with the mic off fails on "Stream map '0:a:0' matches no streams".
     let info = crate::sysutil::probe_media(&job.input)?;
+    validate_audio_tracks(&job, info.audio_tracks.len())?;
     if is_audio_format(&job.format) && !info.has_audio {
         return Err("This video has no audio track to export.".to_string());
     }
@@ -369,6 +370,21 @@ fn validate(job: &ExportJob) -> Result<(), String> {
     if !job.volume.is_finite() || !(0.0..=10.0).contains(&job.volume) {
         return Err("Volume has to be between 0% and 1000%.".to_string());
     }
+    if job.audio_tracks.len() > 6 {
+        return Err("An export can use at most 6 audio tracks.".to_string());
+    }
+    let mut audio_indexes = std::collections::HashSet::new();
+    for track in &job.audio_tracks {
+        if track.index >= 6 {
+            return Err("Audio track indexes have to be between 0 and 5.".to_string());
+        }
+        if !audio_indexes.insert(track.index) {
+            return Err("Each audio track can only be included once.".to_string());
+        }
+        if !track.volume.is_finite() || !(0.0..=10.0).contains(&track.volume) {
+            return Err("Audio track volume has to be between 0% and 1000%.".to_string());
+        }
+    }
 
     if matches!(job.quality, QualityPreset::Fit) {
         // gif's size is a function of its content, and wav/flac encode every sample at full fidelity.
@@ -408,6 +424,12 @@ fn validate(job: &ExportJob) -> Result<(), String> {
     if job.mute && is_audio_format(&job.format) {
         return Err("A muted audio export would be silence.".to_string());
     }
+    if is_audio_format(&job.format)
+        && !job.audio_tracks.is_empty()
+        && job.audio_tracks.iter().all(|track| track.mute)
+    {
+        return Err("An audio export needs at least one unmuted track.".to_string());
+    }
 
     validate_effects(&job.effects)?;
     validate_ramp(job)?;
@@ -419,6 +441,10 @@ fn validate(job: &ExportJob) -> Result<(), String> {
             || ramp::has_ramp(&job.ramp)
             || job.normalize
             || job.volume != 1.0
+            || job
+                .audio_tracks
+                .iter()
+                .any(|track| track.mute || (track.volume - 1.0).abs() > 1e-9)
             || job.effects.any()
             || is_audio_format(&job.format)
             || matches!(job.format, ExportFormat::Gif))
@@ -460,6 +486,20 @@ fn validate(job: &ExportJob) -> Result<(), String> {
         }
     }
 
+    Ok(())
+}
+
+fn validate_audio_tracks(job: &ExportJob, available: usize) -> Result<(), String> {
+    if let Some(track) = job
+        .audio_tracks
+        .iter()
+        .find(|track| track.index >= available)
+    {
+        return Err(format!(
+            "Audio track {} is not present in this media file.",
+            track.index + 1
+        ));
+    }
     Ok(())
 }
 
@@ -713,6 +753,7 @@ mod tests {
             reverse: false,
             normalize: false,
             volume: 1.0,
+            audio_tracks: Vec::new(),
             format: ExportFormat::Mp4,
             quality: QualityPreset::Balanced,
             target_mb: None,
@@ -763,6 +804,42 @@ mod tests {
                 "Volume has to be between 0% and 1000%."
             );
         }
+    }
+
+    #[test]
+    fn audio_track_edits_validate_count_indexes_uniqueness_and_volume() {
+        let mut j = job();
+        j.input = std::env::current_exe().unwrap().to_string_lossy().into_owned();
+        j.output = std::env::temp_dir()
+            .join("audio-track-validation.mp4")
+            .to_string_lossy()
+            .into_owned();
+        j.audio_tracks = (0..6)
+            .map(|index| ffmpeg::AudioTrackEdit { index, volume: 1.0, mute: false })
+            .collect();
+        assert!(validate(&j).is_ok());
+        assert!(validate_audio_tracks(&j, 6).is_ok());
+
+        j.audio_tracks.push(ffmpeg::AudioTrackEdit { index: 0, volume: 1.0, mute: false });
+        assert!(validate(&j).unwrap_err().contains("at most 6"));
+        j.audio_tracks.truncate(2);
+        j.audio_tracks[1].index = 0;
+        assert!(validate(&j).unwrap_err().contains("only be included once"));
+        j.audio_tracks[1].index = 5;
+        j.audio_tracks[1].volume = 10.1;
+        assert!(validate(&j).unwrap_err().contains("track volume"));
+        j.audio_tracks[1].volume = 1.0;
+        assert!(validate_audio_tracks(&j, 2).unwrap_err().contains("not present"));
+    }
+
+    #[test]
+    fn an_audio_export_rejects_six_muted_tracks() {
+        let mut j = job();
+        j.format = ExportFormat::Mp3;
+        j.audio_tracks = (0..6)
+            .map(|index| ffmpeg::AudioTrackEdit { index, volume: 1.0, mute: true })
+            .collect();
+        assert!(validate(&j).unwrap_err().contains("at least one unmuted"));
     }
 
     #[test]

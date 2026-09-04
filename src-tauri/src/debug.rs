@@ -180,6 +180,7 @@ fn diagnose(encoder: &str) -> (bool, String, String) {
         reverse: false,
         normalize: false,
         volume: 1.0,
+        audio_tracks: Vec::new(),
         format: ffmpeg::ExportFormat::Mp4,
         quality: ffmpeg::QualityPreset::Balanced,
         target_mb: None,

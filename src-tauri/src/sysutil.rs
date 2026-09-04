@@ -295,20 +295,36 @@ pub struct Loudness {
 /// Measures the whole file rather than the trim: it is one pass either way, and the difference
 /// a trim makes is a fraction of a LU, which is under what anyone can hear on a preview.
 #[tauri::command(async)]
-pub fn measure_loudness(path: String) -> Result<Loudness, String> {
-    let output = ffmpeg::hidden_command("ffmpeg")
-        .args(["-hide_banner", "-nostats", "-i"])
-        .arg(&path)
-        .args([
+pub fn measure_loudness(path: String, audio_tracks: Option<Vec<ffmpeg::AudioTrackEdit>>) -> Result<Loudness, String> {
+    let tracks = audio_tracks.unwrap_or_default();
+    let mut indices = HashSet::new();
+    if tracks.len() > 6 || tracks.iter().any(|track| track.index >= 6
+        || !indices.insert(track.index) || !track.volume.is_finite()
+        || !(0.0..=10.0).contains(&track.volume)) {
+        return Err("The audio track settings are invalid.".to_string());
+    }
+    let mut command = ffmpeg::hidden_command("ffmpeg");
+    command.args(["-hide_banner", "-nostats", "-i"]).arg(&path);
+    if tracks.len() > 1 {
+        let (graph, label) = ffmpeg::audio_mix_filter(&tracks)
+            .ok_or_else(|| "That mix has no audible tracks.".to_string())?;
+        command.args(["-filter_complex", &format!("{graph};{label}{}:print_format=json[measured]", ffmpeg::LOUDNORM),
+            "-map", "[measured]"]);
+    } else {
+        command.args([
             "-af",
             &format!("{}:print_format=json", ffmpeg::LOUDNORM),
-            "-f",
-            "null",
-            "-",
-        ])
+            "-map", "0:a:0",
+        ]);
+    }
+    let output = command.args(["-vn", "-f", "null", "-"])
         .stdin(Stdio::null())
         .output()
         .map_err(|_| "FFmpeg could not be started to measure the audio.".to_string())?;
+
+    if !output.status.success() {
+        return Err("FFmpeg could not measure that audio mix.".to_string());
+    }
 
     // loudnorm prints its analysis to stderr, after everything else ffmpeg has to say.
     parse_loudness(&String::from_utf8_lossy(&output.stderr))
@@ -497,6 +513,183 @@ fn path_key(path: &str) -> String {
     format!("{:016x}", hasher.finish())
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AudioPreviewWindow {
+    pub paths: Vec<String>,
+    pub start: f64,
+    pub duration: f64,
+}
+
+#[derive(Default)]
+struct AudioPreviewCache {
+    entries: std::collections::VecDeque<(String, AudioPreviewWindow)>,
+}
+
+fn cached_audio_preview(
+    cache: &std::sync::Mutex<AudioPreviewCache>,
+    key: String,
+    render: impl FnOnce() -> Result<AudioPreviewWindow, String>,
+) -> Result<AudioPreviewWindow, String> {
+    let mut cache = cache
+        .lock()
+        .map_err(|_| "The audio preview cache could not be opened.".to_string())?;
+    if let Some(index) = cache.entries.iter().position(|(stored, window)| {
+        stored == &key && window.paths.iter().all(|path| Path::new(path).is_file())
+    }) {
+        let entry = cache.entries.remove(index).unwrap();
+        let window = entry.1.clone();
+        cache.entries.push_back(entry);
+        return Ok(window);
+    }
+    let window = render()?;
+    cache.entries.push_back((key, window.clone()));
+    while cache.entries.len() > 8 {
+        if let Some((_, expired)) = cache.entries.pop_front() {
+            remove_audio_previews(&expired.paths);
+        }
+    }
+    Ok(window)
+}
+
+#[tauri::command(async)]
+pub fn make_audio_previews(
+    app: AppHandle,
+    path: String,
+    start: f64,
+) -> Result<AudioPreviewWindow, String> {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<AudioPreviewCache>> = std::sync::OnceLock::new();
+    if !start.is_finite() || start < 0.0 {
+        return Err("The audio preview position is invalid.".to_string());
+    }
+    let canonical = std::fs::canonicalize(&path)
+        .map_err(|_| "That file is no longer there.".to_string())?;
+    let metadata = std::fs::metadata(&canonical)
+        .map_err(|_| "That file is no longer there.".to_string())?;
+    let key = format!(
+        "{}:{}:{:?}:{start}",
+        path_key(&canonical.to_string_lossy()),
+        metadata.len(),
+        metadata.modified().ok()
+    );
+    let window = cached_audio_preview(CACHE.get_or_init(Default::default), key, || {
+        let media = probe_media(&path)?;
+        let start = start.min(media.duration.max(0.0));
+        let duration = (media.duration - start).clamp(0.0, 60.0);
+        if media.audio_tracks.len() < 2 || duration == 0.0 {
+            return Ok(AudioPreviewWindow {
+                paths: Vec::new(),
+                start,
+                duration,
+            });
+        }
+        let dir = temp_subdir("audio")?;
+        let outputs: Vec<PathBuf> = (0..media.audio_tracks.len())
+            .map(|index| dir.join(format!("track-{index}.m4a")))
+            .collect();
+        if let Err(error) = render_audio_previews(&path, &outputs, start, duration) {
+            let _ = std::fs::remove_dir_all(&dir);
+            return Err(error);
+        }
+        Ok(AudioPreviewWindow {
+            paths: outputs
+                .iter()
+                .map(|p| p.to_string_lossy().into_owned())
+                .collect(),
+            start,
+            duration,
+        })
+    })?;
+    for output in &window.paths {
+        app.asset_protocol_scope()
+            .allow_file(output)
+            .map_err(|_| "The audio preview could not be opened for playback.".to_string())?;
+    }
+    Ok(window)
+}
+
+fn remove_audio_previews(paths: &[String]) {
+    for path in paths {
+        let _ = std::fs::remove_file(path);
+    }
+    if let Some(dir) = paths.first().and_then(|path| Path::new(path).parent()) {
+        let _ = std::fs::remove_dir(dir);
+    }
+}
+
+fn render_audio_previews(
+    path: &str,
+    outputs: &[PathBuf],
+    start: f64,
+    duration: f64,
+) -> Result<(), String> {
+    let args = audio_preview_args(path, outputs, start, duration);
+    let mut command = ffmpeg::hidden_command("ffmpeg");
+    command.args(args);
+    let result = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .output()
+        .map_err(|_| "FFmpeg could not be started to prepare the audio tracks.".to_string())?;
+    if !result.status.success() {
+        return Err("FFmpeg could not prepare the audio tracks for playback.".to_string());
+    }
+    Ok(())
+}
+
+fn audio_preview_args(path: &str, outputs: &[PathBuf], start: f64, duration: f64) -> Vec<String> {
+    let mut args = [
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-y",
+        "-copyts",
+        "-start_at_zero",
+        "-ss",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect::<Vec<_>>();
+    args.extend([
+        start.to_string(),
+        "-threads".to_string(),
+        "1".to_string(),
+        "-i".to_string(),
+        path.to_string(),
+    ]);
+    for (index, output) in outputs.iter().enumerate() {
+        args.extend([
+            "-map".to_string(),
+            format!("0:a:{index}"),
+            "-vn".to_string(),
+            "-sn".to_string(),
+            "-dn".to_string(),
+        ]);
+        args.extend([
+            "-af".to_string(),
+            format!("asetpts=PTS-{start}/TB,aresample=async=1:first_pts=0,apad"),
+            "-t".to_string(),
+            duration.clamp(0.0, 60.0).to_string(),
+        ]);
+        args.extend([
+            "-ac".to_string(),
+            "2".to_string(),
+            "-ar".to_string(),
+            "48000".to_string(),
+            "-c:a".to_string(),
+            "aac".to_string(),
+            "-threads".to_string(),
+            "1".to_string(),
+            "-b:a".to_string(),
+            "192k".to_string(),
+            "-movflags".to_string(),
+            "+faststart".to_string(),
+        ]);
+        args.push(output.to_string_lossy().into_owned());
+    }
+    args
+}
+
 #[tauri::command(async)]
 pub fn copy_file_to_clipboard(path: String) -> Result<(), String> {
     if !Path::new(&path).is_file() {
@@ -568,6 +761,126 @@ pub fn set_min_window_size(window: tauri::Window, width: f64, height: f64) -> Re
                 current.width.max(width),
                 current.height.max(height),
             ));
+        }
+    }
+    Ok(())
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MixerWindowResize {
+    pub added_height: u32,
+    pub original_y: Option<i32>,
+    pub opened_y: Option<i32>,
+}
+
+#[tauri::command]
+pub fn grow_window_for_mixer(
+    window: tauri::Window,
+    added_height: f64,
+) -> Result<MixerWindowResize, String> {
+    if !added_height.is_finite() || added_height <= 0.0 {
+        return Ok(MixerWindowResize {
+            added_height: 0,
+            original_y: None,
+            opened_y: None,
+        });
+    }
+    if window.is_maximized().unwrap_or(false) || window.is_fullscreen().unwrap_or(false) {
+        return Ok(MixerWindowResize {
+            added_height: 0,
+            original_y: None,
+            opened_y: None,
+        });
+    }
+
+    let scale = window.scale_factor().unwrap_or(1.0);
+    let outer = window
+        .outer_size()
+        .map_err(|_| "The window size could not be read.".to_string())?;
+    let inner = window
+        .inner_size()
+        .map_err(|_| "The window size could not be read.".to_string())?;
+    let requested = (added_height * scale).ceil().max(0.0) as u32;
+    let position = window
+        .outer_position()
+        .map_err(|_| "The window position could not be read.".to_string())?;
+    let work_area = window
+        .current_monitor()
+        .ok()
+        .flatten()
+        .map(|monitor| {
+            let area = monitor.work_area();
+            (area.position.y, area.size.height)
+        });
+    let wanted_outer_height = outer.height.saturating_add(requested);
+    let (target_outer_height, opened_y) = match work_area {
+        Some((work_top, work_height)) => {
+            let work_top = i64::from(work_top);
+            let work_bottom = work_top + i64::from(work_height);
+            let wanted_bottom = i64::from(position.y) + i64::from(wanted_outer_height);
+            let shift = (wanted_bottom - work_bottom).max(0);
+            let opened_y = (i64::from(position.y) - shift).max(work_top);
+            let room = u32::try_from(work_bottom - opened_y).unwrap_or(outer.height);
+            (wanted_outer_height.min(room).max(outer.height), opened_y as i32)
+        }
+        None => (wanted_outer_height, position.y),
+    };
+    let frame_height = outer.height.saturating_sub(inner.height);
+    let target_inner_height = target_outer_height.saturating_sub(frame_height).max(1);
+    if opened_y != position.y {
+        window
+            .set_position(tauri::PhysicalPosition::new(position.x, opened_y))
+            .map_err(|_| "The window position could not be changed.".to_string())?;
+    }
+    if target_inner_height != inner.height {
+        if let Err(error) = window.set_size(tauri::PhysicalSize::new(inner.width, target_inner_height)) {
+            if opened_y != position.y {
+                let _ = window.set_position(tauri::PhysicalPosition::new(position.x, position.y));
+            }
+            return Err(error.to_string());
+        }
+    }
+    Ok(MixerWindowResize {
+        added_height: target_outer_height.saturating_sub(outer.height),
+        original_y: Some(position.y),
+        opened_y: Some(opened_y),
+    })
+}
+
+#[tauri::command]
+pub fn shrink_window_after_mixer(
+    window: tauri::Window,
+    added_height: u32,
+    original_y: Option<i32>,
+    opened_y: Option<i32>,
+) -> Result<(), String> {
+    if added_height == 0
+        || window.is_maximized().unwrap_or(false)
+        || window.is_fullscreen().unwrap_or(false)
+    {
+        return Ok(());
+    }
+    let outer = window
+        .outer_size()
+        .map_err(|_| "The window size could not be read.".to_string())?;
+    let inner = window
+        .inner_size()
+        .map_err(|_| "The window size could not be read.".to_string())?;
+    let frame_height = outer.height.saturating_sub(inner.height);
+    let target_outer_height = outer.height.saturating_sub(added_height).max(frame_height + 1);
+    let target_inner_height = target_outer_height.saturating_sub(frame_height).max(1);
+    window
+        .set_size(tauri::PhysicalSize::new(inner.width, target_inner_height))
+        .map_err(|_| "The window size could not be changed.".to_string())?;
+    if let (Some(original_y), Some(opened_y)) = (original_y, opened_y) {
+        if let Ok(position) = window.outer_position() {
+            if position.y != opened_y {
+                return Ok(());
+            }
+            window
+                .set_position(tauri::PhysicalPosition::new(position.x, original_y))
+                .map_err(|_| "The window position could not be changed.".to_string())?;
         }
     }
     Ok(())
@@ -666,6 +979,170 @@ frame=  600 fps=0.0
         assert!(parse_loudness("no json here").is_err());
     }
     use super::*;
+
+    #[test]
+    #[ignore]
+    fn audio_previews_preserve_delayed_tracks_and_pad_to_video_duration() {
+        let dir = temp_subdir("audio-test").unwrap();
+        let source = dir.join("source.mkv");
+        let fixture = ffmpeg::hidden_command("ffmpeg")
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=size=160x90:rate=10:duration=3",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:duration=3",
+                "-itsoffset",
+                "1",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=880:duration=1",
+                "-map",
+                "0:v",
+                "-map",
+                "1:a",
+                "-map",
+                "2:a",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "ultrafast",
+                "-c:a",
+                "pcm_s16le",
+            ])
+            .arg(&source)
+            .output()
+            .unwrap();
+        assert!(
+            fixture.status.success(),
+            "{}",
+            String::from_utf8_lossy(&fixture.stderr)
+        );
+        let outputs = vec![dir.join("first.m4a"), dir.join("delayed.m4a")];
+        render_audio_previews(source.to_str().unwrap(), &outputs, 0.0, 3.0).unwrap();
+        let decoded = ffmpeg::hidden_command("ffmpeg")
+            .args(["-hide_banner", "-loglevel", "error", "-i"])
+            .arg(&outputs[1])
+            .args(["-ac", "1", "-ar", "8000", "-f", "f32le", "-"])
+            .output()
+            .unwrap();
+        assert!(decoded.status.success());
+        let samples: Vec<f32> = decoded
+            .stdout
+            .chunks_exact(4)
+            .map(|bytes| f32::from_le_bytes(bytes.try_into().unwrap()))
+            .collect();
+        assert!((24_000..24_400).contains(&samples.len()));
+        assert!(samples[0..4_000].iter().all(|sample| sample.abs() < 0.001));
+        assert!(samples[10_000..14_000].iter().any(|sample| sample.abs() > 0.02));
+        assert!(samples[20_000..23_000].iter().all(|sample| sample.abs() < 0.001));
+        render_audio_previews(source.to_str().unwrap(), &outputs, 1.25, 1.75).unwrap();
+        let decoded = ffmpeg::hidden_command("ffmpeg")
+            .args(["-hide_banner", "-loglevel", "error", "-i"])
+            .arg(&outputs[1])
+            .args(["-ac", "1", "-ar", "8000", "-f", "f32le", "-"])
+            .output()
+            .unwrap();
+        assert!(decoded.status.success());
+        let samples: Vec<f32> = decoded
+            .stdout
+            .chunks_exact(4)
+            .map(|bytes| f32::from_le_bytes(bytes.try_into().unwrap()))
+            .collect();
+        assert!((14_000..14_400).contains(&samples.len()));
+        assert!(samples[1_000..4_000].iter().any(|sample| sample.abs() > 0.02));
+        assert!(samples[8_000..13_000].iter().all(|sample| sample.abs() < 0.001));
+        for output in outputs {
+            std::fs::remove_file(output).unwrap();
+        }
+        std::fs::remove_file(source).unwrap();
+        std::fs::remove_dir(dir).unwrap();
+    }
+
+    #[test]
+    fn audio_preview_work_is_bounded_for_long_media() {
+        let outputs: Vec<PathBuf> = (0..6)
+            .map(|index| PathBuf::from(format!("track-{index}.m4a")))
+            .collect();
+        let args = audio_preview_args("long.mkv", &outputs, 45.0, 20.0 * 60.0);
+        let durations: Vec<f64> = args
+            .windows(2)
+            .filter(|pair| pair[0] == "-t")
+            .map(|pair| pair[1].parse().unwrap())
+            .collect();
+        assert_eq!(durations.len(), 6);
+        assert!(durations.iter().all(|duration| *duration <= 60.0));
+    }
+    #[test]
+    fn concurrent_preview_requests_share_one_render() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::{Arc, Barrier, Mutex};
+        let dir = temp_subdir("audio-cache-test").unwrap();
+        let output = dir.join("track.m4a");
+        std::fs::write(&output, b"cached").unwrap();
+        let cache = Arc::new(Mutex::new(AudioPreviewCache::default()));
+        let renders = Arc::new(AtomicUsize::new(0));
+        let barrier = Arc::new(Barrier::new(8));
+        let workers: Vec<_> = (0..8)
+            .map(|_| {
+                let cache = Arc::clone(&cache);
+                let renders = Arc::clone(&renders);
+                let barrier = Arc::clone(&barrier);
+                let output = output.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    cached_audio_preview(&cache, "same-window".to_string(), || {
+                        renders.fetch_add(1, Ordering::SeqCst);
+                        std::thread::sleep(Duration::from_millis(20));
+                        Ok(AudioPreviewWindow {
+                            paths: vec![output.to_string_lossy().into_owned()],
+                            start: 0.0,
+                            duration: 60.0,
+                        })
+                    })
+                    .unwrap()
+                })
+            })
+            .collect();
+        for worker in workers {
+            assert_eq!(worker.join().unwrap().duration, 60.0);
+        }
+        assert_eq!(renders.load(Ordering::SeqCst), 1);
+        std::fs::remove_file(&output).unwrap();
+        let window = cached_audio_preview(&cache, "same-window".to_string(), || {
+            renders.fetch_add(1, Ordering::SeqCst);
+            std::fs::write(&output, b"rebuilt").unwrap();
+            Ok(AudioPreviewWindow {
+                paths: vec![output.to_string_lossy().into_owned()],
+                start: 0.0,
+                duration: 60.0,
+            })
+        })
+        .unwrap();
+        assert_eq!(renders.load(Ordering::SeqCst), 2);
+        remove_audio_previews(&window.paths);
+    }
+
+    #[test]
+    fn preview_seek_happens_before_input_and_rebases_audio_timestamps() {
+        let args = audio_preview_args("long.mkv", &[PathBuf::from("track.m4a")], 900.0, 60.0);
+        assert!(
+            args.iter().position(|arg| arg == "-ss").unwrap()
+                < args.iter().position(|arg| arg == "-i").unwrap()
+        );
+        assert!(args
+            .iter()
+            .any(|arg| arg == "asetpts=PTS-900/TB,aresample=async=1:first_pts=0,apad"));
+    }
+
     use std::time::Duration;
 
     fn at(secs: u64) -> String {

@@ -10,6 +10,7 @@ import {
   EVENT,
   type AlphaBuild,
   type AppSettings,
+  type AudioTrackSettings,
   type DebugReport,
   type DiagnosticResult,
   type ExportFailure,
@@ -50,8 +51,8 @@ export function ffmpegCheckLog(): Promise<string | null> {
 }
 
 /** loudnorm's analysis pass, so the preview can stand in for the filter with one gain. */
-export function measureLoudness(path: string): Promise<Loudness> {
-  return invoke<Loudness>('measure_loudness', { path });
+export function measureLoudness(path: string, audioTracks: AudioTrackSettings[] = []): Promise<Loudness> {
+  return invoke<Loudness>('measure_loudness', { path, audioTracks });
 }
 
 /** Also adds the path to the asset-protocol scope; assetUrl() 403s without it. */
@@ -101,6 +102,16 @@ export function makePreviewProxy(path: string): Promise<string> {
   return invoke<string>('make_preview_proxy', { path });
 }
 
+export interface AudioPreviewWindow {
+  paths: string[];
+  start: number;
+  duration: number;
+}
+
+export function makeAudioPreviews(path: string, start: number): Promise<AudioPreviewWindow> {
+  return invoke<AudioPreviewWindow>('make_audio_previews', { path, start });
+}
+
 export function copyFileToClipboard(path: string): Promise<void> {
   return invoke<void>('copy_file_to_clipboard', { path });
 }
@@ -116,6 +127,24 @@ export function appVersion(): Promise<string> {
 /** Logical pixels. windowsize.ts works the width out from what the control row needs. */
 export function setMinWindowSize(width: number, height: number): Promise<void> {
   return invoke<void>('set_min_window_size', { width, height });
+}
+
+export interface MixerWindowResize {
+  addedHeight: number;
+  originalY: number | null;
+  openedY: number | null;
+}
+
+export function growWindowForMixer(addedHeight: number): Promise<MixerWindowResize> {
+  return invoke<MixerWindowResize>('grow_window_for_mixer', { addedHeight });
+}
+
+export function shrinkWindowAfterMixer(
+  addedHeight: number,
+  originalY: number | null,
+  openedY: number | null,
+): Promise<void> {
+  return invoke<void>('shrink_window_after_mixer', { addedHeight, originalY, openedY });
 }
 
 export function installFfmpeg(): Promise<void> {

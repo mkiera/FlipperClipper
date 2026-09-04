@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use flipperclipper_lib::ffmpeg::{
-    build_args, output_duration, Effects, ExportFormat, ExportJob, QualityPreset, Rect, TextAnchorX,
+    build_args, output_duration, AudioTrackEdit, Effects, ExportFormat, ExportJob, QualityPreset, Rect, TextAnchorX,
     TextAnchorY, TextOverlay, Orientation, OVERLAY_TEXT_FILE, surely_has_filter,
 };
 use flipperclipper_lib::ramp::{SpeedPoint, RAMP_MAX, RAMP_MIN};
@@ -79,6 +79,24 @@ fn silent() -> PathBuf {
         &[
             "-f", "lavfi", "-i", "testsrc2=size=1280x720:rate=30:duration=12",
             "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p",
+        ],
+    )
+}
+
+fn six_audio_tracks() -> PathBuf {
+    ensure_fixture(
+        "six-audio-tracks.mkv",
+        &[
+            "-f", "lavfi", "-i", "testsrc2=size=320x180:rate=10:duration=2",
+            "-f", "lavfi", "-i", "sine=frequency=200:duration=2",
+            "-f", "lavfi", "-i", "sine=frequency=300:duration=2",
+            "-f", "lavfi", "-i", "sine=frequency=400:duration=2",
+            "-f", "lavfi", "-i", "sine=frequency=500:duration=2",
+            "-f", "lavfi", "-i", "sine=frequency=600:duration=2",
+            "-f", "lavfi", "-i", "sine=frequency=700:duration=2",
+            "-map", "0:v:0", "-map", "1:a:0", "-map", "2:a:0", "-map", "3:a:0",
+            "-map", "4:a:0", "-map", "5:a:0", "-map", "6:a:0", "-c:v", "libx264",
+            "-preset", "veryfast", "-c:a", "aac", "-shortest",
         ],
     )
 }
@@ -285,6 +303,7 @@ fn job(input: &Path, name: &str) -> ExportJob {
         reverse: false,
         normalize: false,
         volume: 1.0,
+        audio_tracks: Vec::new(),
         format: ExportFormat::Mp4,
         quality: QualityPreset::Balanced,
         target_mb: None,
@@ -293,6 +312,82 @@ fn job(input: &Path, name: &str) -> ExportJob {
         effects: Effects::default(),
         lossless: false,
     }
+}
+
+fn decoded_mono_samples(path: &Path) -> Vec<f32> {
+    let output = Command::new("ffmpeg")
+        .args(["-hide_banner", "-loglevel", "error", "-i"])
+        .arg(path)
+        .args(["-ac", "1", "-ar", "48000", "-f", "f32le", "-"])
+        .output()
+        .expect("could not decode audio samples");
+    assert!(output.status.success());
+    output
+        .stdout
+        .chunks_exact(4)
+        .map(|bytes| f32::from_le_bytes(bytes.try_into().unwrap()))
+        .collect()
+}
+
+fn rms(samples: &[f32]) -> f64 {
+    (samples
+        .iter()
+        .map(|sample| (*sample as f64).powi(2))
+        .sum::<f64>()
+        / samples.len() as f64)
+        .sqrt()
+}
+
+fn strongest_fixture_tone(samples: &[f32], sample_rate: f64) -> f64 {
+    [200.0, 300.0, 400.0, 500.0, 600.0, 700.0]
+        .into_iter()
+        .max_by(|left, right| {
+            let power = |frequency: f64| {
+                let step = std::f64::consts::TAU * frequency / sample_rate;
+                let (sin, cos) = samples.iter().enumerate().fold((0.0, 0.0), |sum, (i, sample)| {
+                    let phase = step * i as f64;
+                    (sum.0 + *sample as f64 * phase.sin(), sum.1 + *sample as f64 * phase.cos())
+                });
+                sin * sin + cos * cos
+            };
+            power(*left).partial_cmp(&power(*right)).unwrap()
+        })
+        .unwrap()
+}
+
+#[test]
+fn six_tracks_apply_gain_and_mute_to_the_selected_ordinal() {
+    if ffmpeg_missing() {
+        return;
+    }
+    let src = six_audio_tracks();
+    let mut j = job(&src, "out-six-tracks-unity.wav");
+    j.out_point = 2.0;
+    j.format = ExportFormat::Wav;
+    j.audio_tracks = (0..6)
+        .map(|index| AudioTrackEdit { index, volume: 1.0, mute: index != 5 })
+        .collect();
+    let unity = run_export(&j, 320, 180, 10.0, true);
+    let unity_samples = decoded_mono_samples(&unity);
+    let unity_rms = rms(&unity_samples);
+    assert_eq!(strongest_fixture_tone(&unity_samples, 48_000.0), 700.0);
+
+    j.audio_tracks[5].volume = 0.5;
+    j.output = fixture_dir().join("out-six-tracks-half.wav").to_string_lossy().into_owned();
+    let half_rms = rms(&decoded_mono_samples(&run_export(&j, 320, 180, 10.0, true)));
+    assert!((half_rms / unity_rms - 0.5).abs() < 0.03);
+
+    j.audio_tracks[5].volume = 2.0;
+    j.output = fixture_dir().join("out-six-tracks-double.wav").to_string_lossy().into_owned();
+    let double_rms = rms(&decoded_mono_samples(&run_export(&j, 320, 180, 10.0, true)));
+    assert!((double_rms / unity_rms - 2.0).abs() < 0.06);
+
+    j.audio_tracks[5].mute = true;
+    j.audio_tracks[4].mute = false;
+    j.audio_tracks[4].volume = 1.0;
+    j.output = fixture_dir().join("out-six-tracks-fifth.wav").to_string_lossy().into_owned();
+    let fifth = decoded_mono_samples(&run_export(&j, 320, 180, 10.0, true));
+    assert_eq!(strongest_fixture_tone(&fifth, 48_000.0), 600.0);
 }
 
 // --- The tests ---
