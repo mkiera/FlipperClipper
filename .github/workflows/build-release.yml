@@ -15,6 +15,8 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up Node
         uses: actions/setup-node@v4
@@ -30,27 +32,19 @@ jobs:
         with:
           workspaces: src-tauri -> target
 
-      # Must run before the version rewrite: npm ci requires package.json and
-      # package-lock.json to agree, and the rewrite touches both.
+      - name: Validate release version and changelog
+        id: version
+        shell: pwsh
+        run: node scripts/versioning.mjs release "$env:GITHUB_REF_NAME"
+
       - name: Install npm dependencies
         run: npm ci
 
-      - name: Get version info
-        id: version
-        shell: bash
-        run: |
-          VERSION=${GITHUB_REF#refs/tags/v}
-          echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
-          echo "RELEASE_NAME=v$VERSION" >> $GITHUB_OUTPUT
-          if [[ "$VERSION" == *"-"* ]]; then
-            echo "IS_PRERELEASE=true" >> $GITHUB_OUTPUT
-          else
-            echo "IS_PRERELEASE=false" >> $GITHUB_OUTPUT
-          fi
-          # The tag is the authority: a build whose package.json disagrees keeps
-          # being offered its own release as an update.
-          npm version "$VERSION" --no-git-tag-version --allow-same-version
-          echo "package.json version is now: $(node scripts/vernum.mjs --raw)"
+      - name: Run frontend tests
+        run: npm test
+
+      - name: Run Rust tests
+        run: cargo test --manifest-path src-tauri/Cargo.toml --locked -- --test-threads=1
 
       - name: Stamp the build with its commit and run
         run: node scripts/build_info.mjs
@@ -58,7 +52,8 @@ jobs:
       # npx, not `npm run tauri build -- --no-bundle`: npm swallows the flag and
       # Tauri bundles anyway. Leaves src-tauri\target\release\flipperclipper.exe.
       - name: Build the app
-        run: npx tauri build --no-bundle
+        shell: pwsh
+        run: npx tauri build --no-bundle --config "$env:FC_BUILD_CONFIG"
 
       - name: Derive numeric version for the installer
         id: vernum
@@ -98,24 +93,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           name: ${{ steps.version.outputs.RELEASE_NAME }}
-          body: |
-            Trim, crop, speed up, slow down, reverse or re-volume a clip, then
-            export it as a video, a GIF, or just the audio — for when a clip
-            needs one quick edit before it goes to someone.
-
-            ### Installation
-            **`FlipperClipper-Setup.exe`** is the one you want. It installs for
-            you alone, asks for no admin rights, and starts the app when it's
-            done.
-
-            FlipperClipper uses **FFmpeg** to export. If it isn't on your PATH
-            the app offers a one-click install on first launch
-            (`winget install -e --id Gyan.FFmpeg`).
-
-            ### Already have FlipperClipper?
-            Run `FlipperClipper-Setup.exe` over the top — it keeps your install
-            location and shortcut choice. Or just let the app update itself:
-            it checks for new releases on launch.
+          body_path: src/generated/release-notes.md
           files: dist_installer/FlipperClipper-Setup.exe
           # Without this a missing installer publishes a green, assetless release
           # that the updater silently skips.

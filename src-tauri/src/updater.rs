@@ -237,7 +237,7 @@ fn releases_for_channel(releases: Vec<GhRelease>, channel: UpdateChannel) -> Vec
         ));
     }
 
-    listed.sort_by(|(a, _), (b, _)| b.cmp(a));
+    listed.sort_by(|(a, _), (b, _)| b.cmp_precedence(a));
     listed.into_iter().map(|(_, info)| info).collect()
 }
 
@@ -450,7 +450,7 @@ fn pick_update(
 
         // semver's ordering puts 0.2.0-beta.1 below 0.2.0, so the stable release of a version
         // correctly updates a pre-release of it.
-        if version <= *current {
+        if !version.cmp_precedence(current).is_gt() {
             continue;
         }
 
@@ -464,7 +464,7 @@ fn pick_update(
             continue;
         };
 
-        if best.as_ref().is_none_or(|(seen, _)| version > *seen) {
+        if best.as_ref().is_none_or(|(seen, _)| version.cmp_precedence(seen).is_gt()) {
             best = Some((
                 version.clone(),
                 UpdateInfo {
@@ -788,6 +788,36 @@ mod tests {
     #[test]
     fn an_empty_release_list_is_not_an_error() {
         assert!(pick_update(releases("[]"), &version("0.1.0"), STABLE).is_none());
+    }
+
+    #[test]
+    fn build_metadata_does_not_offer_an_equivalent_release() {
+        let payload = r#"[
+          {"tag_name":"v1.4.0+zzz","assets":[
+            {"name":"FlipperClipper-Setup.exe","size":10,"browser_download_url":"u"}
+          ]}
+        ]"#;
+        assert!(pick_update(releases(payload), &version("1.4.0+aaa"), STABLE).is_none());
+        assert!(pick_update(releases(payload), &version("1.4.0"), STABLE).is_none());
+    }
+
+    #[test]
+    fn numbered_betas_and_old_betas_remain_installable_in_semantic_order() {
+        let payload = r#"[
+          {"tag_name":"v0.1.16-beta","assets":[
+            {"name":"FlipperClipper-Setup.exe","size":10,"browser_download_url":"old"}]},
+          {"tag_name":"v1.4.0-beta.2","assets":[
+            {"name":"FlipperClipper-Setup.exe","size":10,"browser_download_url":"two"}]},
+          {"tag_name":"v1.4.0-beta.11","assets":[
+            {"name":"FlipperClipper-Setup.exe","size":10,"browser_download_url":"eleven"}]}
+        ]"#;
+        let listed = releases_for_channel(releases(payload), PRERELEASE);
+        assert_eq!(versions(&listed), vec!["1.4.0-beta.11", "1.4.0-beta.2", "0.1.16-beta"]);
+        assert!(releases_for_channel(releases(payload), STABLE).is_empty());
+        let picked = pick_update(releases(payload), &version("1.4.0-beta.2.alpha.4"), PRERELEASE).unwrap();
+        assert_eq!(picked.version, "1.4.0-beta.11");
+        assert_eq!(listed[2].tag_name, "v0.1.16-beta");
+        assert_eq!(listed[2].download_url, "old");
     }
 
     const LISTING_PAYLOAD: &str = r#"[

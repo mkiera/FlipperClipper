@@ -4,8 +4,14 @@ on:
   workflow_dispatch:
   push:
     branches:
-      - 'feature/**'
-      - 'bugfix/**'
+      - '**'
+
+concurrency:
+  group: build-test-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
 
 jobs:
   build:
@@ -14,6 +20,8 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up Node
         uses: actions/setup-node@v4
@@ -32,14 +40,22 @@ jobs:
       - name: Install npm dependencies
         run: npm ci
 
-      # No version rewrite, unlike the release workflow: there is no tag to take
-      # one from. build-info.json's commit is what tells two test builds apart.
+      - name: Calculate alpha version
+        run: node scripts/versioning.mjs alpha
+
+      - name: Run frontend tests
+        run: npm test
+
+      - name: Run Rust tests
+        run: cargo test --manifest-path src-tauri/Cargo.toml --locked -- --test-threads=1
+
       - name: Stamp the build with its commit and run
         run: node scripts/build_info.mjs
 
       # npx, not `npm run tauri build -- --no-bundle`: npm swallows the flag.
       - name: Build the app
-        run: npx tauri build --no-bundle
+        shell: pwsh
+        run: npx tauri build --no-bundle --config "$env:FC_BUILD_CONFIG"
 
       - name: Derive numeric version for the installer
         id: vernum
@@ -83,3 +99,4 @@ jobs:
           name: FlipperClipper-Setup
           path: dist_installer/FlipperClipper-Setup.exe
           retention-days: 30
+          if-no-files-found: error
