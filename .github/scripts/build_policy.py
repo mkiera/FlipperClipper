@@ -8,7 +8,7 @@ def needs_build(event, paths, tags, sha):
     if any(name.startswith("refs/tags/v") and commit == sha for commit, name in tags):
         return False
     return any(
-        path not in ("README.md", ".github/PULL_REQUEST_TEMPLATE.md")
+        not path.lower().endswith(".md")
         and not path.startswith(("docs/", ".github/"))
         for path in paths
     )

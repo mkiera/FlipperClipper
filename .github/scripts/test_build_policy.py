@@ -8,7 +8,7 @@ from build_policy import main, needs_build
 
 class BuildPolicyTests(unittest.TestCase):
     def test_docs(self):
-        self.assertFalse(needs_build("push", ["README.md", "docs/versioning.md"], [], "abc"))
+        self.assertFalse(needs_build("push", ["README.md", "CHANGELOG.md", "docs/versioning.md"], [], "abc"))
 
     def test_workflows(self):
         self.assertFalse(needs_build("push", [".github/workflows/build-test.yml", ".github/scripts/build_policy.py"], [], "abc"))
@@ -17,7 +17,7 @@ class BuildPolicyTests(unittest.TestCase):
         self.assertTrue(needs_build("push", ["README.md", "src-tauri/src/main.rs"], [], "abc"))
 
     def test_packaging_inputs(self):
-        for path in ("installer.iss", "icon.ico", "scripts/versioning.mjs", "version.txt", "LICENSE", "CHANGELOG.md", "requirements-build.txt"):
+        for path in ("installer.iss", "icon.ico", "scripts/versioning.mjs", "version.txt", "LICENSE", "requirements-build.txt"):
             with self.subTest(path=path):
                 self.assertTrue(needs_build("push", [path], [], "abc"))
 
