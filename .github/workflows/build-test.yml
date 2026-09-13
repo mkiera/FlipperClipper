@@ -5,6 +5,11 @@ on:
   push:
     branches:
       - '**'
+    paths-ignore:
+      - 'README.md'
+      - 'docs/**'
+      - '.github/ISSUE_TEMPLATE/**'
+      - '.github/PULL_REQUEST_TEMPLATE.md'
 
 concurrency:
   group: build-test-${{ github.ref }}
@@ -14,7 +19,25 @@ permissions:
   contents: read
 
 jobs:
+  eligibility:
+    runs-on: ubuntu-latest
+    outputs:
+      build: ${{ steps.policy.outputs.build }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Test build policy
+        run: python3 -m unittest discover -s .github/scripts -p 'test_*.py' -v
+      - name: Check app changes and release tags
+        id: policy
+        env:
+          BEFORE_SHA: ${{ github.event.before }}
+        run: python3 .github/scripts/build_policy.py
+
   build:
+    needs: eligibility
+    if: needs.eligibility.outputs.build == 'true'
     runs-on: windows-latest
 
     steps:
