@@ -1,13 +1,14 @@
 use std::collections::VecDeque;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
+use std::process::{Command, ExitStatus, Stdio};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager};
 
+use crate::export_output::{validate_destination, PendingOutput};
 use crate::ffmpeg::{self, Effects, ExportFormat, ExportJob, QualityPreset};
 use crate::ramp;
 use crate::settings::EncoderPreference;
@@ -184,22 +185,9 @@ pub fn start_export(app: AppHandle, job: ExportJob) -> Result<(), String> {
         None => None,
     };
 
-    let args = ffmpeg::build_args(
-        &job,
-        &encoder,
-        info.has_audio,
-        info.width,
-        info.height,
-        info.fps,
-        overlay.as_ref().map(|(_, font)| font.as_path()),
-    );
-
-    let mut command = ffmpeg::hidden_command("ffmpeg");
-    command.args(&args);
-    if let Some((dir, _)) = overlay.as_ref() {
-        // build_args emitted `textfile=<bare name>`, which only resolves from here.
-        command.current_dir(dir);
-    }
+    let mut encoding_job = job.clone();
+    let (mut command, pending_output) =
+        prepare_export(&mut encoding_job, &encoder, &info, overlay.as_ref())?;
 
     let mut child = command
         .stdin(Stdio::null())
@@ -259,39 +247,64 @@ pub fn start_export(app: AppHandle, job: ExportJob) -> Result<(), String> {
         // Reaped even when cancelled, or the killed ffmpeg lingers as a zombie.
         let status = child.map(|mut child| child.wait());
 
-        if cancelled {
-            // A half-written file wearing the final name looks like a finished export.
-            let _ = std::fs::remove_file(&output_path);
-            return;
-        }
-
-        match status {
-            Some(Ok(status)) if status.success() => {
+        match finish_export(pending_output, status, cancelled, &tail) {
+            Ok(true) => {
                 let _ = watcher_app.emit(EVENT_DONE, output_path);
             }
-            Some(Ok(_)) => {
-                let _ = watcher_app.emit(
-                    EVENT_ERROR,
-                    // The same reason cancelling removes it: ffmpeg leaves whatever it had
-                    // written under the final name, and a truncated mp4 opens far enough to
-                    // look finished before it stops partway.
-                    ExportFailure::new(explain_failure(&tail), &tail, &output_path),
-                );
-            }
-            _ => {
-                let _ = watcher_app.emit(
-                    EVENT_ERROR,
-                    ExportFailure::new(
-                        "FFmpeg stopped unexpectedly and the export did not finish.".to_string(),
-                        &tail,
-                        &output_path,
-                    ),
-                );
+            Ok(false) => {}
+            Err(failure) => {
+                let _ = watcher_app.emit(EVENT_ERROR, failure);
             }
         }
     });
 
     Ok(())
+}
+
+fn prepare_export(
+    job: &mut ExportJob,
+    encoder: &str,
+    info: &ffmpeg::MediaInfo,
+    overlay: Option<&(PathBuf, PathBuf)>,
+) -> Result<(Command, PendingOutput), String> {
+    let pending_output = PendingOutput::new(job)?;
+    let args = ffmpeg::build_args(
+        job,
+        encoder,
+        info.has_audio,
+        info.width,
+        info.height,
+        info.fps,
+        overlay.map(|(_, font)| font.as_path()),
+    );
+    let mut command = ffmpeg::hidden_command("ffmpeg");
+    command.args(&args);
+    if let Some((dir, _)) = overlay {
+        // The overlay text filename is relative to this directory.
+        command.current_dir(dir);
+    }
+    Ok((command, pending_output))
+}
+
+fn finish_export(
+    mut output: PendingOutput,
+    status: Option<std::io::Result<ExitStatus>>,
+    cancelled: bool,
+    tail: &VecDeque<String>,
+) -> Result<bool, ExportFailure> {
+    if cancelled {
+        output.discard();
+        return Ok(false);
+    }
+    let message = match status {
+        Some(Ok(status)) if status.success() => match output.publish() {
+            Ok(()) => return Ok(true),
+            Err(message) => message,
+        },
+        Some(Ok(_)) => explain_failure(tail),
+        _ => "FFmpeg stopped unexpectedly and the export did not finish.".to_string(),
+    };
+    Err(ExportFailure::new(message, tail, output.discard()))
 }
 
 /// What a failed export tells the UI.
@@ -304,18 +317,12 @@ pub fn start_export(app: AppHandle, job: ExportJob) -> Result<(), String> {
 pub struct ExportFailure {
     pub message: String,
     pub detail: String,
-    /// True when the part-written file was removed, so the UI can say the output is gone.
+    // Cleanup refers only to this export's temporary file.
     pub cleaned_up: bool,
 }
 
 impl ExportFailure {
-    fn new(message: String, tail: &VecDeque<String>, output: &str) -> Self {
-        // Removed before the event goes out, so the UI never points at a file that is about
-        // to vanish. A missing file is not a failure worth reporting on top of this one.
-        let cleaned_up = match std::fs::metadata(output) {
-            Ok(_) => std::fs::remove_file(output).is_ok(),
-            Err(_) => false,
-        };
+    fn new(message: String, tail: &VecDeque<String>, cleaned_up: bool) -> Self {
         Self {
             message,
             detail: tail.iter().cloned().collect::<Vec<_>>().join("
@@ -458,13 +465,7 @@ fn validate(job: &ExportJob) -> Result<(), String> {
             .to_string());
     }
 
-    // -y truncates the output before the first frame is read, so exporting over the source
-    // destroys the source and then fails. Windows paths compare folded.
-    if job.input.to_lowercase() == job.output.to_lowercase() {
-        return Err(
-            "Pick a different name: this would overwrite the video you are editing.".to_string(),
-        );
-    }
+    validate_destination(Path::new(&job.input), Path::new(&job.output))?;
 
     match Path::new(&job.output).parent() {
         None => return Err("The export path is not a file path.".to_string()),
@@ -736,10 +737,14 @@ fn explain_failure(tail: &VecDeque<String>) -> String {
 }
 
 #[cfg(test)]
+#[path = "export_output_tests.rs"]
+mod output_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
-    fn job() -> ExportJob {
+    pub(super) fn job() -> ExportJob {
         ExportJob {
             input: "C:\\clips\\a.mp4".to_string(),
             output: "C:\\clips\\b.mp4".to_string(),

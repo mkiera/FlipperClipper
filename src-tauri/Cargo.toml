@@ -27,6 +27,8 @@ serde_json = "1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "native-tls"] }
 futures-util = "0.3"
 semver = "1"
+same-file = "1"
+tempfile = "3"
 
 [dev-dependencies]
 # Test-only, so none of this reaches the shipped exe. The live update-feed test
