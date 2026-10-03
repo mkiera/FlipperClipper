@@ -3,6 +3,7 @@ pub mod ffmpeg;
 mod download;
 mod debug;
 mod export;
+mod export_output;
 mod ffmpeg_install;
 pub mod ramp;
 mod settings;
