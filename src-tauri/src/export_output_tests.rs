@@ -56,16 +56,22 @@ fn rejects_source_through_directory_junction() {
     assert!(result.is_err(), "source through a junction was accepted");
 }
 
-#[test]
-fn failure_preserves_previous_export() {
+fn byte_fixture() -> (tempfile::TempDir, ExportJob) {
     let dir = tempfile::tempdir().unwrap();
-    let output = dir.path().join("previous.mp4");
     let input = dir.path().join("source.mp4");
+    let output = dir.path().join("previous.mp4");
     std::fs::write(&input, b"irreplaceable source").unwrap();
     std::fs::write(&output, b"previous successful export").unwrap();
     let mut j = job();
     j.input = input.to_string_lossy().into_owned();
     j.output = output.to_string_lossy().into_owned();
+    (dir, j)
+}
+
+#[test]
+fn failure_preserves_previous_export() {
+    let (_dir, mut j) = byte_fixture();
+    let (input, output) = (j.input.clone(), j.output.clone());
     let pending = PendingOutput::new(&mut j).unwrap();
     assert!(finish_export(pending, None, false, &VecDeque::new()).is_err());
     assert!(!Path::new(&j.output).exists());
@@ -76,7 +82,11 @@ fn failure_preserves_previous_export() {
     assert_eq!(std::fs::read(input).unwrap(), b"irreplaceable source");
 }
 
-fn export_fixture() -> (tempfile::TempDir, ExportJob) {
+// The GitHub runner has no FFmpeg, matching the skip in tests/real_export.rs.
+fn export_fixture() -> Option<(tempfile::TempDir, ExportJob)> {
+    if ffmpeg::resolve_tool("ffmpeg").is_none() || ffmpeg::resolve_tool("ffprobe").is_none() {
+        return None;
+    }
     let dir = tempfile::tempdir().unwrap();
     let input = dir.path().join("source.mkv");
     let output = dir.path().join("previous.mp4");
@@ -113,7 +123,7 @@ fn export_fixture() -> (tempfile::TempDir, ExportJob) {
     j.input = input.to_string_lossy().into_owned();
     j.output = output.to_string_lossy().into_owned();
     j.out_point = 0.5;
-    (dir, j)
+    Some((dir, j))
 }
 
 fn prepare(j: &mut ExportJob, encoder: &str) -> (Command, PendingOutput) {
@@ -130,7 +140,9 @@ fn tail(output: &std::process::Output) -> VecDeque<String> {
 
 #[test]
 fn missing_encoder_preserves_existing_destination() {
-    let (_dir, mut j) = export_fixture();
+    let Some((_dir, mut j)) = export_fixture() else {
+        return;
+    };
     let destination = j.output.clone();
     let source = std::fs::read(&j.input).unwrap();
     let (mut command, pending) = prepare(&mut j, "no_such_encoder");
@@ -150,7 +162,7 @@ fn missing_encoder_preserves_existing_destination() {
 
 #[test]
 fn partial_write_failure_preserves_existing_destination() {
-    let (_dir, mut j) = export_fixture();
+    let (_dir, mut j) = byte_fixture();
     let destination = j.output.clone();
     let pending = PendingOutput::new(&mut j).unwrap();
     std::fs::write(&j.output, b"incomplete export").unwrap();
@@ -165,7 +177,7 @@ fn partial_write_failure_preserves_existing_destination() {
 
 #[test]
 fn spawn_failure_discards_only_the_temporary_file() {
-    let (dir, mut j) = export_fixture();
+    let (dir, mut j) = byte_fixture();
     let destination = j.output.clone();
     let pending = PendingOutput::new(&mut j).unwrap();
     assert!(
@@ -183,7 +195,9 @@ fn spawn_failure_discards_only_the_temporary_file() {
 
 #[test]
 fn cancel_running_encoder_preserves_existing_destination() {
-    let (_dir, mut j) = export_fixture();
+    let Some((_dir, mut j)) = export_fixture() else {
+        return;
+    };
     let destination = j.output.clone();
     let (command, pending) = prepare(&mut j, "libx264");
     let mut child = ffmpeg::hidden_command("ffmpeg")
@@ -218,7 +232,9 @@ fn cancel_running_encoder_preserves_existing_destination() {
 
 #[test]
 fn success_publishes_each_format_only_after_encoding() {
-    let (dir, base) = export_fixture();
+    let Some((dir, base)) = export_fixture() else {
+        return;
+    };
     let source = std::fs::read(&base.input).unwrap();
     for (format, extension) in [
         (ExportFormat::Mp4, "mp4"),
@@ -268,7 +284,9 @@ fn success_publishes_each_format_only_after_encoding() {
 
 #[test]
 fn destination_changed_to_source_is_rejected_at_completion() {
-    let (_dir, mut j) = export_fixture();
+    let Some((_dir, mut j)) = export_fixture() else {
+        return;
+    };
     let source = std::fs::read(&j.input).unwrap();
     let destination = j.output.clone();
     let (mut command, pending) = prepare(&mut j, "libx264");
@@ -288,7 +306,9 @@ fn destination_changed_to_source_is_rejected_at_completion() {
 #[test]
 fn locked_destination_survives_publish_failure() {
     use std::os::windows::fs::OpenOptionsExt;
-    let (_dir, mut j) = export_fixture();
+    let Some((_dir, mut j)) = export_fixture() else {
+        return;
+    };
     let destination = j.output.clone();
     let (mut command, pending) = prepare(&mut j, "libx264");
     let result = command.output().unwrap();
@@ -311,7 +331,9 @@ fn locked_destination_survives_publish_failure() {
 
 #[test]
 fn lossless_export_to_new_destination_publishes_successfully() {
-    let (dir, mut j) = export_fixture();
+    let Some((dir, mut j)) = export_fixture() else {
+        return;
+    };
     let destination = dir.path().join("new.mkv");
     j.output = destination.to_string_lossy().into_owned();
     j.lossless = true;
