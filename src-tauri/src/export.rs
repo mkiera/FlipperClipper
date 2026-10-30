@@ -299,7 +299,18 @@ fn finish_export(
     let message = match status {
         Some(Ok(status)) if status.success() => match output.publish() {
             Ok(()) => return Ok(true),
-            Err(message) => message,
+            // The encode is complete, so it is kept where it is rather than thrown away.
+            Err(message) => {
+                let kept = output.keep();
+                let message = match kept.as_ref().and_then(|path| path.file_name()) {
+                    Some(name) => format!(
+                        "{message} The new export was kept in the same folder as {}.",
+                        name.to_string_lossy()
+                    ),
+                    None => message,
+                };
+                return Err(ExportFailure::new(message, tail, false));
+            }
         },
         Some(Ok(_)) => explain_failure(tail),
         _ => "FFmpeg stopped unexpectedly and the export did not finish.".to_string(),
