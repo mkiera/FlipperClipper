@@ -14,6 +14,7 @@
 - Variable frame rate clips, such as browser screen recordings, export at a normal speed and size with a speed ramp or the Fit quality setting.
 - Lossless trims of WMV, OGV and other formats that MP4 cannot hold are offered only as MKV, so they no longer fail after the save dialog.
 - Changing track volumes with Normalize on no longer leaves several loudness measurements running at once.
+- Install this build on the Alpha channel installs on the first press.
 
 ## 1.2.0 - 2026-10-02
 
