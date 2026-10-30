@@ -79,13 +79,17 @@ impl PendingOutput {
             Ok(()) => Ok(()),
             Err(err) => {
                 let message = format!(
-                    "The completed export could not replace the destination. The existing file has been kept: {}",
+                    "The finished export could not replace the existing file, which was left as it was: {}",
                     err.error,
                 );
                 self.temporary = Some(err.path);
                 Err(message)
             }
         }
+    }
+
+    pub(crate) fn keep(mut self) -> Option<PathBuf> {
+        self.temporary.take().and_then(|path| path.keep().ok())
     }
 
     pub(crate) fn discard(mut self) -> bool {
