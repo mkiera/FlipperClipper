@@ -1,5 +1,6 @@
 use std::fs;
-use std::path::PathBuf;
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use tauri::Manager;
@@ -160,7 +161,19 @@ pub fn save_settings(app: tauri::AppHandle, settings: AppSettings) -> Result<(),
     }
     let text = serde_json::to_string_pretty(&sanitise(settings))
         .map_err(|e| format!("Could not write the settings: {e}"))?;
-    fs::write(&path, text).map_err(|e| format!("Could not save the settings: {e}"))
+    replace_file(&path, |file| file.write_all(text.as_bytes()))
+        .map_err(|e| format!("Could not save the settings: {e}"))
+}
+
+/// Writes a sibling temp file and renames it over `path`, so a kill mid-write leaves the old file.
+fn replace_file(path: &Path, write: impl FnOnce(&mut fs::File) -> io::Result<()>) -> io::Result<()> {
+    let dir = path.parent().unwrap_or_else(|| Path::new("."));
+    // NamedTempFile deletes itself on drop, which covers every early return below.
+    let mut temp = tempfile::NamedTempFile::new_in(dir)?;
+    write(temp.as_file_mut())?;
+    temp.as_file().sync_all()?;
+    temp.persist(path).map_err(|e| e.error)?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -398,6 +411,25 @@ mod tests {
             .map(|s| s.parse().expect("a number"))
             .collect();
         assert_eq!(ts, OUTPUT_HEIGHTS);
+    }
+
+    #[test]
+    fn a_failed_write_keeps_the_old_file_and_leaves_no_temp() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        fs::write(&path, "old").unwrap();
+
+        let result = replace_file(&path, |file| {
+            file.write_all(b"half")?;
+            Err(io::Error::other("killed"))
+        });
+        assert!(result.is_err());
+        assert_eq!(fs::read_to_string(&path).unwrap(), "old");
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
+
+        replace_file(&path, |file| file.write_all(b"new")).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "new");
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
     }
 
     #[test]
