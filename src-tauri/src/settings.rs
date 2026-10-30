@@ -1,9 +1,11 @@
 use std::fs;
-use std::path::PathBuf;
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use tauri::Manager;
 
+use crate::export::OUTPUT_HEIGHTS;
 use crate::ffmpeg::QualityPreset;
 
 pub const MIN_TARGET_MB: f64 = 0.5;
@@ -61,6 +63,7 @@ pub struct AppSettings {
     pub default_format: DefaultFormat,
     pub default_quality: QualityPreset,
     pub default_target_mb: f64,
+    pub default_output_height: Option<i64>,
     pub show_filmstrip: bool,
     pub encoder: EncoderPreference,
     pub auto_preview_proxy: bool,
@@ -74,6 +77,7 @@ impl Default for AppSettings {
             default_format: DefaultFormat::Source,
             default_quality: QualityPreset::Balanced,
             default_target_mb: DEFAULT_TARGET_MB,
+            default_output_height: None,
             show_filmstrip: true,
             encoder: EncoderPreference::Auto,
             auto_preview_proxy: true,
@@ -87,6 +91,11 @@ fn sanitise(mut settings: AppSettings) -> AppSettings {
     } else {
         DEFAULT_TARGET_MB
     };
+    if let Some(height) = settings.default_output_height {
+        if !OUTPUT_HEIGHTS.contains(&height) {
+            settings.default_output_height = None;
+        }
+    }
     settings
 }
 
@@ -112,6 +121,7 @@ fn from_json_str(text: &str) -> AppSettings {
         field(&fields, "defaultFormat", &mut settings.default_format);
         field(&fields, "defaultQuality", &mut settings.default_quality);
         field(&fields, "defaultTargetMb", &mut settings.default_target_mb);
+        field(&fields, "defaultOutputHeight", &mut settings.default_output_height);
         field(&fields, "showFilmstrip", &mut settings.show_filmstrip);
         field(&fields, "encoder", &mut settings.encoder);
         field(&fields, "autoPreviewProxy", &mut settings.auto_preview_proxy);
@@ -151,7 +161,19 @@ pub fn save_settings(app: tauri::AppHandle, settings: AppSettings) -> Result<(),
     }
     let text = serde_json::to_string_pretty(&sanitise(settings))
         .map_err(|e| format!("Could not write the settings: {e}"))?;
-    fs::write(&path, text).map_err(|e| format!("Could not save the settings: {e}"))
+    replace_file(&path, |file| file.write_all(text.as_bytes()))
+        .map_err(|e| format!("Could not save the settings: {e}"))
+}
+
+/// Writes a sibling temp file and renames it over `path`, so a kill mid-write leaves the old file.
+fn replace_file(path: &Path, write: impl FnOnce(&mut fs::File) -> io::Result<()>) -> io::Result<()> {
+    let dir = path.parent().unwrap_or_else(|| Path::new("."));
+    // NamedTempFile deletes itself on drop, which covers every early return below.
+    let mut temp = tempfile::NamedTempFile::new_in(dir)?;
+    write(temp.as_file_mut())?;
+    temp.as_file().sync_all()?;
+    temp.persist(path).map_err(|e| e.error)?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -169,6 +191,7 @@ mod tests {
                 "defaultFormat": "source",
                 "defaultQuality": "balanced",
                 "defaultTargetMb": 10.0,
+                "defaultOutputHeight": null,
                 "showFilmstrip": true,
                 "encoder": "auto",
                 "autoPreviewProxy": true
@@ -184,6 +207,7 @@ mod tests {
             default_format: DefaultFormat::Webm,
             default_quality: QualityPreset::Fit,
             default_target_mb: 25.5,
+            default_output_height: Some(720),
             show_filmstrip: false,
             encoder: EncoderPreference::Software,
             auto_preview_proxy: false,
@@ -286,6 +310,126 @@ mod tests {
             ..AppSettings::default()
         };
         assert_eq!(sanitise(settings).default_target_mb, MAX_TARGET_MB);
+    }
+
+    #[test]
+    fn the_default_output_height_survives_a_save_and_load() {
+        for height in OUTPUT_HEIGHTS {
+            let settings = AppSettings {
+                default_output_height: Some(height),
+                ..AppSettings::default()
+            };
+            let text = serde_json::to_string_pretty(&sanitise(settings)).expect("serialises");
+            assert_eq!(from_json_str(&text).default_output_height, Some(height));
+        }
+        assert_eq!(
+            from_json_str(r#"{"defaultOutputHeight": null}"#).default_output_height,
+            None
+        );
+    }
+
+    #[test]
+    fn an_unknown_output_height_falls_back_to_auto() {
+        assert_eq!(
+            from_json_str(r#"{"defaultOutputHeight": 999, "showFilmstrip": false}"#),
+            AppSettings {
+                show_filmstrip: false,
+                ..AppSettings::default()
+            }
+        );
+        assert_eq!(
+            from_json_str(r#"{"defaultOutputHeight": "720"}"#).default_output_height,
+            None
+        );
+        let settings = AppSettings {
+            default_output_height: Some(721),
+            ..AppSettings::default()
+        };
+        assert_eq!(sanitise(settings).default_output_height, None);
+    }
+
+    fn typescript_block<'a>(source: &'a str, start: &str) -> &'a str {
+        let from = source
+            .find(start)
+            .unwrap_or_else(|| panic!("src/types.ts has no `{start}`"));
+        let rest = &source[from + start.len()..];
+        let close = if start.ends_with('[') { "];" } else { "};" };
+        let end = rest.find(close).expect("block is closed");
+        &rest[..end]
+    }
+
+    #[test]
+    fn every_typescript_setting_is_a_rust_setting() {
+        let types = include_str!("../../src/types.ts");
+        let mut ts_keys: Vec<String> =
+            typescript_block(types, "export const DEFAULT_SETTINGS: AppSettings = {")
+                .lines()
+                .filter_map(|line| line.trim().split_once(':'))
+                .map(|(key, _)| key.trim().to_string())
+                .collect();
+        ts_keys.sort();
+        assert!(!ts_keys.is_empty(), "no keys parsed from DEFAULT_SETTINGS");
+
+        let serde_json::Value::Object(rust) =
+            serde_json::to_value(AppSettings::default()).expect("serialises")
+        else {
+            panic!("AppSettings serialises to an object");
+        };
+        let mut rust_keys: Vec<String> = rust.keys().cloned().collect();
+        rust_keys.sort();
+        assert_eq!(ts_keys, rust_keys);
+
+        // A key must also survive from_json_str, not only serde.
+        let full = serde_json::to_string(&AppSettings {
+            update_channel: UpdateChannel::Prerelease,
+            auto_check_updates: false,
+            default_format: DefaultFormat::Gif,
+            default_quality: QualityPreset::Fit,
+            default_target_mb: 3.0,
+            default_output_height: Some(480),
+            show_filmstrip: false,
+            encoder: EncoderPreference::Software,
+            auto_preview_proxy: false,
+        })
+        .unwrap();
+        let reloaded = serde_json::to_value(from_json_str(&full)).unwrap();
+        for key in &rust_keys {
+            assert_ne!(
+                reloaded[key], rust[key],
+                "from_json_str does not read {key}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_output_heights_match_the_typescript_list() {
+        let types = include_str!("../../src/types.ts");
+        let ts: Vec<i64> = typescript_block(types, "export const OUTPUT_HEIGHTS: number[] = [")
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| s.parse().expect("a number"))
+            .collect();
+        assert_eq!(ts, OUTPUT_HEIGHTS);
+    }
+
+    #[test]
+    fn a_failed_write_keeps_the_old_file_and_leaves_no_temp() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        fs::write(&path, "old").unwrap();
+
+        let result = replace_file(&path, |file| {
+            file.write_all(b"half")?;
+            Err(io::Error::other("killed"))
+        });
+        assert!(result.is_err());
+        assert_eq!(fs::read_to_string(&path).unwrap(), "old");
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
+
+        replace_file(&path, |file| file.write_all(b"new")).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "new");
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
     }
 
     #[test]

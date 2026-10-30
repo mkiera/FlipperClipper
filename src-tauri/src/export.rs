@@ -29,7 +29,7 @@ const STDERR_TAIL_LINES: usize = 40;
 const ENCODER_CANDIDATES: [&str; 3] = ["h264_nvenc", "h264_qsv", "h264_amf"];
 
 /// The only thing keeping an arbitrary height out of a job that arrives over IPC.
-const OUTPUT_HEIGHTS: [i64; 6] = [2160, 1440, 1080, 720, 480, 360];
+pub(crate) const OUTPUT_HEIGHTS: [i64; 6] = [2160, 1440, 1080, 720, 480, 360];
 
 /// Long enough for a caption or two lines of credits. drawtext draws every character whether
 /// or not the frame is wide enough to hold them, so this only guards the temp file.
