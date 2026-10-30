@@ -74,12 +74,12 @@ export function detectEncoder(): Promise<string> {
   return invoke<string>('detect_encoder');
 }
 
-export function startExport(job: ExportJob): Promise<void> {
-  return invoke<void>('start_export', { job });
+export function startExport(job: ExportJob, jobId: number): Promise<void> {
+  return invoke<void>('start_export', { job, jobId });
 }
 
-export function cancelExport(): Promise<void> {
-  return invoke<void>('cancel_export');
+export function cancelExport(jobId: number): Promise<void> {
+  return invoke<void>('cancel_export', { jobId });
 }
 
 /** Projected size in bytes. 0 means the Rust side could not say. */

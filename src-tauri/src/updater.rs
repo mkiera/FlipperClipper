@@ -549,14 +549,14 @@ const EXPORT_RUNNING: &str =
 const EXPORT_STARTED_MEANWHILE: &str = "FlipperClipper started exporting a clip while the update was downloading. Let it finish, then update.";
 const ARTIFACT_GONE: &str = "That build's installer is no longer downloadable: CI artifacts are kept for 30 days, so this run's has expired, or the run predates the artifact.";
 
-/// A process handle and a bool, neither observable half-written, so a poisoned lock is read through.
+/// A process handle and two ids, none observable half-written, so a poisoned lock is read through.
 fn refuse_while_exporting(app: &tauri::AppHandle, message: &str) -> Result<(), String> {
     let export_running = app
         .state::<crate::AppState>()
         .export
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .child
+        .job
         .is_some();
     if export_running {
         return Err(message.to_string());

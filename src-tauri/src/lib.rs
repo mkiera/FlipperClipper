@@ -15,9 +15,13 @@ use tauri::Manager;
 
 pub struct ExportSlot {
     pub child: Option<std::process::Child>,
-    // Lives beside the child handle so a user cancel and ffmpeg dying on its own
-    // - identical from the watcher thread's side - resolve to one outcome.
-    pub cancelled: bool,
+    // Held from the start of start_export until its watcher has cleaned up, so the probe and
+    // encoder tests before the spawn count as running too.
+    pub job: Option<u64>,
+    // Per job id, so a cancel that lands before the child exists still stops that export and a
+    // later export does not inherit it. Lives beside the child handle so a user cancel and
+    // ffmpeg dying on its own - identical from the watcher thread's side - resolve to one outcome.
+    pub cancelled_job: Option<u64>,
 }
 
 pub struct AppState {
@@ -33,7 +37,8 @@ impl AppState {
             encoder: Mutex::new(None),
             export: Arc::new(Mutex::new(ExportSlot {
                 child: None,
-                cancelled: false,
+                job: None,
+                cancelled_job: None,
             })),
         }
     }
@@ -60,7 +65,7 @@ pub fn run() {
         // the same path a cancel does, so the part-written output is removed with it.
         .on_window_event(|window, event| {
             if matches!(event, tauri::WindowEvent::CloseRequested { .. }) {
-                export::cancel_export(window.app_handle().clone());
+                export::cancel_current(window.app_handle());
             }
         })
         .invoke_handler(tauri::generate_handler![
