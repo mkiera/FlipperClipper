@@ -313,6 +313,9 @@ fn ramp_segments(job: &ExportJob) -> Vec<ramp::Segment> {
     ramp::segments(&job.ramp, job.speed, job.in_point, job.out_point)
 }
 
+/// Above this a reported rate is a container timebase, not a frame rate.
+const MAX_FPS: f64 = 240.0;
+
 /// The retiming filters: one division at a single speed, a nested expression under a curve,
 /// and nothing at all when neither changes the timing.
 ///
@@ -329,7 +332,7 @@ fn retime_filters(job: &ExportJob, fps: f64) -> Vec<String> {
             // filters, and ffmpeg reads everything after the first one as the next filter.
             let mut parts = vec![format!("setpts='({})/TB'", expr)];
             if fps > 0.0 {
-                parts.push(format!("fps={}", fmt_num(fps)));
+                parts.push(format!("fps={}", fmt_num(fps.min(MAX_FPS))));
             }
             return parts;
         }
@@ -1441,8 +1444,8 @@ fn as_i64(value: Option<&Value>) -> Option<i64> {
     as_f64(value).map(|v| v.round() as i64)
 }
 
-/// Defaults to 30 rather than failing: fps only feeds the progress estimate and the
-/// bits-per-pixel test, and a still image or a broken container reports "0/0" here.
+/// None for "0/0", which a still image or a broken container reports. parse_probe then
+/// defaults to 30, because the rate drives the ramp's fps filter and the fit downscale.
 fn parse_rational(text: Option<&Value>) -> Option<f64> {
     let s = text?.as_str()?;
     let (num, den) = s.split_once('/')?;
@@ -1535,8 +1538,11 @@ pub fn parse_probe(json: &str, path: &str, size_bytes: u64) -> Result<MediaInfo,
         .or_else(|| as_f64(video.get("duration")).filter(|d| usable(*d)))
         .unwrap_or(0.0);
 
-    let fps = parse_rational(video.get("r_frame_rate"))
-        .or_else(|| parse_rational(video.get("avg_frame_rate")))
+    // r_frame_rate falls back to the timebase on variable-rate files, e.g. "1000/1" on a WebM.
+    let sane = |fps: &f64| *fps <= MAX_FPS;
+    let fps = parse_rational(video.get("avg_frame_rate"))
+        .filter(sane)
+        .or_else(|| parse_rational(video.get("r_frame_rate")).filter(sane))
         .unwrap_or(30.0);
 
     let rotation = read_rotation(video);
@@ -2373,6 +2379,18 @@ mod tests {
         assert!(graph.contains("fps=30"), "{graph}");
         // The expression itself, not a division: a curve has no single speed to divide by.
         assert!(!graph.contains("setpts=PTS/"), "{graph}");
+    }
+
+    #[test]
+    fn a_curve_caps_the_frame_rate_it_settles_on() {
+        let mut j = job(QualityPreset::High);
+        j.ramp = vec![
+            SpeedPoint { t: 0.0, speed: 1.0 },
+            SpeedPoint { t: 2.0, speed: 4.0 },
+        ];
+        let graph = build_args(&j, "libx264", true, 1920, 1080, 1000.0, None).join(" ");
+        assert!(graph.contains("fps=240"), "{graph}");
+        assert!(!graph.contains("fps=1000"), "{graph}");
     }
 
 
@@ -3886,6 +3904,21 @@ mod tests {
         let info = parse_probe(json, "art.mp4", 0).unwrap();
         assert_eq!(info.width, 1920);
         assert_eq!(info.video_codec, "h264");
+    }
+
+    #[test]
+    fn parse_probe_reads_a_variable_frame_rate_from_avg_not_the_timebase() {
+        // ffprobe 9.0 output for real variable-rate test files.
+        let probe = |rates: &str, path: &str| {
+            let json = format!(
+                r#"{{"streams":[{{"codec_name":"vp9","codec_type":"video","width":640,"height":360,{rates}}}],"format":{{"duration":"12.941"}}}}"#
+            );
+            parse_probe(&json, path, 0).unwrap().fps
+        };
+        let mp4 = probe(r#""r_frame_rate":"2000/1","avg_frame_rate":"40000/2157""#, "vfr.mp4");
+        assert!((mp4 - 40000.0 / 2157.0).abs() < 1e-9, "{mp4}");
+        let webm = probe(r#""r_frame_rate":"1000/1","avg_frame_rate":"0/0""#, "vfr.webm");
+        assert!((webm - 30.0).abs() < 1e-9, "{webm}");
     }
 
     #[test]
