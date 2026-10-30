@@ -685,8 +685,18 @@ fn parse_timestamp(value: &str) -> Option<f64> {
 
 fn collect_stderr_tail<R: std::io::Read>(stderr: R) -> VecDeque<String> {
     let mut tail: VecDeque<String> = VecDeque::with_capacity(STDERR_TAIL_LINES);
-    for line in BufReader::new(stderr).lines() {
-        let Ok(line) = line else { break };
+    let mut reader = BufReader::new(stderr);
+    let mut bytes = Vec::new();
+    loop {
+        bytes.clear();
+        match reader.read_until(b'\n', &mut bytes) {
+            Ok(0) | Err(_) => break,
+            Ok(_) => {}
+        }
+        // Metadata in Latin-1, or a line ffmpeg cut mid-character, is not UTF-8.
+        let line = String::from_utf8_lossy(&bytes)
+            .trim_end_matches(['\r', '\n'])
+            .to_string();
         // Stored raw: the leading whitespace is what tells ffmpeg's indented metadata dump apart
         // from a real error message.
         if line.trim().is_empty() {
@@ -767,6 +777,17 @@ mod tests {
             video_kbps: None,
             effects: Effects::default(),
         }
+    }
+
+    #[test]
+    fn stderr_after_a_line_that_is_not_utf8_is_still_collected() {
+        let stderr: &[u8] =
+            b"  title           : Caf\xe9 replay\r\nUnknown encoder 'nope'\r\nConversion failed!\n";
+        let tail = collect_stderr_tail(stderr);
+        assert_eq!(tail.len(), 3);
+        assert_eq!(tail[0], "  title           : Caf\u{fffd} replay");
+        assert_eq!(tail[1], "Unknown encoder 'nope'");
+        assert_eq!(explain_failure(&tail), "Unknown encoder 'nope'\nConversion failed!");
     }
 
     #[test]
