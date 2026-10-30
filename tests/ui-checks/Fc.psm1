@@ -5,8 +5,35 @@ Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes, System.Drawing, Sy
 
 Add-Type -TypeDefinition @"
 using System;
+using System.Text;
 using System.Runtime.InteropServices;
 public static class FcWin32 {
+    public delegate bool EnumProc(IntPtr h, IntPtr l);
+    [DllImport("user32.dll")] public static extern bool EnumChildWindows(IntPtr parent, EnumProc cb, IntPtr l);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetClassName(IntPtr h, StringBuilder s, int n);
+    [DllImport("user32.dll")] public static extern IntPtr GetParent(IntPtr h);
+    [DllImport("user32.dll")] public static extern int GetDlgCtrlID(IntPtr h);
+    [DllImport("user32.dll")] public static extern IntPtr GetDlgItem(IntPtr h, int id);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr SendMessage(IntPtr h, uint msg, IntPtr w, string l);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr SendMessage(IntPtr h, uint msg, IntPtr w, StringBuilder l);
+    [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr h, uint msg, IntPtr w, IntPtr l);
+    static string ClassOf(IntPtr h) { var s = new StringBuilder(256); GetClassName(h, s, 256); return s.ToString(); }
+    // The File name box of a common file dialog: an Edit inside the ComboBox with control id 1001.
+    public static IntPtr FileNameEdit(IntPtr dlg) {
+        IntPtr found = IntPtr.Zero;
+        EnumChildWindows(dlg, (h, l) => {
+            if (ClassOf(h) == "Edit") {
+                IntPtr p = GetParent(h);
+                if (ClassOf(p) == "ComboBox" && GetDlgCtrlID(p) == 1001) { found = h; return false; }
+            }
+            return true;
+        }, IntPtr.Zero);
+        return found;
+    }
+    public static string GetText(IntPtr h) { var s = new StringBuilder(1024); SendMessage(h, 0x000D, (IntPtr)1024, s); return s.ToString(); }
+    public static void SetText(IntPtr h, string text) { SendMessage(h, 0x000C, IntPtr.Zero, text); }
+    // Posted, not sent: the replace prompt is modal and would block a sent click.
+    public static bool ClickButton(IntPtr dlg, int id) { IntPtr b = GetDlgItem(dlg, id); return b != IntPtr.Zero && PostMessage(b, 0x00F5, IntPtr.Zero, IntPtr.Zero); }
     [DllImport("user32.dll")] public static extern bool PrintWindow(IntPtr h, IntPtr dc, uint flags);
     [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
     [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
@@ -308,11 +335,6 @@ function Send-FcKeys {
     Start-Sleep -Milliseconds 300
 }
 
-function ConvertTo-FcSendKeys([string]$Text) {
-    # SendKeys treats + ^ % ~ ( ) { } [ ] as commands; braces make them literal.
-    -join ($Text.ToCharArray() | ForEach-Object { if ('+^%~(){}[]'.Contains($_)) { "{$_}" } else { "$_" } })
-}
-
 function Select-FcOption {
     # Picks an option of an HTML <select> by its text, then confirms the select shows it.
     param([Parameter(Mandatory)]$Combo, [Parameter(Mandatory)][string]$Option, [string]$TypeKeys)
@@ -409,20 +431,23 @@ function Complete-FcSaveDialog {
         return
     }
 
-    $edit = Find-FcDialogControl $dlg '1001' 'Edit'
-    $vp = $null
-    if ($edit -and $edit.TryGetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern, [ref]$vp)) {
-        $vp.SetValue($Path)
-        Start-Sleep -Milliseconds 300
-        Write-FcLog "file name box holds '$($vp.Current.Value)'"
-        $save = Find-FcDialogControl $dlg '1' 'Button'
-        if ($save) { Invoke-FcElement $save } else { Send-FcKeys '{ENTER}' -Window $dlg }
+    # The File name box exposes no Value pattern, and typing into it races its autocomplete,
+    # so the path goes in with WM_SETTEXT and Save is clicked with BM_CLICK.
+    $h = [IntPtr]$dlg.Current.NativeWindowHandle
+    $edit = [FcWin32]::FileNameEdit($h)
+    if ($edit -ne [IntPtr]::Zero) {
+        [FcWin32]::SetText($edit, $Path)
+        Start-Sleep -Milliseconds 200
+        $typed = [FcWin32]::GetText($edit)
+        Write-FcLog "file name box holds '$typed'"
+        if ($typed -ne $Path) { throw "the File name box holds '$typed', not '$Path'" }
+        if (-not [FcWin32]::ClickButton($h, 1)) { Send-FcKeys '{ENTER}' -Window $dlg }
     } else {
-        # The dialog opens with the File name box focused; Alt+N makes sure of it.
-        Write-FcLog 'no File name edit with a Value pattern; typing the path'
+        Write-FcLog 'no File name edit found; pasting the path'
+        Set-Clipboard -Value $Path
         Send-FcKeys '%n' -Window $dlg
         Send-FcKeys '^a' -Window $dlg
-        Send-FcKeys (ConvertTo-FcSendKeys $Path) -Window $dlg
+        Send-FcKeys '^v' -Window $dlg
         Send-FcKeys '{ENTER}' -Window $dlg
     }
 
