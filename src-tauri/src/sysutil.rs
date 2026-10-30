@@ -2,7 +2,9 @@ use std::collections::HashSet;
 use std::fmt::Write as _;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
+use std::io::Read as _;
+use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
@@ -317,17 +319,55 @@ pub fn measure_loudness(path: String, audio_tracks: Option<Vec<ffmpeg::AudioTrac
             "-map", "0:a:0",
         ]);
     }
-    let output = command.args(["-vn", "-f", "null", "-"])
-        .stdin(Stdio::null())
-        .output()
-        .map_err(|_| "FFmpeg could not be started to measure the audio.".to_string())?;
+    command.args(["-vn", "-f", "null", "-"]);
+    let (status, stderr) = run_superseding(&LOUDNESS_RUN, command)
+        .map_err(|_| "FFmpeg could not be started to measure the audio.".to_string())?
+        .ok_or_else(|| "A newer audio measurement replaced this one.".to_string())?;
 
-    if !output.status.success() {
+    if !status.success() {
         return Err("FFmpeg could not measure that audio mix.".to_string());
     }
 
     // loudnorm prints its analysis to stderr, after everything else ffmpeg has to say.
-    parse_loudness(&String::from_utf8_lossy(&output.stderr))
+    parse_loudness(&stderr)
+}
+
+/// The measurement still running. Each one decodes the whole file, so a newer request stops it.
+struct MeasureSlot {
+    latest: u64,
+    child: Option<Child>,
+}
+
+static LOUDNESS_RUN: Mutex<MeasureSlot> = Mutex::new(MeasureSlot { latest: 0, child: None });
+
+/// Kills the run the slot holds, then runs `command` to the end and returns its stderr.
+/// None when a newer run killed this one before it finished.
+fn run_superseding(slot: &Mutex<MeasureSlot>, mut command: Command) -> std::io::Result<Option<(ExitStatus, String)>> {
+    let lock = || slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    command.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped());
+    let (id, mut stderr) = {
+        let mut run = lock();
+        if let Some(mut previous) = run.child.take() {
+            let _ = previous.kill();
+            let _ = previous.wait();
+        }
+        run.latest += 1;
+        let mut child = command.spawn()?;
+        let stderr = child.stderr.take().ok_or_else(|| std::io::Error::other("no stderr pipe"))?;
+        run.child = Some(child);
+        (run.latest, stderr)
+    };
+    let mut bytes = Vec::new();
+    let _ = stderr.read_to_end(&mut bytes);
+    let child = {
+        let mut run = lock();
+        if run.latest != id {
+            return Ok(None);
+        }
+        run.child.take()
+    };
+    let Some(mut child) = child else { return Ok(None) };
+    Ok(Some((child.wait()?, String::from_utf8_lossy(&bytes).into_owned())))
 }
 
 fn parse_loudness(text: &str) -> Result<Loudness, String> {
@@ -947,6 +987,37 @@ fn base64_encode(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_new_loudness_run_kills_the_one_still_running() {
+        let slot = std::sync::Arc::new(Mutex::new(MeasureSlot { latest: 0, child: None }));
+        let (long, short) = if cfg!(windows) {
+            let mut long = Command::new("ping");
+            long.args(["-n", "30", "127.0.0.1"]);
+            let mut short = Command::new("cmd");
+            short.args(["/C", "echo done 1>&2"]);
+            (long, short)
+        } else {
+            let mut long = Command::new("sleep");
+            long.arg("30");
+            let mut short = Command::new("sh");
+            short.args(["-c", "echo done >&2"]);
+            (long, short)
+        };
+        let started = std::time::Instant::now();
+        let first = {
+            let slot = slot.clone();
+            std::thread::spawn(move || run_superseding(&slot, long).unwrap())
+        };
+        while slot.lock().unwrap().child.is_none() {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let (status, stderr) = run_superseding(&slot, short).unwrap().expect("the newest run finishes");
+        assert!(status.success());
+        assert_eq!(stderr.trim(), "done");
+        assert!(first.join().unwrap().is_none(), "the replaced run reports no result");
+        assert!(started.elapsed().as_secs() < 10, "the replaced run was left going for {:?}", started.elapsed());
+    }
 
     #[test]
     fn the_loudness_block_is_read_from_the_tail_of_ffmpeg_stderr() {

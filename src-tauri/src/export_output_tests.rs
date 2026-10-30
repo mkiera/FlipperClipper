@@ -297,9 +297,10 @@ fn destination_changed_to_source_is_rejected_at_completion() {
     let failure =
         finish_export(pending, Some(Ok(result.status)), false, &VecDeque::new()).unwrap_err();
     assert!(failure.message.contains("overwrite the video"));
+    assert!(!failure.cleaned_up);
     assert_eq!(std::fs::read(destination).unwrap(), source);
     assert_eq!(std::fs::read(&j.input).unwrap(), source);
-    assert!(!Path::new(&j.output).exists());
+    assert!(Path::new(&j.output).is_file());
 }
 
 #[cfg(windows)]
@@ -321,12 +322,55 @@ fn locked_destination_survives_publish_failure() {
     let failure =
         finish_export(pending, Some(Ok(result.status)), false, &VecDeque::new()).unwrap_err();
     assert!(failure.message.contains("could not replace"));
-    assert!(failure.cleaned_up);
+    assert!(!failure.cleaned_up);
     assert_eq!(
         std::fs::read(destination).unwrap(),
         b"previous successful export"
     );
-    assert!(!Path::new(&j.output).exists());
+    assert!(std::fs::metadata(&j.output).unwrap().len() > 0);
+}
+
+#[cfg(windows)]
+#[test]
+fn publish_failure_keeps_the_finished_export_and_says_where() {
+    use std::os::windows::fs::OpenOptionsExt;
+    let (_dir, mut j) = byte_fixture();
+    let destination = j.output.clone();
+    let pending = PendingOutput::new(&mut j).unwrap();
+    std::fs::write(&j.output, b"finished export").unwrap();
+    let _lock = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(3)
+        .open(&destination)
+        .unwrap();
+    let success = std::process::Command::new("cmd")
+        .args(["/C", "exit 0"])
+        .status();
+    let failure = finish_export(pending, Some(success), false, &VecDeque::new()).unwrap_err();
+    let kept_name = Path::new(&j.output).file_name().unwrap().to_string_lossy().into_owned();
+    assert!(failure.message.contains(&kept_name), "{}", failure.message);
+    assert!(!failure.cleaned_up);
+    assert_eq!(std::fs::read(&j.output).unwrap(), b"finished export");
+    assert_eq!(
+        std::fs::read(destination).unwrap(),
+        b"previous successful export"
+    );
+}
+
+#[test]
+fn a_kept_export_survives_when_its_attributes_cannot_be_cleared() {
+    let (_dir, mut j) = byte_fixture();
+    let pending = PendingOutput::new(&mut j).unwrap();
+    std::fs::write(&j.output, b"finished export").unwrap();
+    // Denying write-attributes makes tempfile's keep fail while delete still works.
+    let denied = std::process::Command::new("icacls")
+        .args([j.output.as_str(), "/deny", "*S-1-1-0:(WA)"])
+        .output()
+        .unwrap();
+    assert!(denied.status.success());
+    let kept = pending.keep().expect("keep gave no path");
+    assert_eq!(kept, Path::new(&j.output));
+    assert_eq!(std::fs::read(&j.output).unwrap(), b"finished export");
 }
 
 #[test]

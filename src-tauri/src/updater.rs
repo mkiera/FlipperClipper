@@ -2,6 +2,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
@@ -498,6 +499,7 @@ pub async fn install_release(app: tauri::AppHandle, info: ReleaseInfo) -> Result
 #[tauri::command]
 pub async fn install_alpha_build(app: tauri::AppHandle, build: AlphaBuild) -> Result<(), String> {
     refuse_while_exporting(&app, EXPORT_RUNNING)?;
+    let _downloading = claim_download()?;
 
     let dir = updates_dir(&app)?.join(format!("alpha-{}", build.run_id));
     // Removed first, so a half-extracted earlier attempt cannot be mistaken for this one's output.
@@ -544,19 +546,40 @@ async fn unpack_alpha_build(
     })
 }
 
+static DOWNLOADING: AtomicBool = AtomicBool::new(false);
+
+/// Clears the flag however the download ends, including on an early return.
+struct Downloading;
+
+impl Drop for Downloading {
+    fn drop(&mut self) {
+        DOWNLOADING.store(false, Ordering::SeqCst);
+    }
+}
+
+/// The pill and Settings can both start an update; only one may download and launch an installer.
+fn claim_download() -> Result<Downloading, String> {
+    if DOWNLOADING.swap(true, Ordering::SeqCst) {
+        return Err(ALREADY_DOWNLOADING.to_string());
+    }
+    Ok(Downloading)
+}
+
+const ALREADY_DOWNLOADING: &str =
+    "An update is already downloading. Let it finish, then try again.";
 const EXPORT_RUNNING: &str =
     "FlipperClipper is still exporting a clip. Let it finish, then update.";
 const EXPORT_STARTED_MEANWHILE: &str = "FlipperClipper started exporting a clip while the update was downloading. Let it finish, then update.";
 const ARTIFACT_GONE: &str = "That build's installer is no longer downloadable: CI artifacts are kept for 30 days, so this run's has expired, or the run predates the artifact.";
 
-/// A process handle and a bool, neither observable half-written, so a poisoned lock is read through.
+/// A process handle and two ids, none observable half-written, so a poisoned lock is read through.
 fn refuse_while_exporting(app: &tauri::AppHandle, message: &str) -> Result<(), String> {
     let export_running = app
         .state::<crate::AppState>()
         .export
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .child
+        .job
         .is_some();
     if export_running {
         return Err(message.to_string());
@@ -575,6 +598,7 @@ async fn download_and_install(
     // would be left detached, writing to a file the user thinks was abandoned. Refused before the
     // download, since there is nothing to gain from fetching eight megabytes first.
     refuse_while_exporting(&app, EXPORT_RUNNING)?;
+    let _downloading = claim_download()?;
 
     // Nothing downstream can tell a truncated installer from a complete one without a length
     // to check against, and a truncated installer that still runs is the worst outcome here.
@@ -674,6 +698,14 @@ mod tests {
         ]
       }
     ]"#;
+
+    #[test]
+    fn only_one_update_downloads_at_a_time() {
+        let first = claim_download().expect("the first download is allowed");
+        assert_eq!(claim_download().err().as_deref(), Some(ALREADY_DOWNLOADING));
+        drop(first);
+        assert!(claim_download().is_ok(), "the flag outlived the download");
+    }
 
     #[test]
     fn the_real_github_payload_deserialises_and_is_offered_on_the_prerelease_channel() {
