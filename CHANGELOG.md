@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- Cancel now stops an export even when it is clicked in the first moments after Export, so the existing file is left alone.
+- If a finished export cannot replace a locked or read-only file, it is kept beside it, and the message says where.
+- Closing the window during an export no longer leaves a part-written file in the export folder.
+- Export error messages keep FFmpeg's full explanation when the source has unusual text in its metadata.
+- Update and FFmpeg downloads stop with an error and a Retry button when the connection stalls, instead of hanging.
+- Checking for updates while one is downloading no longer interrupts the download, and the installer file can no longer be corrupted by two downloads at once.
+- Automatic update checks run every hour as intended, not every two hours.
+- The default output size setting is kept after a restart.
+- Settings are saved safely, so a crash while saving no longer resets them.
+- Variable frame rate clips, such as browser screen recordings, export at a normal speed and size with a speed ramp or the Fit quality setting.
+- Lossless trims of WMV, OGV and other formats that MP4 cannot hold are offered only as MKV, so they no longer fail after the save dialog.
+- Changing track volumes with Normalize on no longer leaves several loudness measurements running at once.
+
 ## 1.2.0 - 2026-10-02
 
 - Exports can no longer overwrite the video you are editing, even when the chosen file reaches it through a hard link, a folder junction or a differently written path.
