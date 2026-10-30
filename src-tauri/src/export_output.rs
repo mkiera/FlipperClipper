@@ -89,7 +89,12 @@ impl PendingOutput {
     }
 
     pub(crate) fn keep(mut self) -> Option<PathBuf> {
-        self.temporary.take().and_then(|path| path.keep().ok())
+        let mut path = self.temporary.take()?;
+        // TempPath::keep deletes the file when clearing its attributes fails, unless cleanup is off.
+        path.disable_cleanup(true);
+        let kept = path.to_path_buf();
+        let _ = path.keep();
+        Some(kept)
     }
 
     pub(crate) fn discard(mut self) -> bool {

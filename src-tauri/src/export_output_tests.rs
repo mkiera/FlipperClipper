@@ -358,6 +358,22 @@ fn publish_failure_keeps_the_finished_export_and_says_where() {
 }
 
 #[test]
+fn a_kept_export_survives_when_its_attributes_cannot_be_cleared() {
+    let (_dir, mut j) = byte_fixture();
+    let pending = PendingOutput::new(&mut j).unwrap();
+    std::fs::write(&j.output, b"finished export").unwrap();
+    // Denying write-attributes makes tempfile's keep fail while delete still works.
+    let denied = std::process::Command::new("icacls")
+        .args([j.output.as_str(), "/deny", "*S-1-1-0:(WA)"])
+        .output()
+        .unwrap();
+    assert!(denied.status.success());
+    let kept = pending.keep().expect("keep gave no path");
+    assert_eq!(kept, Path::new(&j.output));
+    assert_eq!(std::fs::read(&j.output).unwrap(), b"finished export");
+}
+
+#[test]
 fn lossless_export_to_new_destination_publishes_successfully() {
     let Some((dir, mut j)) = export_fixture() else {
         return;
