@@ -22,7 +22,13 @@ pub struct ExportSlot {
     // later export does not inherit it. Lives beside the child handle so a user cancel and
     // ffmpeg dying on its own - identical from the watcher thread's side - resolve to one outcome.
     pub cancelled_job: Option<u64>,
+    // Set once the window starts closing, so no export can start while it waits to go.
+    pub closing: bool,
 }
+
+/// Long enough for a killed ffmpeg to exit and its temp file to go, short enough that a stuck
+/// one does not hold the window open.
+const CLOSE_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
 
 pub struct AppState {
     // Cached for the life of the process: detection costs one real ffmpeg run
@@ -39,6 +45,7 @@ impl AppState {
                 child: None,
                 job: None,
                 cancelled_job: None,
+                closing: false,
             })),
         }
     }
@@ -62,10 +69,17 @@ pub fn run() {
         })
         // Closing the window ends the process, and a running ffmpeg is a child Windows does
         // not reap - it would keep writing to a file nobody is waiting for. Killing it takes
-        // the same path a cancel does, so the part-written output is removed with it.
+        // the same path a cancel does, and the window stays until that path has removed the
+        // part-written output, because the process exit would otherwise cut it short.
         .on_window_event(|window, event| {
-            if matches!(event, tauri::WindowEvent::CloseRequested { .. }) {
-                export::cancel_current(window.app_handle());
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                let window = window.clone();
+                let slot = Arc::clone(&window.app_handle().state::<AppState>().export);
+                std::thread::spawn(move || {
+                    export::close_export(&slot, CLOSE_WAIT);
+                    let _ = window.destroy();
+                });
             }
         })
         .invoke_handler(tauri::generate_handler![

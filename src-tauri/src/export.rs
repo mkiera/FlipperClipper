@@ -86,6 +86,9 @@ struct Claim {
 impl Claim {
     fn take(slot: &Arc<Mutex<ExportSlot>>, job: u64) -> Result<Self, String> {
         let mut guard = lock_slot(slot);
+        if guard.closing {
+            return Err("FlipperClipper is closing.".to_string());
+        }
         // Two ffmpegs on one output write a corrupt file and neither of them reports an error.
         if guard.job.is_some() {
             return Err("An export is already running. Cancel it first.".to_string());
@@ -179,10 +182,14 @@ fn test_encode(encoder: &str) -> bool {
 /// filtergraph path has to be quoted and a quoted one cannot express an apostrophe - which a
 /// Windows user name is allowed to contain. One folder per process, reused across exports.
 fn overlay_dir() -> Result<PathBuf, String> {
-    let dir = std::env::temp_dir().join(format!("flipperclipper-overlay-{}", std::process::id()));
+    let dir = overlay_dir_path();
     std::fs::create_dir_all(&dir)
         .map_err(|_| "Windows would not let FlipperClipper write to the temp folder.".to_string())?;
     Ok(dir)
+}
+
+fn overlay_dir_path() -> PathBuf {
+    std::env::temp_dir().join(format!("flipperclipper-overlay-{}", std::process::id()))
 }
 
 fn overlay_font() -> Option<PathBuf> {
@@ -398,12 +405,29 @@ pub fn cancel_export(app: AppHandle, job_id: u64) {
     lock_slot(&app.state::<AppState>().export).cancel(job_id);
 }
 
-pub fn cancel_current(app: &AppHandle) {
-    let state = app.state::<AppState>();
-    let mut slot = lock_slot(&state.export);
-    if let Some(job) = slot.job {
-        slot.cancel(job);
+/// Stops any export and returns once its watcher has removed the part-written file, or after
+/// `limit`. The process exits as soon as the last window is gone, which ends the watcher
+/// thread wherever it has got to. True when the slot emptied in time.
+pub fn close_export(slot: &Mutex<ExportSlot>, limit: Duration) -> bool {
+    {
+        let mut slot = lock_slot(slot);
+        slot.closing = true;
+        if let Some(job) = slot.job {
+            slot.cancel(job);
+        }
     }
+    let deadline = Instant::now() + limit;
+    let idle = loop {
+        if lock_slot(slot).job.is_none() {
+            break true;
+        }
+        if Instant::now() >= deadline {
+            break false;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    let _ = std::fs::remove_dir_all(overlay_dir_path());
+    idle
 }
 
 /// Matched here rather than imported, so a new container fails to compile in this match
@@ -848,6 +872,7 @@ mod tests {
             child: None,
             job: None,
             cancelled_job: None,
+            closing: false,
         }))
     }
 
@@ -907,6 +932,44 @@ mod tests {
         lock_slot(&slot).attach(2, long_running_child());
         let mut child = lock_slot(&slot).child.take().unwrap();
         assert!(!exits_within(&mut child, Duration::from_millis(300)));
+    }
+
+    #[test]
+    fn closing_waits_until_the_cancelled_export_has_removed_its_temp_file() {
+        let slot = empty_slot();
+        let dir = tempfile::tempdir().unwrap();
+        let partial = dir.path().join(".flipperclipper-export-test.mp4");
+        std::fs::write(&partial, b"part-written").unwrap();
+        let claim = Claim::take(&slot, 5).unwrap();
+        lock_slot(&slot).attach(5, long_running_child());
+
+        // Does what the real watcher does after ffmpeg's pipes close: reap, clean up, release.
+        let watcher_slot = Arc::clone(&slot);
+        let watcher_partial = partial.clone();
+        let watcher = std::thread::spawn(move || {
+            loop {
+                let exited = lock_slot(&watcher_slot)
+                    .child
+                    .as_mut()
+                    .is_some_and(|child| child.try_wait().unwrap().is_some());
+                if exited {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            let _ = lock_slot(&watcher_slot).child.take().map(|mut child| child.wait());
+            std::thread::sleep(Duration::from_millis(200));
+            std::fs::remove_file(watcher_partial).unwrap();
+            drop(claim);
+        });
+
+        std::fs::write(overlay_dir().unwrap().join(ffmpeg::OVERLAY_TEXT_FILE), b"words").unwrap();
+
+        assert!(close_export(&slot, Duration::from_secs(10)));
+        assert!(!partial.exists(), "the window closed before the temp file was removed");
+        assert!(!overlay_dir_path().exists(), "the overlay text outlived the app");
+        assert!(Claim::take(&slot, 6).is_err(), "an export started while closing");
+        watcher.join().unwrap();
     }
 
     #[test]
