@@ -64,11 +64,6 @@ $results = foreach ($check in $checks) {
     $seconds = [int]((Get-Date) - $start).TotalSeconds
 
     Import-Module $env:FC_UI_MODULE -Force
-    if ($code -ne 0) {
-        try {
-            if (Get-FcProcess) { Save-FcScreenshot -Name 'on-failure' | Out-Null }
-        } catch { Write-Host "no failure screenshot: $_" }
-    }
     # A check that throws leaves the app or an export running, which would spoil the next check.
     Stop-FcAll
     Write-Host '::endgroup::'

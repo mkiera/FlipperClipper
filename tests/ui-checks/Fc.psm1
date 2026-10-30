@@ -302,6 +302,11 @@ function Send-FcKeys {
     Start-Sleep -Milliseconds 300
 }
 
+function ConvertTo-FcSendKeys([string]$Text) {
+    # SendKeys treats + ^ % ~ ( ) { } [ ] as commands; braces make them literal.
+    -join ($Text.ToCharArray() | ForEach-Object { if ('+^%~(){}[]'.Contains($_)) { "{$_}" } else { "$_" } })
+}
+
 function Select-FcOption {
     # Picks an option of an HTML <select> by its text, then confirms the select shows it.
     param([Parameter(Mandatory)]$Combo, [Parameter(Mandatory)][string]$Option, [string]$TypeKeys)
@@ -386,10 +391,25 @@ function Set-FcTrimEnd {
         $win = (Get-FcWindow).Current.BoundingRectangle
         $toX = [int]($win.Left + ($fromX - $win.Left) * $Fraction)
     }
+    $win = Get-FcWindow
     Invoke-FcDrag -FromX $fromX -FromY $y -ToX $toX -ToY $y
+    $fg = [FcWin32]::GetForegroundWindow()
+    Write-FcLog "foreground window $fg, app window $($win.Current.NativeWindowHandle)"
     $after = Get-FcTimeLabel
-    Write-FcLog "time label '$before' -> '$after'"
-    if ($before -eq $after) { throw "dragging the trim-end handle did not change the export length ('$after')" }
+    Write-FcLog "time label after the drag '$before' -> '$after'"
+    if ($before -ne $after) { return $after }
+
+    Save-FcDesktopScreenshot -Name 'trim-drag-no-effect' | Out-Null
+    # Keyboard route: Shift+Right steps one second, O sets the trim end at the playhead.
+    $play = Find-FcElement -Id 'play-btn' -Name 'Play' -ControlType Button
+    $play.SetFocus()
+    Send-FcKeys '{HOME}'
+    $seconds = [int][math]::Max(1, [math]::Round(6 * $Fraction))
+    for ($i = 0; $i -lt $seconds; $i++) { Send-FcKeys '+{RIGHT}' }
+    Send-FcKeys 'o'
+    $after = Get-FcTimeLabel
+    Write-FcLog "time label after the keyboard trim '$before' -> '$after'"
+    if ($before -eq $after) { throw "neither dragging the trim-end handle nor Shift+Right then O changed the export length ('$after')" }
     return $after
 }
 
@@ -409,7 +429,17 @@ function Complete-FcSaveDialog {
     }
     $edit = Find-FcElement -Scope $dlg -Id '1001' -ControlType Edit -TimeoutSeconds 5 -Optional
     if (-not $edit) { $edit = Find-FcElement -Scope $dlg -Name 'File name:' -ControlType Edit }
-    Set-FcText $edit -Value $Path
+    $vp = $null
+    if ($edit.TryGetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern, [ref]$vp)) {
+        $vp.SetValue($Path)
+    } else {
+        # The File name box in this dialog exposes no Value pattern, so type into it instead.
+        $edit.SetFocus()
+        Send-FcKeys '^a' -Window $dlg
+        Send-FcKeys (ConvertTo-FcSendKeys $Path) -Window $dlg
+    }
+    Start-Sleep -Milliseconds 300
+    Write-FcLog "file name box holds '$(try { $edit.Current.Name; (Get-FcValue $edit) } catch { '?' })'"
     $save = Find-FcElement -Scope $dlg -Id '1' -ControlType Button -TimeoutSeconds 5 -Optional
     if (-not $save) { $save = Find-FcElement -Scope $dlg -Name 'Save' -ControlType Button }
     Invoke-FcElement $save
