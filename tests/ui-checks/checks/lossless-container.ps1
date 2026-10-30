@@ -10,7 +10,7 @@ Invoke-FcCheck 'lossless-container' {
 
     Start-Fc -File $wmv | Out-Null
     Get-FcTree -Name 'tree-wmv' | Out-Null
-    $label = Set-FcTrimEnd -Fraction 0.6
+    $label = Set-FcTrimEnd -Seconds 3
     Save-FcScreenshot -Name 'wmv-trimmed' | Out-Null
 
     $format = Find-FcElement -Id 'format-select' -Name 'Export format' -ControlType ComboBox
@@ -38,7 +38,7 @@ Invoke-FcCheck 'lossless-container' {
     Close-Fc | Out-Null
 
     Start-Fc -File $mp4 | Out-Null
-    $label = Set-FcTrimEnd -Fraction 0.6
+    $label = Set-FcTrimEnd -Seconds 3
     $format = Find-FcElement -Id 'format-select' -Name 'Export format' -ControlType ComboBox
     Assert-Fc ((Get-FcValue $format) -eq 'MP4') "an MP4 starts on '$(Get-FcValue $format)'"
     $route = Start-FcExport

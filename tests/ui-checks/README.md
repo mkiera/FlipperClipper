@@ -72,8 +72,8 @@ name (`aria-label`, label text or button text) as `Name`. `Find-FcElement` tries
 | `Find-FcElement -Id -Name -NameLike -ControlType -Index -Scope -Window` | Waits for a control |
 | `Get-FcTexts`, `Find-FcText -Like` | Visible text, for toasts, labels and banners |
 | `Invoke-FcElement`, `Switch-FcElement`, `Select-FcOption`, `Set-FcText` | Click, toggle, pick a `<select>` option, type into a text box |
-| `Send-FcKeys`, `Invoke-FcDrag` | Real keyboard and mouse input to the app window |
-| `Set-FcTrimEnd -Fraction` | Drags the trim-end handle and confirms the export length changed |
+| `Send-FcKeys` | Real keyboard input to the app window or a dialog |
+| `Set-FcTrimEnd -Seconds` | Sets the trim end with Shift+Right and O and confirms the export length changed |
 | `Start-FcExport`, `Confirm-FcPopoverExport`, `Complete-FcSaveDialog`, `Wait-FcExported` | One export, from the Export button to the toast |
 | `Get-FcProbe`, `Test-FcDecodes` | ffprobe a file, decode it fully |
 | `Get-FcExportTemps <folder>` | The `.flipperclipper-export-*` files in a folder |

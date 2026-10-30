@@ -197,6 +197,10 @@ function Find-FcElement {
             try {
                 if ($Id) {
                     $c = New-Object System.Windows.Automation.PropertyCondition($AE::AutomationIdProperty, $Id)
+                    if ($type) {
+                        $c = New-Object System.Windows.Automation.AndCondition($c,
+                            (New-Object System.Windows.Automation.PropertyCondition($AE::ControlTypeProperty, $type)))
+                    }
                     $all = $root.FindAll($Descendants, $c)
                     if ($all.Count -gt $Index) { $found = $all.Item($Index) }
                 }
@@ -286,11 +290,13 @@ function Set-FcForeground {
     param($Element)
     if (-not $Element) { $Element = Get-FcWindow }
     $h = [IntPtr]$Element.Current.NativeWindowHandle
-    # A key press first lifts the foreground lock Windows puts on background processes.
-    [FcWin32]::keybd_event(0x12, 0, 0, [UIntPtr]::Zero)
-    [FcWin32]::keybd_event(0x12, 0, 2, [UIntPtr]::Zero)
+    if ([FcWin32]::GetForegroundWindow() -eq $h) { return }
+    # Not Alt: a lone Alt tap puts the window in menu mode, which eats the next key or click.
+    [FcWin32]::keybd_event(0x87, 0, 0, [UIntPtr]::Zero)
+    [FcWin32]::keybd_event(0x87, 0, 2, [UIntPtr]::Zero)
     [FcWin32]::SetForegroundWindow($h) | Out-Null
     Start-Sleep -Milliseconds 300
+    if ([FcWin32]::GetForegroundWindow() -ne $h) { Write-FcLog "warning: window $h did not come to the foreground" }
 }
 
 function Send-FcKeys {
@@ -343,118 +349,99 @@ function Select-FcOption {
     Write-FcLog "select now shows '$(Get-FcValue $Combo)'"
 }
 
-function Invoke-FcDrag {
-    # Drags with the real mouse from one screen point to another, in small steps.
-    param([int]$FromX, [int]$FromY, [int]$ToX, [int]$ToY, [int]$Steps = 20)
-    Set-FcForeground
-    Write-FcLog "drag ($FromX,$FromY) -> ($ToX,$ToY)"
-    [FcWin32]::SetCursorPos($FromX, $FromY) | Out-Null
-    Start-Sleep -Milliseconds 200
-    [FcWin32]::mouse_event(0x0002, 0, 0, 0, [UIntPtr]::Zero)
-    Start-Sleep -Milliseconds 150
-    for ($i = 1; $i -le $Steps; $i++) {
-        $x = [int]($FromX + ($ToX - $FromX) * $i / $Steps)
-        $y = [int]($FromY + ($ToY - $FromY) * $i / $Steps)
-        [FcWin32]::SetCursorPos($x, $y) | Out-Null
-        [FcWin32]::mouse_event(0x0001, 0, 0, 0, [UIntPtr]::Zero)
-        Start-Sleep -Milliseconds 30
-    }
-    Start-Sleep -Milliseconds 150
-    [FcWin32]::mouse_event(0x0004, 0, 0, 0, [UIntPtr]::Zero)
-    Start-Sleep -Milliseconds 400
-}
-
 function Get-FcTimeLabel {
     # "0:00.0 / 0:06.0": the second half is the length of the export.
     Get-FcTexts | Where-Object { $_ -match '^\d+:\d\d\.\d / \d+:\d\d\.\d$' } | Select-Object -First 1
 }
 
 function Set-FcTrimEnd {
-    # Drags the timeline's trim-end handle to a fraction of the clip, then returns the time label.
-    param([double]$Fraction = 0.6)
+    # Moves the playhead with Shift+Right (one second each) and sets the trim end there with O,
+    # the app's own keyboard route. Returns the time label, whose second half is the export length.
+    param([int]$Seconds = 3)
     $before = Get-FcTimeLabel
-    $handle = Find-FcElement -Id 'tl-out' -Name 'Trim end (O)' -TimeoutSeconds 5 -Optional
-    $track = Find-FcElement -Id 'tl-track' -TimeoutSeconds 2 -Optional
-    if (-not $track) { $track = Find-FcElement -Id 'tl-scroll' -TimeoutSeconds 2 -Optional }
-    if ($handle) {
-        $hr = $handle.Current.BoundingRectangle
-        $fromX = [int]($hr.Left + $hr.Width / 2); $y = [int]($hr.Top + $hr.Height / 2)
-        Write-FcLog "trim-end handle at $hr"
-    } else {
-        throw 'the trim-end handle is not exposed to UI Automation'
-    }
-    if ($track) {
-        $tr = $track.Current.BoundingRectangle
-        $toX = [int]($tr.Left + $tr.Width * $Fraction)
-        Write-FcLog "track at $tr"
-    } else {
-        $win = (Get-FcWindow).Current.BoundingRectangle
-        $toX = [int]($win.Left + ($fromX - $win.Left) * $Fraction)
-    }
-    $win = Get-FcWindow
-    Invoke-FcDrag -FromX $fromX -FromY $y -ToX $toX -ToY $y
-    $fg = [FcWin32]::GetForegroundWindow()
-    Write-FcLog "foreground window $fg, app window $($win.Current.NativeWindowHandle)"
-    $after = Get-FcTimeLabel
-    Write-FcLog "time label after the drag '$before' -> '$after'"
-    if ($before -ne $after) { return $after }
-
-    Save-FcDesktopScreenshot -Name 'trim-drag-no-effect' | Out-Null
-    # Keyboard route: Shift+Right steps one second, O sets the trim end at the playhead.
     $play = Find-FcElement -Id 'play-btn' -Name 'Play' -ControlType Button
+    Set-FcForeground
     $play.SetFocus()
     Send-FcKeys '{HOME}'
-    $seconds = [int][math]::Max(1, [math]::Round(6 * $Fraction))
-    for ($i = 0; $i -lt $seconds; $i++) { Send-FcKeys '+{RIGHT}' }
+    for ($i = 0; $i -lt $Seconds; $i++) { Send-FcKeys '+{RIGHT}' }
     Send-FcKeys 'o'
     $after = Get-FcTimeLabel
-    Write-FcLog "time label after the keyboard trim '$before' -> '$after'"
-    if ($before -eq $after) { throw "neither dragging the trim-end handle nor Shift+Right then O changed the export length ('$after')" }
+    Write-FcLog "time label '$before' -> '$after'"
+    if ($before -eq $after) { throw "Shift+Right then O did not change the export length ('$after')" }
     return $after
 }
 
+function Get-FcDialog {
+    # A dialog of the app as its own top-level element. Reached through the main window, its
+    # controls show up as bare panes without the Value and Invoke patterns.
+    param([Parameter(Mandatory)][string]$Title, [int]$TimeoutSeconds = 20, [switch]$Optional)
+    $w = Get-FcWindow -Title $Title -TimeoutSeconds $TimeoutSeconds -Optional
+    if (-not $w) {
+        if ($Optional) { return $null }
+        throw "no window titled '$Title'"
+    }
+    $h = [IntPtr]$w.Current.NativeWindowHandle
+    if ($h -ne [IntPtr]::Zero) {
+        try { return $AE::FromHandle($h) } catch { }
+    }
+    return $w
+}
+
+function Find-FcDialogControl($Dialog, [string]$Id, [string]$ControlType) {
+    $cond = New-Object System.Windows.Automation.AndCondition(
+        (New-Object System.Windows.Automation.PropertyCondition($AE::AutomationIdProperty, $Id)),
+        (New-Object System.Windows.Automation.PropertyCondition($AE::ControlTypeProperty, [System.Windows.Automation.ControlType]::$ControlType)))
+    try { return $Dialog.FindFirst($Descendants, $cond) } catch { return $null }
+}
+
 function Complete-FcSaveDialog {
-    # Drives the Windows "Export clip" save dialog: types the full path and presses Save,
+    # Drives the Windows "Export clip" save dialog: enters the full path and presses Save,
     # answering Yes when Windows asks to replace an existing file.
     param([Parameter(Mandatory)][string]$Path, [switch]$Cancel, [string]$ShotName = 'save-dialog')
 
-    $dlg = Get-FcWindow -Title 'Export clip' -TimeoutSeconds 20
+    $dlg = Get-FcDialog -Title 'Export clip'
     Start-Sleep -Milliseconds 700
     Save-FcScreenshot -Name $ShotName -Element $dlg | Out-Null
     if ($Cancel) {
-        $btn = Find-FcElement -Scope $dlg -Id '2' -Name 'Cancel' -ControlType Button
-        Invoke-FcElement $btn
+        $btn = Find-FcDialogControl $dlg '2' 'Button'
+        if ($btn) { Invoke-FcElement $btn } else { Send-FcKeys '{ESC}' -Window $dlg }
         Wait-Fc -TimeoutSeconds 10 -What 'the save dialog to close' { -not (Get-FcWindow -Title 'Export clip' -TimeoutSeconds 0 -Optional) }
         return
     }
-    $edit = Find-FcElement -Scope $dlg -Id '1001' -ControlType Edit -TimeoutSeconds 5 -Optional
-    if (-not $edit) { $edit = Find-FcElement -Scope $dlg -Name 'File name:' -ControlType Edit }
+
+    $edit = Find-FcDialogControl $dlg '1001' 'Edit'
     $vp = $null
-    if ($edit.TryGetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern, [ref]$vp)) {
+    if ($edit -and $edit.TryGetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern, [ref]$vp)) {
         $vp.SetValue($Path)
+        Start-Sleep -Milliseconds 300
+        Write-FcLog "file name box holds '$($vp.Current.Value)'"
+        $save = Find-FcDialogControl $dlg '1' 'Button'
+        if ($save) { Invoke-FcElement $save } else { Send-FcKeys '{ENTER}' -Window $dlg }
     } else {
-        # The File name box in this dialog exposes no Value pattern, so type into it instead.
-        $edit.SetFocus()
+        # The dialog opens with the File name box focused; Alt+N makes sure of it.
+        Write-FcLog 'no File name edit with a Value pattern; typing the path'
+        Send-FcKeys '%n' -Window $dlg
         Send-FcKeys '^a' -Window $dlg
         Send-FcKeys (ConvertTo-FcSendKeys $Path) -Window $dlg
+        Send-FcKeys '{ENTER}' -Window $dlg
     }
-    Start-Sleep -Milliseconds 300
-    Write-FcLog "file name box holds '$(try { $edit.Current.Name; (Get-FcValue $edit) } catch { '?' })'"
-    $save = Find-FcElement -Scope $dlg -Id '1' -ControlType Button -TimeoutSeconds 5 -Optional
-    if (-not $save) { $save = Find-FcElement -Scope $dlg -Name 'Save' -ControlType Button }
-    Invoke-FcElement $save
 
     $deadline = (Get-Date).AddSeconds(10)
     while ((Get-Date) -lt $deadline) {
-        $confirm = Get-FcWindow -Title 'Confirm Save As' -TimeoutSeconds 0 -Optional
+        $confirm = Get-FcDialog -Title 'Confirm Save As' -TimeoutSeconds 0 -Optional
         if ($confirm) {
             Save-FcScreenshot -Name "$ShotName-replace" -Element $confirm | Out-Null
-            Invoke-FcElement (Find-FcElement -Scope $confirm -Name 'Yes' -ControlType Button)
+            $yes = Find-FcElement -Scope $confirm -Name 'Yes' -ControlType Button -TimeoutSeconds 2 -Optional
+            $ip = $null
+            if ($yes -and $yes.TryGetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern, [ref]$ip)) { $ip.Invoke() }
+            else { Send-FcKeys '%y' -Window $confirm }
+            Start-Sleep -Milliseconds 500
             continue
         }
         if (-not (Get-FcWindow -Title 'Export clip' -TimeoutSeconds 0 -Optional)) { return }
         Start-Sleep -Milliseconds 100
     }
+    Save-FcDesktopScreenshot -Name "$ShotName-stuck" | Out-Null
     throw 'the save dialog did not close'
 }
 
