@@ -21,7 +21,7 @@ pub struct ExportSlot {
     // Per job id, so a cancel that lands before the child exists still stops that export and a
     // later export does not inherit it. Lives beside the child handle so a user cancel and
     // ffmpeg dying on its own - identical from the watcher thread's side - resolve to one outcome.
-    pub cancelled_job: Option<u64>,
+    pub cancelled_jobs: std::collections::HashSet<u64>,
     // Set once the window starts closing, so no export can start while it waits to go.
     pub closing: bool,
 }
@@ -44,7 +44,7 @@ impl AppState {
             export: Arc::new(Mutex::new(ExportSlot {
                 child: None,
                 job: None,
-                cancelled_job: None,
+                cancelled_jobs: Default::default(),
                 closing: false,
             })),
         }

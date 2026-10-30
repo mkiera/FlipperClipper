@@ -55,11 +55,11 @@ fn lock_slot(slot: &Mutex<ExportSlot>) -> MutexGuard<'_, ExportSlot> {
 
 impl ExportSlot {
     fn is_cancelled(&self, job: u64) -> bool {
-        self.cancelled_job == Some(job)
+        self.cancelled_jobs.contains(&job)
     }
 
     fn cancel(&mut self, job: u64) {
-        self.cancelled_job = Some(job);
+        self.cancelled_jobs.insert(job);
         if self.job == Some(job) {
             if let Some(child) = self.child.as_mut() {
                 let _ = child.kill();
@@ -87,10 +87,12 @@ impl Claim {
     fn take(slot: &Arc<Mutex<ExportSlot>>, job: u64) -> Result<Self, String> {
         let mut guard = lock_slot(slot);
         if guard.closing {
+            guard.cancelled_jobs.remove(&job);
             return Err("FlipperClipper is closing.".to_string());
         }
         // Two ffmpegs on one output write a corrupt file and neither of them reports an error.
         if guard.job.is_some() {
+            guard.cancelled_jobs.remove(&job);
             return Err("An export is already running. Cancel it first.".to_string());
         }
         guard.job = Some(job);
@@ -109,6 +111,7 @@ impl Drop for Claim {
             let _ = std::fs::remove_file(path);
         }
         let mut slot = lock_slot(&self.slot);
+        slot.cancelled_jobs.remove(&self.job);
         if slot.job == Some(self.job) {
             slot.job = None;
         }
@@ -871,7 +874,7 @@ mod tests {
         Arc::new(Mutex::new(ExportSlot {
             child: None,
             job: None,
-            cancelled_job: None,
+            cancelled_jobs: Default::default(),
             closing: false,
         }))
     }
@@ -922,6 +925,18 @@ mod tests {
         lock_slot(&slot).cancel(3);
         let _claim = Claim::take(&slot, 3).unwrap();
         assert!(lock_slot(&slot).is_cancelled(3));
+    }
+
+    #[test]
+    fn a_cancel_for_a_rejected_export_keeps_the_running_one_cancelled() {
+        let slot = empty_slot();
+        let _running = Claim::take(&slot, 10).unwrap();
+        lock_slot(&slot).cancel(10);
+        // The UI cancels the next export before its start reaches the backend and is turned away.
+        lock_slot(&slot).cancel(11);
+        assert!(Claim::take(&slot, 11).is_err());
+        assert!(lock_slot(&slot).is_cancelled(10), "a later cancel undid the first one");
+        assert!(!lock_slot(&slot).is_cancelled(11), "the rejected export left its cancel behind");
     }
 
     #[test]
