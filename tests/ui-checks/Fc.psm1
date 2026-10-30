@@ -431,11 +431,8 @@ function Complete-FcSaveDialog {
         $confirm = Get-FcDialog -Title 'Confirm Save As' -TimeoutSeconds 0 -Optional
         if ($confirm) {
             Save-FcScreenshot -Name "$ShotName-replace" -Element $confirm | Out-Null
-            $yes = Find-FcElement -Scope $confirm -Name 'Yes' -ControlType Button -TimeoutSeconds 2 -Optional
-            $ip = $null
-            if ($yes -and $yes.TryGetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern, [ref]$ip)) { $ip.Invoke() }
-            else { Send-FcKeys '%y' -Window $confirm }
-            Start-Sleep -Milliseconds 500
+            # Alt+Y is the dialog's own Yes; its button is not reliably exposed to UI Automation.
+            Send-FcKeys '%y' -Window $confirm
             continue
         }
         if (-not (Get-FcWindow -Title 'Export clip' -TimeoutSeconds 0 -Optional)) { return }

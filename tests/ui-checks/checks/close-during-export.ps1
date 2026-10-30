@@ -23,12 +23,12 @@ Invoke-FcCheck 'close-during-export' {
     if ($route -eq 'popover') { Confirm-FcPopoverExport -Lossless $false }
     Complete-FcSaveDialog -Path $out -ShotName 'save-long-export'
 
-    # Proof the export is really under way: FFmpeg is writing the temp file and the overlay folder exists.
-    Wait-Fc -TimeoutSeconds 60 -What 'FFmpeg to start writing the export' {
-        $t = Get-FcExportTemps $work | Where-Object Length -gt 0
-        $t -and (Get-FcFfmpegProcesses).Count -gt 0
+    # Proof the export is really under way: FFmpeg runs, its temp file exists and progress shows.
+    # The listed size of a file FFmpeg still holds open stays 0, so the size is not a signal.
+    Wait-Fc -TimeoutSeconds 60 -What 'FFmpeg to start the export' {
+        (Get-FcExportTemps $work).Count -gt 0 -and (Get-FcFfmpegProcesses).Count -gt 0
     } | Out-Null
-    Start-Sleep -Seconds 3
+    Start-Sleep -Seconds 2
     $temps = Get-FcExportTemps $work
     $dirs = & $overlayDirs
     $pct = Get-FcTexts | Where-Object { $_ -match '^\d+%$' } | Select-Object -First 1
@@ -38,6 +38,7 @@ Invoke-FcCheck 'close-during-export' {
     Assert-Fc ($dirs.Count -ge 1) 'the overlay temp folder exists before the close'
     Assert-Fc (-not (Find-FcText -Like 'Exported*')) 'the export is still running when the window is closed'
     $ffmpegIds = @(Get-FcFfmpegProcesses | ForEach-Object Id)
+    Assert-Fc ($ffmpegIds.Count -gt 0) 'FFmpeg is still running when the window is closed'
 
     $seconds = Close-Fc -TimeoutSeconds 20
     Assert-Fc ($seconds -lt 8) ("the app exited {0:N1} s after the window was closed" -f $seconds)

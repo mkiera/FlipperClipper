@@ -1,11 +1,12 @@
 # Cancel pressed the moment an export over an existing file starts leaves that file alone,
-# and the next export runs normally.
+# and the next export runs normally. The long clip makes sure the cancel lands before the
+# export could have finished on its own.
 $ErrorActionPreference = 'Stop'
 Import-Module $env:FC_UI_MODULE
 
 Invoke-FcCheck 'export-cancel-early' {
     Initialize-FcProfile | Out-Null
-    $clip = Get-FcMedia 'clip.mp4'
+    $clip = Get-FcMedia 'long.mp4'
     $work = Get-FcWorkDir
     $dest = Join-Path $work 'existing.mp4'
     Copy-Item (Join-Path $env:FC_UI_MEDIA 'other.mp4') $dest
@@ -27,7 +28,6 @@ Invoke-FcCheck 'export-cancel-early' {
     Write-FcLog "cancel pressed; ffmpeg processes then: $spawned, temp export files then: $temps"
     Save-FcScreenshot -Name 'after-cancel' | Out-Null
 
-    # Long enough for an export that was not really stopped to finish a 6 s clip and publish it.
     $deadline = (Get-Date).AddSeconds(15)
     $toast = $null
     while ((Get-Date) -lt $deadline -and -not $toast) {
@@ -44,6 +44,8 @@ Invoke-FcCheck 'export-cancel-early' {
     $export = Find-FcElement -Id 'export-btn' -Name 'Export' -ControlType Button
     Assert-Fc ($export.Current.IsEnabled) 'the Export button is back and enabled'
 
+    # Three seconds of the clip, so the next export finishes quickly.
+    Set-FcTrimEnd -Seconds 3 | Out-Null
     $next = Join-Path $work 'after-cancel.mp4'
     $route = Start-FcExport
     if ($route -eq 'popover') { Confirm-FcPopoverExport -Lossless $false }
@@ -52,7 +54,7 @@ Invoke-FcCheck 'export-cancel-early' {
     Save-FcScreenshot -Name 'next-export-done' | Out-Null
     $probe = Get-FcProbe $next
     Write-FcLog "after-cancel.mp4: $($probe | ConvertTo-Json -Compress)"
-    Assert-Fc ($probe.Video -eq 'h264' -and $probe.Duration -gt 5) "the next export finished as a full h264 clip ($($probe.Video), $($probe.Duration) s)"
+    Assert-Fc ($probe.Video -eq 'h264' -and $probe.Duration -gt 2.5 -and $probe.Duration -lt 4) "the next export finished as a 3 s h264 clip ($($probe.Video), $($probe.Duration) s)"
     Assert-Fc ((Get-FcHash $dest) -eq $before) 'the existing file is still unchanged'
     Close-Fc | Out-Null
 }
