@@ -345,7 +345,7 @@ function buildRedactBody(): HTMLElement[] {
   });
 
   const actions = document.createElement('div');
-  actions.className = 'fx-line';
+  actions.className = 'fx-line fx-redact-actions';
   actions.append(visible, keyButton, remove);
 
   const update = () => {

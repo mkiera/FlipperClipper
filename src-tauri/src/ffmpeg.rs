@@ -748,6 +748,9 @@ pub fn redact_commands(job: &ExportJob, width: i64, height: i64, fps: f64) -> Op
     )
 }
 
+/// The mask is cut with extractplanes rather than format=gray: split hands every branch the
+/// same format, and FFmpeg 7.1 settled a gray branch by turning the whole picture gray.
+///
 /// The redaction filters for a frame of `width` x `height`, after the crop and before
 /// anything retimes it. A black box is a drawbox. Blur and pixelate change a copy of the whole
 /// frame and lay it back through a mask that is white only inside the box, so the box can move
@@ -786,7 +789,7 @@ fn redact_filters(job: &ExportJob, width: i64, height: i64, fps: f64) -> Option<
         };
         parts.push(format!(
             "split=3[fcm{i}][fcp{i}][fck{i}];[fcp{i}]{changed}[fcq{i}];\
-             [fck{i}]format=gray,drawbox=x=0:y=0:w=iw:h=ih:color=black:t=fill,\
+             [fck{i}]extractplanes=y,drawbox=x=0:y=0:w=iw:h=ih:color=black:t=fill,\
              {place}:color=white:t=fill{enable}[fcn{i}];\
              [fcq{i}][fcn{i}]alphamerge[fca{i}];[fcm{i}][fca{i}]overlay"
         ));
@@ -2287,7 +2290,7 @@ mod tests {
         ];
         let chain = vf(&build_args(&j, "libx264", true, 1920, 1080, 30.0, None));
         assert!(chain.starts_with("split=3[fcm0][fcp0][fck0];[fcp0]scale=120:67:flags=area,scale=1920:1080:flags=neighbor[fcq0];"), "{chain}");
-        assert!(chain.contains("[fck0]format=gray,drawbox=x=0:y=0:w=iw:h=ih:color=black:t=fill,drawbox@fcr0=x=480:y=540:w=480:h=270:color=white:t=fill[fcn0]"), "{chain}");
+        assert!(chain.contains("[fck0]extractplanes=y,drawbox=x=0:y=0:w=iw:h=ih:color=black:t=fill,drawbox@fcr0=x=480:y=540:w=480:h=270:color=white:t=fill[fcn0]"), "{chain}");
         assert!(chain.contains("[fcq0][fcn0]alphamerge[fca0];[fcm0][fca0]overlay,split=3[fcm1]"), "{chain}");
         assert!(chain.contains("[fcp1]gblur=sigma=16.0[fcq1]"), "{chain}");
         assert!(chain.ends_with("[fcm1][fca1]overlay"), "{chain}");

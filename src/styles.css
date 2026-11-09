@@ -1109,6 +1109,12 @@ select option:disabled {
   align-self: flex-start;
 }
 
+.fx-redact-actions {
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+}
+
 #fx-text {
   display: flex;
 }
