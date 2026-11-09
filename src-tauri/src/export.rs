@@ -586,10 +586,9 @@ fn validate_ramp(job: &ExportJob) -> Result<(), String> {
     Ok(())
 }
 
-/// The redaction list and keyframe counts the frontend allows. Each redaction is a full-frame
-/// pass, so the count bounds the export's cost.
+/// The most redactions the frontend allows. Each is a full-frame pass, so the count bounds the
+/// export's cost.
 const REDACT_MAX_ITEMS: usize = 8;
-const REDACT_MAX_KEYS: usize = 500;
 
 fn validate_effects(fx: &Effects) -> Result<(), String> {
     bounded(fx.brightness, 0.2, 2.0, "Brightness")?;
@@ -606,8 +605,8 @@ fn validate_effects(fx: &Effects) -> Result<(), String> {
     }
     for redact in &fx.redact {
         bounded(Some(redact.strength), 2.0, 100.0, "The redact strength")?;
-        if redact.keys.is_empty() || redact.keys.len() > REDACT_MAX_KEYS {
-            return Err(format!("A redaction needs between 1 and {REDACT_MAX_KEYS} keyframes."));
+        if redact.keys.is_empty() {
+            return Err("A redaction needs at least one keyframe.".to_string());
         }
         for k in &redact.keys {
             let inside = [k.t, k.x, k.y, k.w, k.h].iter().all(|v| v.is_finite())
@@ -980,7 +979,7 @@ mod tests {
 
         let mut none = good.clone();
         none.keys.clear();
-        assert!(check(vec![none]).unwrap_err().contains("keyframes"));
+        assert!(check(vec![none]).unwrap_err().contains("keyframe"));
 
         let mut weak = good.clone();
         weak.strength = 1.0;

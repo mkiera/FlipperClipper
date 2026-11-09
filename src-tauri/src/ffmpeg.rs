@@ -650,7 +650,10 @@ struct RedactPlan {
 fn redact_plans(job: &ExportJob, width: i64, height: i64, fps: f64) -> Vec<RedactPlan> {
     let duration = source_duration(job);
     let fps = if fps.is_finite() && fps > 0.0 { fps } else { 30.0 };
-    let frames = (duration * fps).ceil().max(1.0) as i64;
+    // Source frames sit on the k/fps grid from the file's start, and a trim can begin between
+    // two of them, so positions are worked out per source frame rather than from the in point.
+    let first_frame = (job.in_point * fps - 1e-6).ceil() as i64;
+    let last_frame = (job.out_point * fps).ceil() as i64;
     let mut plans = Vec::new();
 
     for redact in &job.effects.redact {
@@ -690,23 +693,24 @@ fn redact_plans(job: &ExportJob, width: i64, height: i64, fps: f64) -> Vec<Redac
                 .join("+")
         });
 
-        let rect_at = |n: i64| {
-            let (x, y, w, h, _) = redact_state(&keys, job.in_point + n as f64 / fps);
+        let rect_at = |k: i64| {
+            let (x, y, w, h, _) = redact_state(&keys, k as f64 / fps);
             redact_rect(x, y, w, h, width, height)
         };
-        let start = rect_at(0);
+        let start = rect_at(first_frame);
         let mut moves = Vec::new();
         let moving = keys.windows(2).any(|w| {
             (w[0].x, w[0].y, w[0].w, w[0].h) != (w[1].x, w[1].y, w[1].w, w[1].h)
         });
         if moving {
             let mut previous = start;
-            for n in 1..frames {
-                let rect = rect_at(n);
+            for k in first_frame + 1..last_frame {
+                let rect = rect_at(k);
                 if rect != previous {
-                    // Half a frame early, so a command never lands just after the frame it
-                    // belongs to.
-                    moves.push((((n as f64) - 0.5) / fps, rect));
+                    // Half a frame early, on the stream's clock, so a command never lands
+                    // just after the frame it belongs to.
+                    let at = ((k as f64) - 0.5) / fps - job.in_point;
+                    moves.push((at.max(0.0), rect));
                     previous = rect;
                 }
             }
@@ -2380,6 +2384,25 @@ mod tests {
             "0.0500 drawbox@fcr0 x 50, drawbox@fcr0 y 0, drawbox@fcr0 w 100, drawbox@fcr0 h 100;"
         );
         assert!(lines[8].starts_with("0.8500 drawbox@fcr0 x 450,"), "{commands}");
+    }
+
+    #[test]
+    fn a_trim_between_frames_moves_the_box_on_the_source_frames() {
+        // At 10 fps with the in point at 0.02 s, the first frames are source 0.1, 0.2, ...
+        // (stream 0.08, 0.18, ...). Each command must land before its frame and carry the
+        // position of that source frame, not of in point + n/fps.
+        let mut j = job(QualityPreset::Balanced);
+        j.in_point = 0.02;
+        j.out_point = 1.0;
+        j.effects.redact = vec![redact(
+            RedactMode::Box,
+            vec![key(0.0, 0.0, 0.0, 0.1, 0.1, true), key(1.0, 0.5, 0.0, 0.1, 0.1, true)],
+        )];
+        let chain = vf(&build_args(&j, "libx264", true, 1000, 1000, 10.0, None));
+        assert!(chain.contains("drawbox@fcr0=x=50:y=0:w=100:h=100"), "{chain}");
+        let commands = redact_commands(&j, 1000, 1000, 10.0).expect("no commands");
+        let first = commands.lines().next().unwrap();
+        assert!(first.starts_with("0.1300 drawbox@fcr0 x 100,"), "{commands}");
     }
 
     #[test]

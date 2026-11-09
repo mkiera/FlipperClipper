@@ -285,7 +285,11 @@ function renderRedactions(): void {
     });
     const canvas = box.querySelector('canvas') as HTMLCanvasElement;
     canvas.hidden = item.mode !== 'pixelate';
-    if (item.mode === 'pixelate' && on) drawPixelate(canvas, item, r, width / cutSize().w);
+    if (item.mode === 'pixelate' && on) {
+      // The export pixelates what the earlier redactions left, so the preview does too.
+      const earlier = items.slice(0, index).map((it) => ({ item: it, state: stateAt(it, t) }));
+      drawPixelate(canvas, item, r, width / cutSize().w, earlier.filter((e) => e.state.on));
+    }
   });
 }
 
@@ -294,7 +298,13 @@ function cutSize(): { x: number; y: number; w: number; h: number } {
   return edit.crop ?? { x: 0, y: 0, w: frameWidth(edit), h: frameHeight(edit) };
 }
 
-function drawPixelate(canvas: HTMLCanvasElement, item: RedactItem, r: RedactRegion, display: number): void {
+function drawPixelate(
+  canvas: HTMLCanvasElement,
+  item: RedactItem,
+  r: RedactRegion,
+  display: number,
+  earlier: { item: RedactItem; state: { region: RedactRegion } }[],
+): void {
   const media = edit.media;
   const video = videoElement();
   if (!media || video.readyState < 2) return;
@@ -327,20 +337,48 @@ function drawPixelate(canvas: HTMLCanvasElement, item: RedactItem, r: RedactRegi
   const ctx = canvas.getContext('2d');
   if (!ctx) return;
   const { rotate, flipH, flipV } = edit.orientation;
+  const grade = video.style.filter && video.style.filter !== 'none' ? video.style.filter : '';
+  // Canvas pixels are blocks of the cut frame: this maps cut-frame source pixels onto them.
+  const toBlocks = () => ctx.setTransform(1 / bw, 0, 0, 1 / bh, -c0, -r0);
+  // The video is drawn turned and flipped about the frame's centre the same way its CSS
+  // transform is: flips act on the turned picture.
+  const drawVideo = (filter: string) => {
+    toBlocks();
+    ctx.filter = filter || 'none';
+    ctx.translate(-cut.x, -cut.y);
+    ctx.translate(frameWidth(edit) / 2, frameHeight(edit) / 2);
+    ctx.scale(flipH ? -1 : 1, flipV ? -1 : 1);
+    ctx.rotate((rotate * Math.PI) / 180);
+    ctx.drawImage(video, -media.width / 2, -media.height / 2, media.width, media.height);
+  };
+
   ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.clearRect(0, 0, across, down);
   ctx.imageSmoothingEnabled = true;
   ctx.imageSmoothingQuality = 'high';
   // The grade the <video> wears, so the blocks carry the same colour as the frame around them.
-  ctx.filter = video.style.filter || 'none';
-  // Canvas pixels are blocks of the cut frame. The video is drawn turned and flipped about the
-  // frame's centre the same way its CSS transform is: flips act on the turned picture.
-  ctx.scale(1 / bw, 1 / bh);
-  ctx.translate(-(cut.x + c0 * bw), -(cut.y + r0 * bh));
-  ctx.translate(frameWidth(edit) / 2, frameHeight(edit) / 2);
-  ctx.scale(flipH ? -1 : 1, flipV ? -1 : 1);
-  ctx.rotate((rotate * Math.PI) / 180);
-  ctx.drawImage(video, -media.width / 2, -media.height / 2, media.width, media.height);
+  drawVideo(grade);
+
+  // Earlier redactions that overlap, in export order. A pixelation under this one is left as
+  // the picture: its blocks average to nearly the same colours.
+  for (const { item: before, state } of earlier) {
+    const e = state.region;
+    const box = { x: e.x * cut.w, y: e.y * cut.h, w: e.w * cut.w, h: e.h * cut.h };
+    if (before.mode === 'pixelate') continue;
+    ctx.save();
+    toBlocks();
+    ctx.beginPath();
+    ctx.rect(box.x, box.y, box.w, box.h);
+    ctx.clip();
+    if (before.mode === 'box') {
+      ctx.filter = 'none';
+      ctx.fillStyle = '#000';
+      ctx.fillRect(box.x, box.y, box.w, box.h);
+    } else {
+      drawVideo(`${grade} blur(${(before.strength / bw).toFixed(3)}px)`);
+    }
+    ctx.restore();
+  }
 }
 
 /** Dragging the selected box moves it and dragging a corner resizes it, in fractions of the
