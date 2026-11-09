@@ -15,7 +15,7 @@
 import { frameGeometry } from './crop';
 import { blurPixels, cssFilterFor, hasEffect, rgba } from './effects';
 import { currentTime, onTime, videoElement } from './player';
-import { clampRegion, stateAt, withEdit } from './redact';
+import { blockSize, clampRegion, sourceBounds, stateAt, withEdit } from './redact';
 import {
   keyTolerance,
   playheadTime,
@@ -340,11 +340,16 @@ function drawPixelate(
   // The export applies every earlier redaction to the frame before this one pixelates it, so
   // the picture is rebuilt the same way on a working canvas first. It covers this box's block
   // span plus room for an earlier blur to reach in from outside, at no more than 640 px across.
-  const pad = Math.max(0, ...earlier.filter((e) => e.item.mode === 'blur').map((e) => e.item.strength * 3));
-  const ox = Math.max(0, c0 * bw - pad);
-  const oy = Math.max(0, r0 * bh - pad);
-  const ow = Math.min(cut.w, c1 * bw + pad) - ox;
-  const oh = Math.min(cut.h, r1 * bh + pad) - oy;
+  const need = sourceBounds(
+    { x0: c0 * bw, y0: r0 * bh, x1: c1 * bw, y1: r1 * bh },
+    earlier.map((e) => ({ item: e.item, region: e.state.region })),
+    cut.w,
+    cut.h,
+  );
+  const ox = need.x0;
+  const oy = need.y0;
+  const ow = need.x1 - need.x0;
+  const oh = need.y1 - need.y0;
   const scale = Math.min(1, 640 / Math.max(ow, oh, 1));
   const work = workCanvas(Math.max(1, Math.ceil(ow * scale)), Math.max(1, Math.ceil(oh * scale)));
   const wctx = work.getContext('2d');
@@ -389,9 +394,8 @@ function drawPixelate(
         wctx.drawImage(copy, 0, 0);
       } else {
         // Its own block grid over the whole cut frame, as the export lays it.
-        const pb = Math.max(1, Math.round(before.strength));
-        const pw = cut.w / Math.max(1, Math.floor(cut.w / pb));
-        const ph = cut.h / Math.max(1, Math.floor(cut.h / pb));
+        const pw = blockSize(before.strength, cut.w);
+        const ph = blockSize(before.strength, cut.h);
         const bx0 = Math.floor(ox / pw);
         const by0 = Math.floor(oy / ph);
         const bx1 = Math.ceil((ox + ow) / pw);

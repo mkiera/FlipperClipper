@@ -178,3 +178,61 @@ export function newRedaction(items: RedactItem[]): RedactItem {
     keys: [],
   };
 }
+
+export interface Bounds {
+  x0: number;
+  y0: number;
+  x1: number;
+  y1: number;
+}
+
+/** The block size a pixelation of `strength` uses across a frame of `size` pixels: the export
+ *  scales the whole frame down to whole blocks and back up. */
+export function blockSize(strength: number, size: number): number {
+  return size / Math.max(1, Math.floor(size / Math.max(1, Math.round(strength))));
+}
+
+/**
+ * The source area a redaction's preview has to rebuild, in cut-frame pixels. Walked backwards
+ * through the earlier redactions: a blur reads up to three sigma beyond what it writes, and a
+ * pixelation reads its whole blocks, so each one widens what the ones before it must supply.
+ */
+export function sourceBounds(
+  target: Bounds,
+  earlier: { item: RedactItem; region: RedactRegion }[],
+  width: number,
+  height: number,
+): Bounds {
+  let b = { ...target };
+  for (let i = earlier.length - 1; i >= 0; i -= 1) {
+    const { item, region } = earlier[i];
+    const box = {
+      x0: region.x * width,
+      y0: region.y * height,
+      x1: (region.x + region.w) * width,
+      y1: (region.y + region.h) * height,
+    };
+    // Only the part of this redaction that lands inside what is needed matters.
+    const hit = {
+      x0: Math.max(b.x0, box.x0),
+      y0: Math.max(b.y0, box.y0),
+      x1: Math.min(b.x1, box.x1),
+      y1: Math.min(b.y1, box.y1),
+    };
+    if (item.mode === 'box' || hit.x0 >= hit.x1 || hit.y0 >= hit.y1) continue;
+    if (item.mode === 'blur') {
+      const pad = item.strength * 3;
+      b = { x0: Math.min(b.x0, hit.x0 - pad), y0: Math.min(b.y0, hit.y0 - pad), x1: Math.max(b.x1, hit.x1 + pad), y1: Math.max(b.y1, hit.y1 + pad) };
+    } else {
+      const bw = blockSize(item.strength, width);
+      const bh = blockSize(item.strength, height);
+      b = {
+        x0: Math.min(b.x0, Math.floor(hit.x0 / bw) * bw),
+        y0: Math.min(b.y0, Math.floor(hit.y0 / bh) * bh),
+        x1: Math.max(b.x1, Math.ceil(hit.x1 / bw) * bw),
+        y1: Math.max(b.y1, Math.ceil(hit.y1 / bh) * bh),
+      };
+    }
+  }
+  return { x0: Math.max(0, b.x0), y0: Math.max(0, b.y0), x1: Math.min(width, b.x1), y1: Math.min(height, b.y1) };
+}

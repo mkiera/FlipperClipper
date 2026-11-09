@@ -141,3 +141,18 @@ test('redact sits between the vignette and the text in the tab', async () => {
   assert.ok(ids.indexOf('redact') < ids.indexOf('text'));
   assert.equal(fx.effectSummary(fx.defaultEffects(), 'redact'), 'Pixelate');
 });
+
+test('the preview rebuilds every pixel an earlier redaction reads', async () => {
+  const { redact } = await modules();
+  const target = { x0: 400, y0: 400, x1: 437, y1: 437 };
+  // An earlier 100 px pixelation covering the target reads its whole 100 px blocks.
+  const coarse = { item: item({ mode: 'pixelate', strength: 100 }), region: { x: 0, y: 0, w: 1, h: 1 } };
+  assert.deepEqual(plain(redact.sourceBounds(target, [coarse], 1000, 1000)), { x0: 400, y0: 400, x1: 500, y1: 500 });
+  // A blur before that widens the 100 px blocks by three sigma, and a black box widens nothing.
+  const blur = { item: item({ mode: 'blur', strength: 10 }), region: { x: 0, y: 0, w: 1, h: 1 } };
+  const box = { item: item({ mode: 'box' }), region: { x: 0, y: 0, w: 1, h: 1 } };
+  assert.deepEqual(plain(redact.sourceBounds(target, [blur, box, coarse], 1000, 1000)), { x0: 370, y0: 370, x1: 530, y1: 530 });
+  // A redaction elsewhere in the frame changes nothing.
+  const away = { item: item({ mode: 'blur', strength: 10 }), region: { x: 0.9, y: 0.9, w: 0.1, h: 0.1 } };
+  assert.deepEqual(plain(redact.sourceBounds(target, [away], 1000, 1000)), target);
+});
