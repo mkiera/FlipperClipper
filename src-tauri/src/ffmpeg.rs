@@ -580,25 +580,22 @@ fn effect_filters(fx: &Effects) -> Vec<String> {
     parts
 }
 
-/// The redacted region in whole pixels of a `width` x `height` frame. Even on every edge, so
-/// a 4:2:0 frame crops and overlays without chroma rounding moving the box by a pixel.
+/// The redacted region in whole pixels of a `width` x `height` frame, rounded outward so no
+/// selected pixel is left showing. The origin is even so 4:2:0 chroma lines up with it.
 fn redact_rect(region: &RedactRegion, width: i64, height: i64) -> Option<Rect> {
     if width < 2 || height < 2 {
         return None;
     }
-    let edge = |fraction: f64, size: i64| -> i64 {
-        let px = (fraction.clamp(0.0, 1.0) * size as f64).round() as i64;
-        (px - px % 2).clamp(0, size - size % 2)
+    let span = |start: f64, len: f64, size: i64| -> (i64, i64) {
+        let first = (start.clamp(0.0, 1.0) * size as f64).floor() as i64;
+        let first = (first - first % 2).min(size - 2);
+        // The slack keeps 0.1 + 0.2 from reading as a hair past 0.3 and taking a column more.
+        let end = ((start + len).clamp(0.0, 1.0) * size as f64 - 1e-6).ceil() as i64;
+        (first, end.clamp(first + 2, size))
     };
-    let left = edge(region.x, width);
-    let top = edge(region.y, height);
-    let right = edge(region.x + region.w, width).max(left + 2).min(width - width % 2);
-    let bottom = edge(region.y + region.h, height).max(top + 2).min(height - height % 2);
-    let (w, h) = (right - left, bottom - top);
-    if w < 2 || h < 2 {
-        return None;
-    }
-    Some(Rect { x: left, y: top, w, h })
+    let (left, right) = span(region.x, region.w, width);
+    let (top, bottom) = span(region.y, region.h, height);
+    Some(Rect { x: left, y: top, w: right - left, h: bottom - top })
 }
 
 /// The redact step for a frame of `width` x `height`, the size after crop and before scale.
@@ -2176,11 +2173,18 @@ mod tests {
     }
 
     #[test]
-    fn a_redact_region_off_the_edge_is_pulled_back_inside_with_even_edges() {
+    fn a_redact_region_covers_every_selected_pixel_and_stays_in_the_frame() {
+        // 0.10 + 0.23 of 100 px ends inside column 32, so column 32 has to be covered.
+        let r = redact_rect(&RedactRegion { x: 0.10, y: 0.10, w: 0.23, h: 0.23 }, 100, 100).unwrap();
+        assert_eq!((r.x, r.w), (10, 23), "{r:?}");
+
         let r = redact_rect(&RedactRegion { x: 0.9, y: 0.95, w: 0.5, h: 0.5 }, 1001, 999).unwrap();
-        assert!(r.x % 2 == 0 && r.y % 2 == 0 && r.w % 2 == 0 && r.h % 2 == 0, "{r:?}");
-        assert!(r.x + r.w <= 1001 && r.y + r.h <= 999, "{r:?}");
-        assert!(r.w >= 2 && r.h >= 2, "{r:?}");
+        assert!(r.x % 2 == 0 && r.y % 2 == 0, "{r:?}");
+        assert_eq!((r.x + r.w, r.y + r.h), (1001, 999), "{r:?}");
+
+        // A sliver at the far edge of a small frame still hides something.
+        let r = redact_rect(&RedactRegion { x: 0.98, y: 0.98, w: 0.02, h: 0.02 }, 20, 20).unwrap();
+        assert_eq!((r.x, r.y, r.w, r.h), (18, 18, 2, 2), "{r:?}");
     }
 
     #[test]

@@ -158,11 +158,11 @@ function applyTurn(video: HTMLVideoElement): void {
   }
 
   const parts: string[] = [];
-  if (rotate !== 0) parts.push(`rotate(${rotate}deg)`);
-  // After the rotate in the transform list, which applies it in the turned frame - the same
-  // order hflip and vflip sit in after transpose in the export chain.
+  // A transform list applies right to left, so the flips listed first act on the turned
+  // picture - the same order hflip and vflip sit in after transpose in the export chain.
   if (flipH) parts.push('scaleX(-1)');
   if (flipV) parts.push('scaleY(-1)');
+  if (rotate !== 0) parts.push(`rotate(${rotate}deg)`);
   const transform = parts.length > 0 ? parts.join(' ') : '';
   if (video.style.transform !== transform) video.style.transform = transform;
 }
@@ -273,8 +273,8 @@ function drawPixelate(): void {
   ctx.scale(cols / source.w, rows / source.h);
   ctx.translate(-source.x, -source.y);
   ctx.translate(frameWidth(edit) / 2, frameHeight(edit) / 2);
-  ctx.rotate((rotate * Math.PI) / 180);
   ctx.scale(flipH ? -1 : 1, flipV ? -1 : 1);
+  ctx.rotate((rotate * Math.PI) / 180);
   ctx.drawImage(video, -media.width / 2, -media.height / 2, media.width, media.height);
 }
 
