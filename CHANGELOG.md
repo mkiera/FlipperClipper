@@ -2,7 +2,8 @@
 
 ## Unreleased
 
-- Quick Effects has a Redact effect. It hides one part of the frame with a blur, a pixelation or a black box. Drag the box on the picture to place it, or drag its corners to resize it.
+- Quick Effects has a Redact effect. It hides parts of the frame with a blur, a pixelation or a black box. Add up to 8 boxes, drag each one on the picture to place it, and drag its corners to resize it.
+- Redactions can be keyframed. Each keyframe sets a box's position, size and whether it shows. The box moves smoothly between keyframes. A lane under the timeline shows each redaction's keyframes: click one to jump to it, drag it to move it, and double-click or right-click it to remove it.
 
 ## 1.2.0 - 2026-10-02
 
