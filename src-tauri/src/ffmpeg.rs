@@ -16,7 +16,7 @@ use crate::ramp::{self, SpeedPoint};
 use serde_json::Value;
 
 /// A rectangle in *source* pixels, in display orientation.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Rect {
     pub x: i64,
     pub y: i64,
