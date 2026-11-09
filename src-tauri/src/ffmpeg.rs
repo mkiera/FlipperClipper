@@ -588,7 +588,10 @@ fn redact_rect(region: &RedactRegion, width: i64, height: i64) -> Option<Rect> {
     }
     let span = |start: f64, len: f64, size: i64| -> (i64, i64) {
         let first = (start.clamp(0.0, 1.0) * size as f64).floor() as i64;
+        // Even, because overlay rounds an odd position down on 4:2:0 and would land the
+        // patch one pixel up and left of where it was cut.
         let first = first.min(size - 2);
+        let first = first - first % 2;
         // The slack keeps 0.1 + 0.2 from reading as a hair past 0.3 and taking a column more.
         let end = ((start + len).clamp(0.0, 1.0) * size as f64 - 1e-6).ceil() as i64;
         (first, end.clamp(first + 2, size))
@@ -2192,7 +2195,9 @@ mod tests {
         let r = redact_rect(&RedactRegion { x: 0.9, y: 0.95, w: 0.5, h: 0.5 }, 1001, 999).unwrap();
         assert_eq!((r.x + r.w, r.y + r.h), (1001, 999), "{r:?}");
         let r = redact_rect(&RedactRegion { x: 0.98, y: 0.0, w: 0.02, h: 1.0 }, 21, 21).unwrap();
-        assert_eq!((r.x, r.w), (19, 2), "{r:?}");
+        assert_eq!((r.x, r.w), (18, 3), "{r:?}");
+        let r = redact_rect(&RedactRegion { x: 0.11, y: 0.11, w: 0.23, h: 0.23 }, 100, 100).unwrap();
+        assert_eq!((r.x, r.y, r.w, r.h), (10, 10, 24, 24), "{r:?}");
 
         // A sliver at the far edge of a small frame still hides something.
         let r = redact_rect(&RedactRegion { x: 0.98, y: 0.98, w: 0.02, h: 0.02 }, 20, 20).unwrap();
