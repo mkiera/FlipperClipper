@@ -581,14 +581,14 @@ fn effect_filters(fx: &Effects) -> Vec<String> {
 }
 
 /// The redacted region in whole pixels of a `width` x `height` frame, rounded outward so no
-/// selected pixel is left showing. The origin is even so 4:2:0 chroma lines up with it.
+/// selected pixel is left showing.
 fn redact_rect(region: &RedactRegion, width: i64, height: i64) -> Option<Rect> {
     if width < 2 || height < 2 {
         return None;
     }
     let span = |start: f64, len: f64, size: i64| -> (i64, i64) {
         let first = (start.clamp(0.0, 1.0) * size as f64).floor() as i64;
-        let first = (first - first % 2).min(size - 2);
+        let first = first.min(size - 2);
         // The slack keeps 0.1 + 0.2 from reading as a hair past 0.3 and taking a column more.
         let end = ((start + len).clamp(0.0, 1.0) * size as f64 - 1e-6).ceil() as i64;
         (first, end.clamp(first + 2, size))
@@ -603,7 +603,9 @@ fn redact_rect(region: &RedactRegion, width: i64, height: i64) -> Option<Rect> {
 /// the rest of the frame passes through untouched.
 fn redact_filter(redact: &Redact, width: i64, height: i64) -> Option<String> {
     let r = redact_rect(&redact.region, width, height)?;
-    let cut = format!("crop={}:{}:{}:{}", r.w, r.h, r.x, r.y);
+    // exact=1: on 4:2:0 crop otherwise rounds an odd size or origin down, leaving the last
+    // selected row and column unredacted.
+    let cut = format!("crop={}:{}:{}:{}:exact=1", r.w, r.h, r.x, r.y);
     let changed = match redact.mode {
         RedactMode::Box => {
             return Some(format!(
@@ -2123,7 +2125,7 @@ mod tests {
         let args = build_args(&j, "libx264", true, 1920, 1080, 30.0, None);
         assert_eq!(
             vf(&args),
-            "split[fcmain][fcpart];[fcpart]crop=480:270:480:540,scale=30:16:flags=area,\
+            "split[fcmain][fcpart];[fcpart]crop=480:270:480:540:exact=1,scale=30:16:flags=area,\
              scale=480:270:flags=neighbor[fcred];[fcmain][fcred]overlay=480:540"
                 .replace(' ', "")
         );
@@ -2134,8 +2136,17 @@ mod tests {
         let mut j = job(QualityPreset::Balanced);
         j.effects.redact = Some(redact(RedactMode::Blur, 0.0, 0.0, 0.5, 0.5));
         let chain = vf(&build_args(&j, "libx264", true, 1920, 1080, 30.0, None));
-        assert!(chain.contains("[fcpart]crop=960:540:0:0,gblur=sigma=16.0[fcred]"), "{chain}");
+        assert!(chain.contains("[fcpart]crop=960:540:0:0:exact=1,gblur=sigma=16.0[fcred]"), "{chain}");
         assert!(chain.ends_with("overlay=0:0"), "{chain}");
+    }
+
+    #[test]
+    fn an_odd_sized_blur_region_is_cut_at_its_exact_size() {
+        let mut j = job(QualityPreset::Balanced);
+        j.effects.redact = Some(redact(RedactMode::Blur, 0.10, 0.10, 0.23, 0.23));
+        let chain = vf(&build_args(&j, "libx264", true, 100, 100, 30.0, None));
+        assert!(chain.contains("crop=23:23:10:10:exact=1,gblur"), "{chain}");
+        assert!(chain.ends_with("overlay=10:10"), "{chain}");
     }
 
     #[test]
@@ -2179,8 +2190,9 @@ mod tests {
         assert_eq!((r.x, r.w), (10, 23), "{r:?}");
 
         let r = redact_rect(&RedactRegion { x: 0.9, y: 0.95, w: 0.5, h: 0.5 }, 1001, 999).unwrap();
-        assert!(r.x % 2 == 0 && r.y % 2 == 0, "{r:?}");
         assert_eq!((r.x + r.w, r.y + r.h), (1001, 999), "{r:?}");
+        let r = redact_rect(&RedactRegion { x: 0.98, y: 0.0, w: 0.02, h: 1.0 }, 21, 21).unwrap();
+        assert_eq!((r.x, r.w), (19, 2), "{r:?}");
 
         // A sliver at the far edge of a small frame still hides something.
         let r = redact_rect(&RedactRegion { x: 0.98, y: 0.98, w: 0.02, h: 0.02 }, 20, 20).unwrap();
