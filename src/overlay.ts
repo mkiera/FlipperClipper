@@ -336,49 +336,114 @@ function drawPixelate(
 
   const ctx = canvas.getContext('2d');
   if (!ctx) return;
+
+  // The export applies every earlier redaction to the frame before this one pixelates it, so
+  // the picture is rebuilt the same way on a working canvas first. It covers this box's block
+  // span plus room for an earlier blur to reach in from outside, at no more than 640 px across.
+  const pad = Math.max(0, ...earlier.filter((e) => e.item.mode === 'blur').map((e) => e.item.strength * 3));
+  const ox = Math.max(0, c0 * bw - pad);
+  const oy = Math.max(0, r0 * bh - pad);
+  const ow = Math.min(cut.w, c1 * bw + pad) - ox;
+  const oh = Math.min(cut.h, r1 * bh + pad) - oy;
+  const scale = Math.min(1, 640 / Math.max(ow, oh, 1));
+  const work = workCanvas(Math.max(1, Math.ceil(ow * scale)), Math.max(1, Math.ceil(oh * scale)));
+  const wctx = work.getContext('2d');
+  if (!wctx) return;
+  // Cut-frame source pixels onto the working canvas.
+  const toWork = (c: CanvasRenderingContext2D) => c.setTransform(scale, 0, 0, scale, -ox * scale, -oy * scale);
+
   const { rotate, flipH, flipV } = edit.orientation;
   const grade = video.style.filter && video.style.filter !== 'none' ? video.style.filter : '';
-  // Canvas pixels are blocks of the cut frame: this maps cut-frame source pixels onto them.
-  const toBlocks = () => ctx.setTransform(1 / bw, 0, 0, 1 / bh, -c0, -r0);
+  wctx.setTransform(1, 0, 0, 1, 0, 0);
+  wctx.clearRect(0, 0, work.width, work.height);
+  wctx.imageSmoothingEnabled = true;
+  wctx.imageSmoothingQuality = 'high';
+  // The grade the <video> wears, so the blocks carry the same colour as the frame around them.
   // The video is drawn turned and flipped about the frame's centre the same way its CSS
   // transform is: flips act on the turned picture.
-  const drawVideo = (filter: string) => {
-    toBlocks();
-    ctx.filter = filter || 'none';
-    ctx.translate(-cut.x, -cut.y);
-    ctx.translate(frameWidth(edit) / 2, frameHeight(edit) / 2);
-    ctx.scale(flipH ? -1 : 1, flipV ? -1 : 1);
-    ctx.rotate((rotate * Math.PI) / 180);
-    ctx.drawImage(video, -media.width / 2, -media.height / 2, media.width, media.height);
-  };
+  toWork(wctx);
+  wctx.filter = grade || 'none';
+  wctx.translate(-cut.x, -cut.y);
+  wctx.translate(frameWidth(edit) / 2, frameHeight(edit) / 2);
+  wctx.scale(flipH ? -1 : 1, flipV ? -1 : 1);
+  wctx.rotate((rotate * Math.PI) / 180);
+  wctx.drawImage(video, -media.width / 2, -media.height / 2, media.width, media.height);
+  wctx.filter = 'none';
 
+  for (const { item: before, state } of earlier) {
+    const e = state.region;
+    const box = { x: e.x * cut.w, y: e.y * cut.h, w: e.w * cut.w, h: e.h * cut.h };
+    wctx.save();
+    toWork(wctx);
+    wctx.beginPath();
+    wctx.rect(box.x, box.y, box.w, box.h);
+    wctx.clip();
+    if (before.mode === 'box') {
+      wctx.fillStyle = '#000';
+      wctx.fillRect(box.x, box.y, box.w, box.h);
+    } else {
+      const copy = snapshot(work);
+      wctx.setTransform(1, 0, 0, 1, 0, 0);
+      if (before.mode === 'blur') {
+        wctx.filter = `blur(${(before.strength * scale).toFixed(2)}px)`;
+        wctx.drawImage(copy, 0, 0);
+      } else {
+        // Its own block grid over the whole cut frame, as the export lays it.
+        const pb = Math.max(1, Math.round(before.strength));
+        const pw = cut.w / Math.max(1, Math.floor(cut.w / pb));
+        const ph = cut.h / Math.max(1, Math.floor(cut.h / pb));
+        const bx0 = Math.floor(ox / pw);
+        const by0 = Math.floor(oy / ph);
+        const bx1 = Math.ceil((ox + ow) / pw);
+        const by1 = Math.ceil((oy + oh) / ph);
+        const blocks = workCanvas(Math.max(1, bx1 - bx0), Math.max(1, by1 - by0), 1);
+        const bctx = blocks.getContext('2d');
+        if (bctx) {
+          bctx.setTransform(1, 0, 0, 1, 0, 0);
+          bctx.imageSmoothingEnabled = true;
+          bctx.imageSmoothingQuality = 'high';
+          bctx.clearRect(0, 0, blocks.width, blocks.height);
+          bctx.setTransform(1 / pw / scale, 0, 0, 1 / ph / scale, (ox / pw - bx0), (oy / ph - by0));
+          bctx.drawImage(copy, 0, 0);
+          wctx.imageSmoothingEnabled = false;
+          toWork(wctx);
+          wctx.drawImage(blocks, bx0 * pw, by0 * ph, (bx1 - bx0) * pw, (by1 - by0) * ph);
+          wctx.imageSmoothingEnabled = true;
+        }
+      }
+    }
+    wctx.restore();
+  }
+
+  // This redaction's own blocks, from the rebuilt picture.
   ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.clearRect(0, 0, across, down);
   ctx.imageSmoothingEnabled = true;
   ctx.imageSmoothingQuality = 'high';
-  // The grade the <video> wears, so the blocks carry the same colour as the frame around them.
-  drawVideo(grade);
+  ctx.setTransform(1 / bw / scale, 0, 0, 1 / bh / scale, ox / bw - c0, oy / bh - r0);
+  ctx.drawImage(work, 0, 0);
+}
 
-  // Earlier redactions that overlap, in export order. A pixelation under this one is left as
-  // the picture: its blocks average to nearly the same colours.
-  for (const { item: before, state } of earlier) {
-    const e = state.region;
-    const box = { x: e.x * cut.w, y: e.y * cut.h, w: e.w * cut.w, h: e.h * cut.h };
-    if (before.mode === 'pixelate') continue;
-    ctx.save();
-    toBlocks();
-    ctx.beginPath();
-    ctx.rect(box.x, box.y, box.w, box.h);
-    ctx.clip();
-    if (before.mode === 'box') {
-      ctx.filter = 'none';
-      ctx.fillStyle = '#000';
-      ctx.fillRect(box.x, box.y, box.w, box.h);
-    } else {
-      drawVideo(`${grade} blur(${(before.strength / bw).toFixed(3)}px)`);
-    }
-    ctx.restore();
+/** Scratch canvases for the pixelate preview, reused across frames. */
+const scratch: HTMLCanvasElement[] = [];
+
+function workCanvas(width: number, height: number, slot = 0): HTMLCanvasElement {
+  const canvas = (scratch[slot] ??= document.createElement('canvas'));
+  if (canvas.width !== width) canvas.width = width;
+  if (canvas.height !== height) canvas.height = height;
+  return canvas;
+}
+
+/** A copy of the working canvas, so a filter can read from it while drawing onto it. */
+function snapshot(work: HTMLCanvasElement): HTMLCanvasElement {
+  const copy = workCanvas(work.width, work.height, 2);
+  const c = copy.getContext('2d');
+  if (c) {
+    c.setTransform(1, 0, 0, 1, 0, 0);
+    c.clearRect(0, 0, copy.width, copy.height);
+    c.drawImage(work, 0, 0);
   }
+  return copy;
 }
 
 /** Dragging the selected box moves it and dragging a corner resizes it, in fractions of the
