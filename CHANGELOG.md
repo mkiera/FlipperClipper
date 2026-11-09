@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Quick Effects has a Redact effect. It hides one part of the frame with a blur, a pixelation or a black box. Drag the box on the picture to place it, or drag its corners to resize it.
+
 ## 1.2.0 - 2026-10-02
 
 - Exports can no longer overwrite the video you are editing, even when the chosen file reaches it through a hard link, a folder junction or a differently written path.

@@ -11,7 +11,15 @@
  * read the catalogue from here.
  */
 
-import type { EffectId, EffectSettings, EffectsJob, EffectsState, TextOverlay } from './types';
+import type {
+  EffectId,
+  EffectSettings,
+  EffectsJob,
+  EffectsState,
+  RedactMode,
+  RedactRegion,
+  TextOverlay,
+} from './types';
 
 /** Display order in the tab: the colour dials, then the two that reshape the frame, then the
  *  two that add something to it. */
@@ -22,6 +30,7 @@ export const EFFECT_IDS: EffectId[] = [
   'hue',
   'blur',
   'vignette',
+  'redact',
   'text',
   'fade',
 ];
@@ -33,6 +42,7 @@ export const EFFECT_LABEL: Record<EffectId, string> = {
   hue: 'Hue shift',
   blur: 'Blur',
   vignette: 'Vignette',
+  redact: 'Redact',
   text: 'Text overlay',
   fade: 'Fade in / out',
 };
@@ -44,6 +54,7 @@ export const EFFECT_HINT: Record<EffectId, string> = {
   hue: 'Rotates every colour around the wheel.',
   blur: 'Measured on the source frame, so it looks the same at any export size.',
   vignette: 'Darkens the corners.',
+  redact: 'Hides one part of the frame. Drag the box on the picture to move it, or its corners to resize it.',
   text: 'Drawn at the export size, over the cropped frame.',
   fade: 'Timed on the finished clip, and the audio fades with the picture.',
 };
@@ -56,6 +67,7 @@ export const EFFECT_RANGE = {
   hue: { min: -180, max: 180, step: 1 },
   blur: { min: 0.5, max: 50, step: 0.5 },
   vignette: { min: 0, max: 1, step: 0.01 },
+  redact: { min: 2, max: 100, step: 1 },
   fade: { min: 0, max: 60, step: 0.1 },
   textSize: { min: 0.02, max: 0.3, step: 0.005 },
   textOpacity: { min: 0.1, max: 1, step: 0.05 },
@@ -71,6 +83,7 @@ export function defaultEffects(): EffectsState {
       hue: false,
       blur: false,
       vignette: false,
+      redact: false,
       text: false,
       fade: false,
     },
@@ -81,6 +94,7 @@ export function defaultEffects(): EffectsState {
       hue: { degrees: 30 },
       blur: { sigma: 8 },
       vignette: { amount: 0.5 },
+      redact: { mode: 'pixelate', strength: 16, region: { x: 0.35, y: 0.35, w: 0.3, h: 0.3 } },
       text: {
         text: 'Your text',
         size: 0.07,
@@ -122,6 +136,8 @@ export function effectSummary(effects: EffectsState, id: EffectId): string {
       return `${oneDecimal(s.blur.sigma)} px`;
     case 'vignette':
       return `${Math.round(s.vignette.amount * 100)}%`;
+    case 'redact':
+      return REDACT_MODE_LABEL[s.redact.mode];
     case 'fade':
       return `${oneDecimal(s.fade.inSeconds)}s in · ${oneDecimal(s.fade.outSeconds)}s out`;
     case 'text': {
@@ -130,6 +146,29 @@ export function effectSummary(effects: EffectsState, id: EffectId): string {
       return text.length > 22 ? `${text.slice(0, 21)}…` : text;
     }
   }
+}
+
+export const REDACT_MODES: RedactMode[] = ['blur', 'pixelate', 'box'];
+
+export const REDACT_MODE_LABEL: Record<RedactMode, string> = {
+  blur: 'Blur',
+  pixelate: 'Pixelate',
+  box: 'Black box',
+};
+
+/** The smallest side a region can be dragged down to, as a fraction of the frame. */
+export const REDACT_MIN = 0.02;
+
+/** A region kept inside the frame and no smaller than REDACT_MIN on either side. */
+export function clampRegion(region: RedactRegion): RedactRegion {
+  const w = Math.min(Math.max(region.w, REDACT_MIN), 1);
+  const h = Math.min(Math.max(region.h, REDACT_MIN), 1);
+  return {
+    x: Math.min(Math.max(region.x, 0), 1 - w),
+    y: Math.min(Math.max(region.y, 0), 1 - h),
+    w,
+    h,
+  };
 }
 
 /** A multiplier read the way a user thinks of it: 1.2 is "+20%". */
@@ -169,6 +208,7 @@ export function toEffectsJob(effects: EffectsState, audioOnly: boolean): Effects
     fadeIn: effects.on.fade && s.fade.inSeconds > 0 ? s.fade.inSeconds : null,
     fadeOut: effects.on.fade && s.fade.outSeconds > 0 ? s.fade.outSeconds : null,
     text,
+    redact: picture && effects.on.redact ? { ...s.redact, region: clampRegion(s.redact.region) } : null,
   };
 }
 

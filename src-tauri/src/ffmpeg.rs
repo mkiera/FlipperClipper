@@ -127,6 +127,33 @@ pub struct TextOverlay {
     pub boxed: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RedactMode {
+    Blur,
+    Pixelate,
+    Box,
+}
+
+/// A rectangle in fractions of the exported frame: the crop when there is one.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct RedactRegion {
+    pub x: f64,
+    pub y: f64,
+    pub w: f64,
+    pub h: f64,
+}
+
+/// One region of the frame hidden by a blur, a pixelation or a solid box.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Redact {
+    pub mode: RedactMode,
+    /// Blur sigma or pixel block size, in source pixels. Unused by Box.
+    pub strength: f64,
+    pub region: RedactRegion,
+}
+
 /// The quick-effects tab, resolved: None is off. Container-level `default` so a job built
 /// before this existed - or by anything that leaves the block out - deserialises to no effects
 /// rather than failing.
@@ -147,6 +174,7 @@ pub struct Effects {
     pub fade_in: Option<f64>,
     pub fade_out: Option<f64>,
     pub text: Option<TextOverlay>,
+    pub redact: Option<Redact>,
 }
 
 impl Effects {
@@ -161,6 +189,7 @@ impl Effects {
             || self.fade_in.is_some()
             || self.fade_out.is_some()
             || self.text.is_some()
+            || self.redact.is_some()
     }
 }
 
@@ -549,6 +578,57 @@ fn effect_filters(fx: &Effects) -> Vec<String> {
         ));
     }
     parts
+}
+
+/// The redacted region in whole pixels of a `width` x `height` frame. Even on every edge, so
+/// a 4:2:0 frame crops and overlays without chroma rounding moving the box by a pixel.
+fn redact_rect(region: &RedactRegion, width: i64, height: i64) -> Option<Rect> {
+    if width < 2 || height < 2 {
+        return None;
+    }
+    let edge = |fraction: f64, size: i64| -> i64 {
+        let px = (fraction.clamp(0.0, 1.0) * size as f64).round() as i64;
+        (px - px % 2).clamp(0, size - size % 2)
+    };
+    let left = edge(region.x, width);
+    let top = edge(region.y, height);
+    let right = edge(region.x + region.w, width).max(left + 2).min(width - width % 2);
+    let bottom = edge(region.y + region.h, height).max(top + 2).min(height - height % 2);
+    let (w, h) = (right - left, bottom - top);
+    if w < 2 || h < 2 {
+        return None;
+    }
+    Some(Rect { x: left, y: top, w, h })
+}
+
+/// The redact step for a frame of `width` x `height`, the size after crop and before scale.
+/// Blur and pixelate copy the region out, change it, and lay it back at the same place, so
+/// the rest of the frame passes through untouched.
+fn redact_filter(redact: &Redact, width: i64, height: i64) -> Option<String> {
+    let r = redact_rect(&redact.region, width, height)?;
+    let cut = format!("crop={}:{}:{}:{}", r.w, r.h, r.x, r.y);
+    let changed = match redact.mode {
+        RedactMode::Box => {
+            return Some(format!(
+                "drawbox=x={}:y={}:w={}:h={}:color=black:t=fill",
+                r.x, r.y, r.w, r.h
+            ));
+        }
+        RedactMode::Blur => format!("gblur=sigma={}", fmt_num(redact.strength)),
+        RedactMode::Pixelate => {
+            let block = (redact.strength.round() as i64).max(1);
+            let small_w = (r.w / block).max(1);
+            let small_h = (r.h / block).max(1);
+            format!(
+                "scale={small_w}:{small_h}:flags=area,scale={}:{}:flags=neighbor",
+                r.w, r.h
+            )
+        }
+    };
+    Some(format!(
+        "split[fcmain][fcpart];[fcpart]{cut},{changed}[fcred];[fcmain][fcred]overlay={}:{}",
+        r.x, r.y
+    ))
 }
 
 /// Fades are timed on the finished clip, so they are emitted after reverse - the last filter
@@ -1106,6 +1186,15 @@ pub fn build_args(
         // The gif branch owns its own scale, so the effects and the text both go in ahead of
         // it - the same relative order as the video branch, minus the split.
         chain.extend(effect_filters(&job.effects));
+        let (cut_width, cut_height) = cropped_size(job, width, height);
+        if let Some(filter) = job
+            .effects
+            .redact
+            .as_ref()
+            .and_then(|r| redact_filter(r, cut_width, cut_height))
+        {
+            chain.push(filter);
+        }
         if let (Some(overlay), Some(font)) = (job.effects.text.as_ref(), font) {
             chain.push(drawtext_filter(overlay, font));
         }
@@ -1172,6 +1261,16 @@ pub fn build_args(
     // Ahead of the scale, so a sigma given in source pixels means the same thing whatever
     // size the clip is exported at - which is what the preview shows.
     vfilters.extend(effect_filters(&job.effects));
+    // Before the scale, so the region and the block size are measured in source pixels the
+    // same way the blur is, and before the text, so a caption is never hidden by it.
+    if let Some(filter) = job
+        .effects
+        .redact
+        .as_ref()
+        .and_then(|r| redact_filter(r, effective_width, effective_height))
+    {
+        vfilters.push(filter);
+    }
     if let Some(filter) = scale_filter {
         vfilters.push(filter);
     }
@@ -2007,6 +2106,111 @@ mod tests {
         // Full strength stops short of PI/2, which vignette clips at and which is a black
         // frame with a dot in the middle rather than a picture.
         assert_eq!(vf(&args), format!("vignette=angle={}", fmt_num(VIGNETTE_MAX_ANGLE)));
+    }
+
+    fn redact(mode: RedactMode, x: f64, y: f64, w: f64, h: f64) -> Redact {
+        Redact { mode, strength: 16.0, region: RedactRegion { x, y, w, h } }
+    }
+
+    impl Redact {
+        fn with_strength(mut self, strength: f64) -> Self {
+            self.strength = strength;
+            self
+        }
+    }
+
+    #[test]
+    fn pixelate_shrinks_and_regrows_only_the_region_and_lays_it_back_in_place() {
+        let mut j = job(QualityPreset::Balanced);
+        j.effects.redact = Some(redact(RedactMode::Pixelate, 0.25, 0.5, 0.25, 0.25));
+        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0, None);
+        assert_eq!(
+            vf(&args),
+            "split[fcmain][fcpart];[fcpart]crop=480:270:480:540,scale=30:16:flags=area,\
+             scale=480:270:flags=neighbor[fcred];[fcmain][fcred]overlay=480:540"
+                .replace(' ', "")
+        );
+    }
+
+    #[test]
+    fn blur_redact_blurs_the_region_with_its_strength_as_sigma() {
+        let mut j = job(QualityPreset::Balanced);
+        j.effects.redact = Some(redact(RedactMode::Blur, 0.0, 0.0, 0.5, 0.5));
+        let chain = vf(&build_args(&j, "libx264", true, 1920, 1080, 30.0, None));
+        assert!(chain.contains("[fcpart]crop=960:540:0:0,gblur=sigma=16.0[fcred]"), "{chain}");
+        assert!(chain.ends_with("overlay=0:0"), "{chain}");
+    }
+
+    #[test]
+    fn a_black_box_is_one_drawbox_with_no_split() {
+        let mut j = job(QualityPreset::Balanced);
+        j.effects.redact = Some(redact(RedactMode::Box, 0.1, 0.1, 0.2, 0.2));
+        let chain = vf(&build_args(&j, "libx264", true, 1920, 1080, 30.0, None));
+        assert_eq!(chain, "drawbox=x=192:y=108:w=384:h=216:color=black:t=fill");
+    }
+
+    #[test]
+    fn the_redact_region_is_measured_in_the_cropped_frame() {
+        // The region is a fraction of what the export contains, so with a crop the same
+        // fractions land on the crop's pixels and never reach outside it.
+        let mut j = job(QualityPreset::Balanced);
+        j.crop = Some(Rect { x: 100, y: 100, w: 800, h: 400 });
+        j.effects.redact = Some(redact(RedactMode::Box, 0.5, 0.5, 0.5, 0.5));
+        let chain = vf(&build_args(&j, "libx264", true, 1920, 1080, 30.0, None));
+        assert!(chain.contains("drawbox=x=400:y=200:w=400:h=200"), "{chain}");
+    }
+
+    #[test]
+    fn redact_goes_after_the_crop_and_before_the_scale_and_the_text() {
+        let mut j = job(QualityPreset::Balanced);
+        j.crop = Some(Rect { x: 0, y: 0, w: 1280, h: 720 });
+        j.effects.redact = Some(redact(RedactMode::Pixelate, 0.4, 0.4, 0.2, 0.2));
+        j.effects.text = Some(overlay("hello"));
+        j.output_height = Some(480);
+        let chain = vf(&build_args(&j, "libx264", true, 1920, 1080, 30.0, Some(&font())));
+        let crop = chain.find("crop=1280").expect("no crop");
+        let redact = chain.find("split[fcmain]").expect("no redact");
+        let scale = chain.find("scale=-2").or_else(|| chain.rfind("scale=")).expect("no scale");
+        let text = chain.find("drawtext").expect("no text");
+        assert!(crop < redact && redact < scale && scale < text, "{chain}");
+    }
+
+    #[test]
+    fn a_redact_region_off_the_edge_is_pulled_back_inside_with_even_edges() {
+        let r = redact_rect(&RedactRegion { x: 0.9, y: 0.95, w: 0.5, h: 0.5 }, 1001, 999).unwrap();
+        assert!(r.x % 2 == 0 && r.y % 2 == 0 && r.w % 2 == 0 && r.h % 2 == 0, "{r:?}");
+        assert!(r.x + r.w <= 1001 && r.y + r.h <= 999, "{r:?}");
+        assert!(r.w >= 2 && r.h >= 2, "{r:?}");
+    }
+
+    #[test]
+    fn the_gif_chain_carries_the_redact_ahead_of_its_palette() {
+        let mut j = job(QualityPreset::Balanced);
+        j.format = ExportFormat::Gif;
+        j.output = "C:\\clips\\out.gif".to_string();
+        j.effects.redact = Some(redact(RedactMode::Pixelate, 0.1, 0.1, 0.3, 0.3));
+        let chain = value_after(&build_args(&j, "libx264", true, 1920, 1080, 30.0, None), "-filter_complex")
+            .unwrap()
+            .to_string();
+        let redact = chain.find("[fcmain][fcred]overlay").expect("no redact");
+        assert!(redact < chain.find("palettegen").unwrap(), "{chain}");
+    }
+
+    #[test]
+    fn an_audio_only_export_takes_no_redact() {
+        let mut j = job(QualityPreset::Balanced);
+        j.format = ExportFormat::Mp3;
+        j.output = "C:\\clips\\out.mp3".to_string();
+        j.effects.redact = Some(redact(RedactMode::Blur, 0.1, 0.1, 0.3, 0.3));
+        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0, None);
+        assert!(!args.iter().any(|a| a.contains("fcred") || a.contains("drawbox")), "{args:?}");
+    }
+
+    #[test]
+    fn export_job_reads_the_redact_block_the_frontend_sends() {
+        let json = r#"{"mode":"pixelate","strength":12,"region":{"x":0.1,"y":0.2,"w":0.3,"h":0.4}}"#;
+        let r: Redact = serde_json::from_str(json).unwrap();
+        assert_eq!(r, redact(RedactMode::Pixelate, 0.1, 0.2, 0.3, 0.4).with_strength(12.0));
     }
 
     #[test]

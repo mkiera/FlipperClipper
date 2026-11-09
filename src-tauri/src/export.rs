@@ -574,6 +574,21 @@ fn validate_effects(fx: &Effects) -> Result<(), String> {
     bounded(fx.fade_in, 0.0, 60.0, "The fade in")?;
     bounded(fx.fade_out, 0.0, 60.0, "The fade out")?;
 
+    if let Some(redact) = fx.redact.as_ref() {
+        bounded(Some(redact.strength), 2.0, 100.0, "The redact strength")?;
+        let r = &redact.region;
+        let inside = [r.x, r.y, r.w, r.h].iter().all(|v| v.is_finite())
+            && r.x >= 0.0
+            && r.y >= 0.0
+            && r.w > 0.0
+            && r.h > 0.0
+            && r.x + r.w <= 1.0 + 1e-9
+            && r.y + r.h <= 1.0 + 1e-9;
+        if !inside {
+            return Err("The redacted region has to sit inside the frame.".to_string());
+        }
+    }
+
     if let Some(text) = fx.text.as_ref() {
         if text.text.trim().is_empty() {
             return Err("The text overlay has nothing to draw.".to_string());
@@ -910,6 +925,34 @@ mod tests {
                 "{name} accepted {refused}"
             );
         }
+    }
+
+    #[test]
+    fn a_redact_region_outside_the_frame_or_too_weak_is_refused() {
+        use crate::ffmpeg::{Redact, RedactMode, RedactRegion};
+        let good = Redact {
+            mode: RedactMode::Pixelate,
+            strength: 16.0,
+            region: RedactRegion { x: 0.5, y: 0.5, w: 0.5, h: 0.5 },
+        };
+        let mut j = job();
+        j.effects.redact = Some(good.clone());
+        assert!(validate(&j).is_ok(), "{:?}", validate(&j));
+
+        let mut off = good.clone();
+        off.region.x = 0.6;
+        j.effects.redact = Some(off);
+        assert!(validate(&j).unwrap_err().contains("inside the frame"));
+
+        let mut nan = good.clone();
+        nan.region.w = f64::NAN;
+        j.effects.redact = Some(nan);
+        assert!(validate(&j).unwrap_err().contains("inside the frame"));
+
+        let mut weak = good;
+        weak.strength = 1.0;
+        j.effects.redact = Some(weak);
+        assert!(validate(&j).unwrap_err().contains("redact strength"));
     }
 
     #[test]

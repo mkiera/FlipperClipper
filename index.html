@@ -31,9 +31,16 @@
         </svg>
 
         <!-- Sized onto the exported region by overlay.ts, and stacked in the order the export
-             applies them: vignette, then text, then the fade over both. -->
+             applies them: vignette, then redact, then text, then the fade over all three. -->
         <div id="fx-overlay" hidden>
           <div id="fx-vignette"></div>
+          <div id="fx-redact">
+            <canvas id="fx-redact-canvas"></canvas>
+            <span class="ch ch-nw" data-handle="nw"></span>
+            <span class="ch ch-ne" data-handle="ne"></span>
+            <span class="ch ch-se" data-handle="se"></span>
+            <span class="ch ch-sw" data-handle="sw"></span>
+          </div>
           <div id="fx-text"><span id="fx-text-span"></span></div>
           <div id="fx-fade"></div>
         </div>

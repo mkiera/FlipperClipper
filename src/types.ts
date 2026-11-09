@@ -96,6 +96,25 @@ export interface TextOverlay {
   boxed: boolean;
 }
 
+/** How a redacted region hides what is under it. */
+export type RedactMode = 'blur' | 'pixelate' | 'box';
+
+/** The region is in fractions of the exported frame (the crop when there is one), so a later
+ *  crop keeps it over the same part of the picture rather than over the same pixels. */
+export interface RedactRegion {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+export interface Redact {
+  mode: RedactMode;
+  /** Blur sigma or pixel block size, in source pixels. Unused by 'box'. */
+  strength: number;
+  region: RedactRegion;
+}
+
 /** What the export applies. Null is off: a switched-off effect keeps its dial in
  *  EffectsState, and nothing here remembers it. */
 export interface EffectsJob {
@@ -113,6 +132,7 @@ export interface EffectsJob {
   fadeIn: number | null;
   fadeOut: number | null;
   text: TextOverlay | null;
+  redact: Redact | null;
 }
 
 /** The dials themselves, kept whether or not the effect is switched on. */
@@ -125,6 +145,7 @@ export interface EffectSettings {
   vignette: { amount: number };
   fade: { inSeconds: number; outSeconds: number };
   text: TextOverlay;
+  redact: Redact;
 }
 
 export type EffectId = keyof EffectSettings;

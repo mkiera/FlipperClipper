@@ -11,6 +11,8 @@ import {
   EFFECT_IDS,
   EFFECT_LABEL,
   EFFECT_RANGE,
+  REDACT_MODES,
+  REDACT_MODE_LABEL,
   appliesToAudioOnly,
   defaultEffects,
   effectSummary,
@@ -255,9 +257,47 @@ function buildBody(id: EffectId): HTMLElement[] {
           write: (v) => setSetting('fade', { outSeconds: v }),
         }),
       ];
+    case 'redact':
+      return buildRedactBody();
     case 'text':
       return buildTextBody();
   }
+}
+
+function buildRedactBody(): HTMLElement[] {
+  const modes = document.createElement('div');
+  modes.className = 'chips fx-modes';
+  modes.setAttribute('role', 'group');
+  modes.setAttribute('aria-label', 'Redact style');
+  const chips = REDACT_MODES.map((mode) => {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'chip';
+    button.textContent = REDACT_MODE_LABEL[mode];
+    button.addEventListener('click', () => setSetting('redact', { mode }));
+    modes.append(button);
+    return { button, mode };
+  });
+
+  const strength = slider({
+    label: 'Strength',
+    ...EFFECT_RANGE.redact,
+    read: () => edit.effects.settings.redact.strength,
+    show: (v) => `${Math.round(v)} px`,
+    write: (v) => setSetting('redact', { strength: v }),
+  });
+
+  updaters.push(() => {
+    const current = edit.effects.settings.redact.mode;
+    for (const chip of chips) {
+      chip.button.classList.toggle('active', chip.mode === current);
+      chip.button.setAttribute('aria-pressed', String(chip.mode === current));
+    }
+    // A black box has no strength to set.
+    strength.hidden = current === 'box';
+  });
+
+  return [modes, strength];
 }
 
 function multiplier(label: string, id: 'brightness' | 'contrast' | 'saturation'): HTMLElement {
