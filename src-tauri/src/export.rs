@@ -185,9 +185,26 @@ pub fn start_export(app: AppHandle, job: ExportJob) -> Result<(), String> {
         None => None,
     };
 
+    let commands = match ffmpeg::redact_commands(&job, info.width, info.height, info.fps) {
+        Some(text) => {
+            let dir = overlay_dir()?;
+            let path = dir.join(ffmpeg::REDACT_COMMANDS_FILE);
+            std::fs::write(&path, text.as_bytes()).map_err(|_| {
+                "The redaction keyframes could not be written to a temporary file.".to_string()
+            })?;
+            Some((dir, path))
+        }
+        None => None,
+    };
+
     let mut encoding_job = job.clone();
-    let (mut command, pending_output) =
-        prepare_export(&mut encoding_job, &encoder, &info, overlay.as_ref())?;
+    let (mut command, pending_output) = prepare_export(
+        &mut encoding_job,
+        &encoder,
+        &info,
+        overlay.as_ref(),
+        commands.as_ref().map(|(dir, _)| dir.as_path()),
+    )?;
 
     let mut child = command
         .stdin(Stdio::null())
@@ -239,6 +256,9 @@ pub fn start_export(app: AppHandle, job: ExportJob) -> Result<(), String> {
         if let Some(path) = overlay_text {
             let _ = std::fs::remove_file(path);
         }
+        if let Some((_, path)) = commands {
+            let _ = std::fs::remove_file(path);
+        }
 
         let (child, cancelled) = {
             let mut slot = lock_slot(&watcher_slot);
@@ -266,6 +286,7 @@ fn prepare_export(
     encoder: &str,
     info: &ffmpeg::MediaInfo,
     overlay: Option<&(PathBuf, PathBuf)>,
+    work_dir: Option<&Path>,
 ) -> Result<(Command, PendingOutput), String> {
     let pending_output = PendingOutput::new(job)?;
     let args = ffmpeg::build_args(
@@ -279,8 +300,9 @@ fn prepare_export(
     );
     let mut command = ffmpeg::hidden_command("ffmpeg");
     command.args(&args);
-    if let Some((dir, _)) = overlay {
-        // The overlay text filename is relative to this directory.
+    // The overlay text and the redaction commands are named relative to this directory. Both
+    // live in overlay_dir(), so either one's folder serves for both.
+    if let Some(dir) = overlay.map(|(dir, _)| dir.as_path()).or(work_dir) {
         command.current_dir(dir);
     }
     Ok((command, pending_output))
@@ -564,6 +586,11 @@ fn validate_ramp(job: &ExportJob) -> Result<(), String> {
     Ok(())
 }
 
+/// The redaction list and keyframe counts the frontend allows. Each redaction is a full-frame
+/// pass, so the count bounds the export's cost.
+const REDACT_MAX_ITEMS: usize = 8;
+const REDACT_MAX_KEYS: usize = 500;
+
 fn validate_effects(fx: &Effects) -> Result<(), String> {
     bounded(fx.brightness, 0.2, 2.0, "Brightness")?;
     bounded(fx.contrast, 0.2, 3.0, "Contrast")?;
@@ -574,18 +601,26 @@ fn validate_effects(fx: &Effects) -> Result<(), String> {
     bounded(fx.fade_in, 0.0, 60.0, "The fade in")?;
     bounded(fx.fade_out, 0.0, 60.0, "The fade out")?;
 
-    if let Some(redact) = fx.redact.as_ref() {
+    if fx.redact.len() > REDACT_MAX_ITEMS {
+        return Err(format!("An export can use at most {REDACT_MAX_ITEMS} redactions."));
+    }
+    for redact in &fx.redact {
         bounded(Some(redact.strength), 2.0, 100.0, "The redact strength")?;
-        let r = &redact.region;
-        let inside = [r.x, r.y, r.w, r.h].iter().all(|v| v.is_finite())
-            && r.x >= 0.0
-            && r.y >= 0.0
-            && r.w > 0.0
-            && r.h > 0.0
-            && r.x + r.w <= 1.0 + 1e-9
-            && r.y + r.h <= 1.0 + 1e-9;
-        if !inside {
-            return Err("The redacted region has to sit inside the frame.".to_string());
+        if redact.keys.is_empty() || redact.keys.len() > REDACT_MAX_KEYS {
+            return Err(format!("A redaction needs between 1 and {REDACT_MAX_KEYS} keyframes."));
+        }
+        for k in &redact.keys {
+            let inside = [k.t, k.x, k.y, k.w, k.h].iter().all(|v| v.is_finite())
+                && k.t >= 0.0
+                && k.x >= 0.0
+                && k.y >= 0.0
+                && k.w > 0.0
+                && k.h > 0.0
+                && k.x + k.w <= 1.0 + 1e-9
+                && k.y + k.h <= 1.0 + 1e-9;
+            if !inside {
+                return Err("The redacted region has to sit inside the frame.".to_string());
+            }
         }
     }
 
@@ -929,26 +964,29 @@ mod tests {
 
     #[test]
     fn a_redact_region_outside_the_frame_or_too_weak_is_refused() {
-        use crate::ffmpeg::{Redact, RedactMode, RedactRegion};
-        let good = Redact {
-            mode: RedactMode::Pixelate,
-            strength: 16.0,
-            region: RedactRegion { x: 0.5, y: 0.5, w: 0.5, h: 0.5 },
-        };
-        let check = |redact: Redact| validate_effects(&Effects { redact: Some(redact), ..Effects::default() });
-        assert!(check(good.clone()).is_ok());
+        use crate::ffmpeg::{Redact, RedactKey, RedactMode};
+        let k = RedactKey { t: 1.0, x: 0.5, y: 0.5, w: 0.5, h: 0.5, on: true };
+        let good = Redact { mode: RedactMode::Pixelate, strength: 16.0, keys: vec![k] };
+        let check = |list: Vec<Redact>| validate_effects(&Effects { redact: list, ..Effects::default() });
+        assert!(check(vec![good.clone()]).is_ok());
 
         let mut off = good.clone();
-        off.region.x = 0.6;
-        assert!(check(off).unwrap_err().contains("inside the frame"));
+        off.keys[0].x = 0.6;
+        assert!(check(vec![off]).unwrap_err().contains("inside the frame"));
 
         let mut nan = good.clone();
-        nan.region.w = f64::NAN;
-        assert!(check(nan).unwrap_err().contains("inside the frame"));
+        nan.keys[0].t = f64::NAN;
+        assert!(check(vec![nan]).unwrap_err().contains("inside the frame"));
 
-        let mut weak = good;
+        let mut none = good.clone();
+        none.keys.clear();
+        assert!(check(vec![none]).unwrap_err().contains("keyframes"));
+
+        let mut weak = good.clone();
         weak.strength = 1.0;
-        assert!(check(weak).unwrap_err().contains("redact strength"));
+        assert!(check(vec![weak]).unwrap_err().contains("redact strength"));
+
+        assert!(check(vec![good; REDACT_MAX_ITEMS + 1]).unwrap_err().contains("at most"));
     }
 
     #[test]

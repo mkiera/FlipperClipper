@@ -13,11 +13,20 @@
  */
 
 import { frameGeometry } from './crop';
-import { blurPixels, clampRegion, cssFilterFor, hasEffect, rgba, withSetting } from './effects';
+import { blurPixels, cssFilterFor, hasEffect, rgba } from './effects';
 import { currentTime, onTime, videoElement } from './player';
-import { edit, patchEdit, subscribe, ui } from './state';
+import { clampRegion, stateAt, withEdit } from './redact';
+import {
+  keyTolerance,
+  playheadTime,
+  redactItems,
+  selectRedaction,
+  selectedRedaction,
+  updateRedaction,
+} from './redactedit';
+import { edit, subscribe, ui } from './state';
 import { frameHeight, frameWidth, outputDuration } from './types';
-import type { RedactRegion } from './types';
+import type { RedactItem, RedactRegion } from './types';
 
 /** The margin drawtext leaves, as a fraction of frame height. Kept in step with ffmpeg.rs. */
 const TEXT_MARGIN = 0.04;
@@ -37,8 +46,9 @@ let vignette!: HTMLElement;
 let textLayer!: HTMLElement;
 let textSpan!: HTMLElement;
 let fadeShade!: HTMLElement;
-let redactBox!: HTMLElement;
-let redactCanvas!: HTMLCanvasElement;
+let redactLayer!: HTMLElement;
+/** The last frame geometry, so the boxes can follow the playhead without re-measuring. */
+let lastGeometry: { width: number; height: number; scale: number } | null = null;
 let blurAmount!: SVGFEGaussianBlurElement;
 
 function el<T extends HTMLElement>(id: string): T {
@@ -56,8 +66,7 @@ export function initOverlay(): void {
   textLayer = el('fx-text');
   textSpan = el('fx-text-span');
   fadeShade = el('fx-fade');
-  redactBox = el('fx-redact');
-  redactCanvas = el<HTMLCanvasElement>('fx-redact-canvas');
+  redactLayer = el('fx-redact-layer');
   initRedactDrag();
   blurAmount = el<HTMLElement>('fx-blur-amount') as unknown as SVGFEGaussianBlurElement;
 
@@ -70,10 +79,10 @@ export function initOverlay(): void {
   // Per presented frame, so the fade tracks the playhead without re-laying out the rest.
   onTime(() => {
     renderFade();
-    drawPixelate();
+    renderRedactions();
   });
-  video.addEventListener('seeked', drawPixelate);
-  video.addEventListener('loadeddata', drawPixelate);
+  video.addEventListener('seeked', renderRedactions);
+  video.addEventListener('loadeddata', renderRedactions);
   render();
 }
 
@@ -115,8 +124,9 @@ export function render(): void {
     ).toFixed(2)}) 100%)`;
   }
 
-  redactBox.hidden = !drawsRedact;
-  if (drawsRedact) renderRedact(geometry.width, geometry.height, scale);
+  redactLayer.hidden = !drawsRedact;
+  lastGeometry = { width: geometry.width, height: geometry.height, scale };
+  renderRedactions();
 
   textLayer.hidden = !drawsText;
   if (drawsText) renderText(geometry.height);
@@ -217,104 +227,174 @@ function renderFade(): void {
 
 /* --- Redact --- */
 
+/** One element per redaction, reused while the count stays the same. */
+function redactBoxes(items: RedactItem[]): HTMLElement[] {
+  while (redactLayer.children.length < items.length) {
+    const box = document.createElement('div');
+    box.className = 'fx-redact-box';
+    // The canvas sits on the export's block grid, which overhangs the box; the clip trims it
+    // while the box itself stays unclipped for its corner handles.
+    const clip = document.createElement('div');
+    clip.className = 'fx-redact-clip';
+    clip.append(document.createElement('canvas'));
+    box.append(clip);
+    for (const corner of ['nw', 'ne', 'se', 'sw']) {
+      const handle = document.createElement('span');
+      handle.className = `ch ch-${corner}`;
+      handle.dataset.handle = corner;
+      box.append(handle);
+    }
+    redactLayer.append(box);
+  }
+  while (redactLayer.children.length > items.length) redactLayer.lastElementChild?.remove();
+  return Array.from(redactLayer.children) as HTMLElement[];
+}
+
 /**
- * The redacted region over the picture. A black box is a fill, a blur is a backdrop filter of
- * the same sigma the export uses, and a pixelation is a canvas holding one pixel per block,
- * stretched back up without smoothing.
+ * Every redaction as it stands at the playhead. A black box is a fill, a blur is a backdrop
+ * filter of the same sigma the export uses, and a pixelation is a canvas of one pixel per
+ * block, on the same grid the export pixelates the whole frame on, stretched back up without
+ * smoothing.
  */
-function renderRedact(width: number, height: number, scale: number): void {
-  const redact = edit.effects.settings.redact;
-  const r = clampRegion(redact.region);
-  Object.assign(redactBox.style, {
-    left: `${r.x * width}px`,
-    top: `${r.y * height}px`,
-    width: `${r.w * width}px`,
-    height: `${r.h * height}px`,
-    background: redact.mode === 'box' ? '#000' : 'transparent',
-    backdropFilter: redact.mode === 'blur' ? `blur(${(redact.strength * scale).toFixed(2)}px)` : 'none',
+function renderRedactions(): void {
+  if (redactLayer.hidden || !lastGeometry) return;
+  const { width, height, scale } = lastGeometry;
+  const items = redactItems();
+  const boxes = redactBoxes(items);
+  const t = playheadTime();
+  const panelOpen = ui.effectsOpen && !ui.cropping;
+  const selected = selectedRedaction();
+
+  items.forEach((item, index) => {
+    const box = boxes[index];
+    const { region: r, on } = stateAt(item, t);
+    box.dataset.id = String(item.id);
+    const isSelected = selected?.id === item.id;
+    box.classList.toggle('editing', panelOpen && isSelected);
+    box.classList.toggle('selectable', panelOpen && !isSelected);
+    box.classList.toggle('off', !on);
+    // A box hidden here is only drawn while it can be edited.
+    box.hidden = !on && !panelOpen;
+    Object.assign(box.style, {
+      left: `${r.x * width}px`,
+      top: `${r.y * height}px`,
+      width: `${r.w * width}px`,
+      height: `${r.h * height}px`,
+      background: item.mode === 'box' ? '#000' : 'transparent',
+      backdropFilter: item.mode === 'blur' ? `blur(${(item.strength * scale).toFixed(2)}px)` : 'none',
+    });
+    const canvas = box.querySelector('canvas') as HTMLCanvasElement;
+    canvas.hidden = item.mode !== 'pixelate';
+    if (item.mode === 'pixelate' && on) drawPixelate(canvas, item, r, width / cutSize().w);
   });
-  redactBox.classList.toggle('editing', ui.effectsOpen && !ui.cropping);
-  redactCanvas.hidden = redact.mode !== 'pixelate';
-  drawPixelate();
 }
 
-/** The region in the turned frame's source pixels, which is what the canvas samples from. */
-function redactSource(): { x: number; y: number; w: number; h: number } | null {
-  if (!edit.media) return null;
-  const crop = edit.crop ?? { x: 0, y: 0, w: frameWidth(edit), h: frameHeight(edit) };
-  const r = clampRegion(edit.effects.settings.redact.region);
-  return { x: crop.x + r.x * crop.w, y: crop.y + r.y * crop.h, w: r.w * crop.w, h: r.h * crop.h };
+/** The frame the export redacts: the crop when there is one, in turned source pixels. */
+function cutSize(): { x: number; y: number; w: number; h: number } {
+  return edit.crop ?? { x: 0, y: 0, w: frameWidth(edit), h: frameHeight(edit) };
 }
 
-function drawPixelate(): void {
-  if (redactBox.hidden || redactCanvas.hidden) return;
+function drawPixelate(canvas: HTMLCanvasElement, item: RedactItem, r: RedactRegion, display: number): void {
   const media = edit.media;
   const video = videoElement();
-  const source = redactSource();
-  if (!media || !source || video.readyState < 2) return;
+  if (!media || video.readyState < 2) return;
 
-  const block = Math.max(1, Math.round(edit.effects.settings.redact.strength));
-  const cols = Math.max(1, Math.floor(source.w / block));
-  const rows = Math.max(1, Math.floor(source.h / block));
-  if (redactCanvas.width !== cols) redactCanvas.width = cols;
-  if (redactCanvas.height !== rows) redactCanvas.height = rows;
+  // The export scales the whole cut frame down to this many blocks and back up.
+  const cut = cutSize();
+  const block = Math.max(1, Math.round(item.strength));
+  const cols = Math.max(1, Math.floor(cut.w / block));
+  const rows = Math.max(1, Math.floor(cut.h / block));
+  const bw = cut.w / cols;
+  const bh = cut.h / rows;
 
-  const ctx = redactCanvas.getContext('2d');
+  const sx = r.x * cut.w;
+  const sy = r.y * cut.h;
+  const c0 = Math.floor(sx / bw);
+  const r0 = Math.floor(sy / bh);
+  const c1 = Math.min(cols, Math.ceil((sx + r.w * cut.w) / bw));
+  const r1 = Math.min(rows, Math.ceil((sy + r.h * cut.h) / bh));
+  const across = Math.max(1, c1 - c0);
+  const down = Math.max(1, r1 - r0);
+  if (canvas.width !== across) canvas.width = across;
+  if (canvas.height !== down) canvas.height = down;
+  Object.assign(canvas.style, {
+    left: `${(c0 * bw - sx) * display}px`,
+    top: `${(r0 * bh - sy) * display}px`,
+    width: `${across * bw * display}px`,
+    height: `${down * bh * display}px`,
+  });
+
+  const ctx = canvas.getContext('2d');
   if (!ctx) return;
   const { rotate, flipH, flipV } = edit.orientation;
   ctx.setTransform(1, 0, 0, 1, 0, 0);
-  ctx.clearRect(0, 0, cols, rows);
+  ctx.clearRect(0, 0, across, down);
   ctx.imageSmoothingEnabled = true;
   ctx.imageSmoothingQuality = 'high';
   // The grade the <video> wears, so the blocks carry the same colour as the frame around them.
   ctx.filter = video.style.filter || 'none';
-  // Canvas pixels are blocks of the region, and the region is in the turned frame. The video
-  // is drawn turned and flipped about the frame's centre the same way its CSS transform is.
-  ctx.scale(cols / source.w, rows / source.h);
-  ctx.translate(-source.x, -source.y);
+  // Canvas pixels are blocks of the cut frame. The video is drawn turned and flipped about the
+  // frame's centre the same way its CSS transform is: flips act on the turned picture.
+  ctx.scale(1 / bw, 1 / bh);
+  ctx.translate(-(cut.x + c0 * bw), -(cut.y + r0 * bh));
   ctx.translate(frameWidth(edit) / 2, frameHeight(edit) / 2);
   ctx.scale(flipH ? -1 : 1, flipV ? -1 : 1);
   ctx.rotate((rotate * Math.PI) / 180);
   ctx.drawImage(video, -media.width / 2, -media.height / 2, media.width, media.height);
 }
 
-/** Dragging the box moves it, and dragging a corner resizes it, in fractions of the frame. */
+/** Dragging the selected box moves it and dragging a corner resizes it, in fractions of the
+ *  frame, at the playhead. Pressing another box selects it. */
 function initRedactDrag(): void {
-  let handle: string | null = null;
-  let start: RedactRegion = { x: 0, y: 0, w: 0, h: 0 };
-  let startX = 0;
-  let startY = 0;
-  let width = 1;
-  let height = 1;
+  let drag: { id: number; handle: string; start: RedactRegion; x: number; y: number; target: HTMLElement } | null =
+    null;
 
-  redactBox.addEventListener('pointerdown', (e) => {
-    if (!redactBox.classList.contains('editing')) return;
-    width = layer.clientWidth || 1;
-    height = layer.clientHeight || 1;
-    handle = (e.target as HTMLElement).dataset.handle ?? 'move';
-    start = clampRegion(edit.effects.settings.redact.region);
-    startX = e.clientX;
-    startY = e.clientY;
-    redactBox.setPointerCapture(e.pointerId);
+  redactLayer.addEventListener('pointerdown', (e) => {
+    const target = e.target as HTMLElement;
+    const box = target.closest('.fx-redact-box') as HTMLElement | null;
+    if (!box) return;
+    const id = Number(box.dataset.id);
+    if (box.classList.contains('selectable')) {
+      selectRedaction(id);
+      e.preventDefault();
+      e.stopPropagation();
+      return;
+    }
+    if (!box.classList.contains('editing')) return;
+    const item = redactItems().find((it) => it.id === id);
+    if (!item) return;
+    drag = {
+      id,
+      handle: target.dataset.handle ?? 'move',
+      start: stateAt(item, playheadTime()).region,
+      x: e.clientX,
+      y: e.clientY,
+      target: box,
+    };
+    box.setPointerCapture(e.pointerId);
     e.preventDefault();
     e.stopPropagation();
   });
 
-  redactBox.addEventListener('pointermove', (e) => {
-    if (!handle) return;
-    const dx = (e.clientX - startX) / width;
-    const dy = (e.clientY - startY) / height;
-    const region = handle === 'move' ? moveRegion(start, dx, dy) : resizeRegion(start, handle, dx, dy);
-    patchEdit({ effects: withSetting(edit.effects, 'redact', { region }) });
+  redactLayer.addEventListener('pointermove', (e) => {
+    if (!drag) return;
+    const width = lastGeometry?.width || 1;
+    const height = lastGeometry?.height || 1;
+    const dx = (e.clientX - drag.x) / width;
+    const dy = (e.clientY - drag.y) / height;
+    const region =
+      drag.handle === 'move' ? moveRegion(drag.start, dx, dy) : resizeRegion(drag.start, drag.handle, dx, dy);
+    const t = playheadTime();
+    updateRedaction(drag.id, (item) => withEdit(item, t, { region }, keyTolerance()));
   });
 
   const end = (e: PointerEvent) => {
-    if (!handle) return;
-    handle = null;
-    if (redactBox.hasPointerCapture(e.pointerId)) redactBox.releasePointerCapture(e.pointerId);
+    if (!drag) return;
+    if (drag.target.hasPointerCapture(e.pointerId)) drag.target.releasePointerCapture(e.pointerId);
+    drag = null;
   };
-  redactBox.addEventListener('pointerup', end);
-  redactBox.addEventListener('pointercancel', end);
+  redactLayer.addEventListener('pointerup', end);
+  redactLayer.addEventListener('pointercancel', end);
 }
 
 function moveRegion(start: RedactRegion, dx: number, dy: number): RedactRegion {

@@ -135,23 +135,29 @@ pub enum RedactMode {
     Box,
 }
 
-/// A rectangle in fractions of the exported frame: the crop when there is one.
+/// One keyframe of a redaction: a rectangle in fractions of the exported frame (the crop when
+/// there is one), at a moment on the source timeline.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-pub struct RedactRegion {
+pub struct RedactKey {
+    pub t: f64,
     pub x: f64,
     pub y: f64,
     pub w: f64,
     pub h: f64,
+    /// Shown from this keyframe until the next.
+    pub on: bool,
 }
 
-/// One region of the frame hidden by a blur, a pixelation or a solid box.
+/// One region of the frame hidden by a blur, a pixelation or a solid box. The rectangle moves
+/// in a straight line between keyframes and visibility switches at each one; before the first
+/// and after the last, the nearest keyframe holds.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Redact {
     pub mode: RedactMode,
     /// Blur sigma or pixel block size, in source pixels. Unused by Box.
     pub strength: f64,
-    pub region: RedactRegion,
+    pub keys: Vec<RedactKey>,
 }
 
 /// The quick-effects tab, resolved: None is off. Container-level `default` so a job built
@@ -174,7 +180,7 @@ pub struct Effects {
     pub fade_in: Option<f64>,
     pub fade_out: Option<f64>,
     pub text: Option<TextOverlay>,
-    pub redact: Option<Redact>,
+    pub redact: Vec<Redact>,
 }
 
 impl Effects {
@@ -189,7 +195,7 @@ impl Effects {
             || self.fade_in.is_some()
             || self.fade_out.is_some()
             || self.text.is_some()
-            || self.redact.is_some()
+            || !self.redact.is_empty()
     }
 }
 
@@ -580,57 +586,212 @@ fn effect_filters(fx: &Effects) -> Vec<String> {
     parts
 }
 
-/// The redacted region in whole pixels of a `width` x `height` frame, rounded outward so no
-/// selected pixel is left showing.
-fn redact_rect(region: &RedactRegion, width: i64, height: i64) -> Option<Rect> {
-    if width < 2 || height < 2 {
-        return None;
-    }
+/// The file sendcmd reads a moving redaction's per-frame positions from, relative to ffmpeg's
+/// working directory - the same arrangement, and the same folder, as OVERLAY_TEXT_FILE.
+/// drawbox's own x/y/w/h expressions are evaluated once, not per frame, in the FFmpeg 6 builds
+/// still in use, so the positions are sent as commands instead.
+pub const REDACT_COMMANDS_FILE: &str = "flipperclipper-redact.cmd";
+
+/// A rectangle in fractions to whole pixels of a `width` x `height` frame, rounded outward so
+/// no selected pixel is left showing.
+fn redact_rect(x: f64, y: f64, w: f64, h: f64, width: i64, height: i64) -> Rect {
     let span = |start: f64, len: f64, size: i64| -> (i64, i64) {
         let first = (start.clamp(0.0, 1.0) * size as f64).floor() as i64;
-        // Even, because overlay rounds an odd position down on 4:2:0 and would land the
-        // patch one pixel up and left of where it was cut.
-        let first = first.min(size - 2);
-        let first = first - first % 2;
+        let first = first.clamp(0, (size - 2).max(0));
         // The slack keeps 0.1 + 0.2 from reading as a hair past 0.3 and taking a column more.
         let end = ((start + len).clamp(0.0, 1.0) * size as f64 - 1e-6).ceil() as i64;
-        (first, end.clamp(first + 2, size))
+        (first, end.clamp(first + 2, size.max(first + 2)))
     };
-    let (left, right) = span(region.x, region.w, width);
-    let (top, bottom) = span(region.y, region.h, height);
-    Some(Rect { x: left, y: top, w: right - left, h: bottom - top })
+    let (left, right) = span(x, w, width);
+    let (top, bottom) = span(y, h, height);
+    Rect { x: left, y: top, w: right - left, h: bottom - top }
 }
 
-/// The redact step for a frame of `width` x `height`, the size after crop and before scale.
-/// Blur and pixelate copy the region out, change it, and lay it back at the same place, so
-/// the rest of the frame passes through untouched.
-fn redact_filter(redact: &Redact, width: i64, height: i64) -> Option<String> {
-    let r = redact_rect(&redact.region, width, height)?;
-    // exact=1: on 4:2:0 crop otherwise rounds an odd size or origin down, leaving the last
-    // selected row and column unredacted.
-    let cut = format!("crop={}:{}:{}:{}:exact=1", r.w, r.h, r.x, r.y);
-    let changed = match redact.mode {
-        RedactMode::Box => {
-            return Some(format!(
-                "drawbox=x={}:y={}:w={}:h={}:color=black:t=fill",
-                r.x, r.y, r.w, r.h
+/// The keyframes in time order, which is what every lookup below assumes.
+fn sorted_keys(redact: &Redact) -> Vec<RedactKey> {
+    let mut keys = redact.keys.clone();
+    keys.sort_by(|a, b| a.t.total_cmp(&b.t));
+    keys
+}
+
+/// The rectangle and visibility at source time `t`.
+fn redact_state(keys: &[RedactKey], t: f64) -> (f64, f64, f64, f64, bool) {
+    let pick = |k: &RedactKey| (k.x, k.y, k.w, k.h, k.on);
+    let (Some(first), Some(last)) = (keys.first(), keys.last()) else {
+        return (0.0, 0.0, 0.0, 0.0, false);
+    };
+    if t <= first.t {
+        return pick(first);
+    }
+    if t >= last.t {
+        return pick(last);
+    }
+    let i = keys.windows(2).position(|w| w[1].t > t).unwrap_or(0);
+    let (a, b) = (keys[i], keys[i + 1]);
+    let f = if b.t > a.t { (t - a.t) / (b.t - a.t) } else { 0.0 };
+    let lerp = |p: f64, q: f64| p + (q - p) * f;
+    (lerp(a.x, b.x), lerp(a.y, b.y), lerp(a.w, b.w), lerp(a.h, b.h), a.on)
+}
+
+/// One redaction, resolved against the frame and the trim.
+struct RedactPlan {
+    mode: RedactMode,
+    strength: f64,
+    /// Where the box starts, at the first exported frame.
+    start: Rect,
+    /// When it shows, on the stream's clock (0 at the in point). None is always.
+    enable: Option<String>,
+    /// (stream time, rectangle) whenever the rectangle changes after the first frame.
+    moves: Vec<(f64, Rect)>,
+}
+
+/// Every redaction that shows at some point in the trim. `width` x `height` is the frame after
+/// the crop; the stream's clock starts at the in point because the input is seeked with -ss.
+fn redact_plans(job: &ExportJob, width: i64, height: i64, fps: f64) -> Vec<RedactPlan> {
+    let duration = source_duration(job);
+    let fps = if fps.is_finite() && fps > 0.0 { fps } else { 30.0 };
+    let frames = (duration * fps).ceil().max(1.0) as i64;
+    let mut plans = Vec::new();
+
+    for redact in &job.effects.redact {
+        let keys = sorted_keys(redact);
+        if keys.is_empty() {
+            continue;
+        }
+
+        // Visibility is a step at each keyframe: the stretches where it is on, in stream time.
+        let mut spans: Vec<(f64, f64)> = Vec::new();
+        let mut edges: Vec<f64> = vec![0.0];
+        edges.extend(keys.iter().map(|k| (k.t - job.in_point).clamp(0.0, duration)));
+        edges.push(duration);
+        for i in 0..edges.len() - 1 {
+            let on = keys[i.saturating_sub(1)].on;
+            let (from, to) = (edges[i], edges[i + 1]);
+            if on && to > from {
+                match spans.last_mut() {
+                    Some(last) if (last.1 - from).abs() < 1e-9 => last.1 = to,
+                    _ => spans.push((from, to)),
+                }
+            }
+        }
+        if spans.is_empty() {
+            continue;
+        }
+        let always = spans.len() == 1 && spans[0].0 <= 0.0 && spans[0].1 >= duration;
+        let enable = (!always).then(|| {
+            spans
+                .iter()
+                .map(|&(from, to)| match (from <= 0.0, to >= duration) {
+                    (true, _) => format!("lt(t,{})", fmt_num(to)),
+                    (_, true) => format!("gte(t,{})", fmt_num(from)),
+                    _ => format!("gte(t,{})*lt(t,{})", fmt_num(from), fmt_num(to)),
+                })
+                .collect::<Vec<_>>()
+                .join("+")
+        });
+
+        let rect_at = |n: i64| {
+            let (x, y, w, h, _) = redact_state(&keys, job.in_point + n as f64 / fps);
+            redact_rect(x, y, w, h, width, height)
+        };
+        let start = rect_at(0);
+        let mut moves = Vec::new();
+        let moving = keys.windows(2).any(|w| {
+            (w[0].x, w[0].y, w[0].w, w[0].h) != (w[1].x, w[1].y, w[1].w, w[1].h)
+        });
+        if moving {
+            let mut previous = start;
+            for n in 1..frames {
+                let rect = rect_at(n);
+                if rect != previous {
+                    // Half a frame early, so a command never lands just after the frame it
+                    // belongs to.
+                    moves.push((((n as f64) - 0.5) / fps, rect));
+                    previous = rect;
+                }
+            }
+        }
+        plans.push(RedactPlan { mode: redact.mode, strength: redact.strength, start, enable, moves });
+    }
+    plans
+}
+
+/// The sendcmd script for the moving redactions, or None when nothing moves. export.rs writes
+/// it to REDACT_COMMANDS_FILE; build_args emits the sendcmd that reads it from the same plans.
+pub fn redact_commands(job: &ExportJob, width: i64, height: i64, fps: f64) -> Option<String> {
+    if job.lossless || job.format.is_audio() {
+        return None;
+    }
+    let (width, height) = turned_size(job, width, height);
+    let (width, height) = cropped_size(job, width, height);
+    let mut lines: Vec<(f64, String)> = Vec::new();
+    for (i, plan) in redact_plans(job, width, height, fps).iter().enumerate() {
+        for (at, r) in &plan.moves {
+            lines.push((
+                *at,
+                format!(
+                    "drawbox@fcr{i} x {}, drawbox@fcr{i} y {}, drawbox@fcr{i} w {}, drawbox@fcr{i} h {}",
+                    r.x, r.y, r.w, r.h
+                ),
             ));
         }
-        RedactMode::Blur => format!("gblur=sigma={}", fmt_num(redact.strength)),
-        RedactMode::Pixelate => {
-            let block = (redact.strength.round() as i64).max(1);
-            let small_w = (r.w / block).max(1);
-            let small_h = (r.h / block).max(1);
-            format!(
-                "scale={small_w}:{small_h}:flags=area,scale={}:{}:flags=neighbor",
-                r.w, r.h
-            )
-        }
-    };
-    Some(format!(
-        "split[fcmain][fcpart];[fcpart]{cut},{changed}[fcred];[fcmain][fcred]overlay={}:{}",
-        r.x, r.y
-    ))
+    }
+    if lines.is_empty() {
+        return None;
+    }
+    lines.sort_by(|a, b| a.0.total_cmp(&b.0));
+    Some(
+        lines
+            .into_iter()
+            .map(|(at, cmd)| format!("{:.4} {cmd};\n", at.max(0.0)))
+            .collect(),
+    )
+}
+
+/// The redaction filters for a frame of `width` x `height`, after the crop and before
+/// anything retimes it. A black box is a drawbox. Blur and pixelate change a copy of the whole
+/// frame and lay it back through a mask that is white only inside the box, so the box can move
+/// and resize while the filter graph stays fixed.
+fn redact_filters(job: &ExportJob, width: i64, height: i64, fps: f64) -> Option<String> {
+    let plans = redact_plans(job, width, height, fps);
+    if plans.is_empty() {
+        return None;
+    }
+    let mut parts: Vec<String> = Vec::new();
+    if plans.iter().any(|p| !p.moves.is_empty()) {
+        parts.push(format!("sendcmd=f={REDACT_COMMANDS_FILE}"));
+    }
+    for (i, plan) in plans.iter().enumerate() {
+        let r = plan.start;
+        let enable = plan
+            .enable
+            .as_ref()
+            .map(|e| format!(":enable='{e}'"))
+            .unwrap_or_default();
+        let place = format!("drawbox@fcr{i}=x={}:y={}:w={}:h={}", r.x, r.y, r.w, r.h);
+        let changed = match plan.mode {
+            RedactMode::Box => {
+                parts.push(format!("{place}:color=black:t=fill{enable}"));
+                continue;
+            }
+            RedactMode::Blur => format!("gblur=sigma={}", fmt_num(plan.strength)),
+            RedactMode::Pixelate => {
+                let block = (plan.strength.round() as i64).max(1);
+                format!(
+                    "scale={}:{}:flags=area,scale={width}:{height}:flags=neighbor",
+                    (width / block).max(1),
+                    (height / block).max(1)
+                )
+            }
+        };
+        parts.push(format!(
+            "split=3[fcm{i}][fcp{i}][fck{i}];[fcp{i}]{changed}[fcq{i}];\
+             [fck{i}]format=gray,drawbox=x=0:y=0:w=iw:h=ih:color=black:t=fill,\
+             {place}:color=white:t=fill{enable}[fcn{i}];\
+             [fcq{i}][fcn{i}]alphamerge[fca{i}];[fcm{i}][fca{i}]overlay"
+        ));
+    }
+    Some(parts.join(","))
 }
 
 /// Fades are timed on the finished clip, so they are emitted after reverse - the last filter
@@ -1184,19 +1345,12 @@ pub fn build_args(
         if let Some(r) = crop {
             chain.push(format!("crop={}:{}:{}:{}", r.w, r.h, r.x, r.y));
         }
+        let (cut_width, cut_height) = cropped_size(job, width, height);
+        chain.extend(redact_filters(job, cut_width, cut_height, fps));
         chain.extend(retime_filters(job, fps));
         // The gif branch owns its own scale, so the effects and the text both go in ahead of
         // it - the same relative order as the video branch, minus the split.
         chain.extend(effect_filters(&job.effects));
-        let (cut_width, cut_height) = cropped_size(job, width, height);
-        if let Some(filter) = job
-            .effects
-            .redact
-            .as_ref()
-            .and_then(|r| redact_filter(r, cut_width, cut_height))
-        {
-            chain.push(filter);
-        }
         if let (Some(overlay), Some(font)) = (job.effects.text.as_ref(), font) {
             chain.push(drawtext_filter(overlay, font));
         }
@@ -1259,20 +1413,13 @@ pub fn build_args(
         // the source pixel space the overlay measured them in.
         vfilters.push(format!("crop={}:{}:{}:{}", r.w, r.h, r.x, r.y));
     }
+    // After the crop, so the boxes are measured in the frame the user drew them on, and before
+    // anything retimes the stream, so their keyframes run on the source clock.
+    vfilters.extend(redact_filters(job, effective_width, effective_height, fps));
     vfilters.extend(retime_filters(job, fps));
     // Ahead of the scale, so a sigma given in source pixels means the same thing whatever
     // size the clip is exported at - which is what the preview shows.
     vfilters.extend(effect_filters(&job.effects));
-    // Before the scale, so the region and the block size are measured in source pixels the
-    // same way the blur is, and before the text, so a caption is never hidden by it.
-    if let Some(filter) = job
-        .effects
-        .redact
-        .as_ref()
-        .and_then(|r| redact_filter(r, effective_width, effective_height))
-    {
-        vfilters.push(filter);
-    }
     if let Some(filter) = scale_filter {
         vfilters.push(filter);
     }
@@ -2110,98 +2257,136 @@ mod tests {
         assert_eq!(vf(&args), format!("vignette=angle={}", fmt_num(VIGNETTE_MAX_ANGLE)));
     }
 
-    fn redact(mode: RedactMode, x: f64, y: f64, w: f64, h: f64) -> Redact {
-        Redact { mode, strength: 16.0, region: RedactRegion { x, y, w, h } }
+    fn key(t: f64, x: f64, y: f64, w: f64, h: f64, on: bool) -> RedactKey {
+        RedactKey { t, x, y, w, h, on }
     }
 
-    impl Redact {
-        fn with_strength(mut self, strength: f64) -> Self {
-            self.strength = strength;
-            self
-        }
+    fn redact(mode: RedactMode, keys: Vec<RedactKey>) -> Redact {
+        Redact { mode, strength: 16.0, keys }
     }
 
-    #[test]
-    fn pixelate_shrinks_and_regrows_only_the_region_and_lays_it_back_in_place() {
-        let mut j = job(QualityPreset::Balanced);
-        j.effects.redact = Some(redact(RedactMode::Pixelate, 0.25, 0.5, 0.25, 0.25));
-        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0, None);
-        assert_eq!(
-            vf(&args),
-            "split[fcmain][fcpart];[fcpart]crop=480:270:480:540:exact=1,scale=30:16:flags=area,\
-             scale=480:270:flags=neighbor[fcred];[fcmain][fcred]overlay=480:540"
-                .replace(' ', "")
-        );
+    fn still(mode: RedactMode, x: f64, y: f64, w: f64, h: f64) -> Redact {
+        redact(mode, vec![key(0.0, x, y, w, h, true)])
     }
 
     #[test]
-    fn blur_redact_blurs_the_region_with_its_strength_as_sigma() {
+    fn a_still_black_box_is_one_drawbox_with_no_commands() {
         let mut j = job(QualityPreset::Balanced);
-        j.effects.redact = Some(redact(RedactMode::Blur, 0.0, 0.0, 0.5, 0.5));
+        j.effects.redact = vec![still(RedactMode::Box, 0.1, 0.1, 0.2, 0.2)];
         let chain = vf(&build_args(&j, "libx264", true, 1920, 1080, 30.0, None));
-        assert!(chain.contains("[fcpart]crop=960:540:0:0:exact=1,gblur=sigma=16.0[fcred]"), "{chain}");
-        assert!(chain.ends_with("overlay=0:0"), "{chain}");
+        assert_eq!(chain, "drawbox@fcr0=x=192:y=108:w=384:h=216:color=black:t=fill");
+        assert_eq!(redact_commands(&j, 1920, 1080, 30.0), None);
     }
 
     #[test]
-    fn an_odd_sized_blur_region_is_cut_at_its_exact_size() {
+    fn pixelate_and_blur_lay_a_changed_copy_back_through_a_box_mask() {
         let mut j = job(QualityPreset::Balanced);
-        j.effects.redact = Some(redact(RedactMode::Blur, 0.10, 0.10, 0.23, 0.23));
-        let chain = vf(&build_args(&j, "libx264", true, 100, 100, 30.0, None));
-        assert!(chain.contains("crop=23:23:10:10:exact=1,gblur"), "{chain}");
-        assert!(chain.ends_with("overlay=10:10"), "{chain}");
-    }
-
-    #[test]
-    fn a_black_box_is_one_drawbox_with_no_split() {
-        let mut j = job(QualityPreset::Balanced);
-        j.effects.redact = Some(redact(RedactMode::Box, 0.1, 0.1, 0.2, 0.2));
+        j.effects.redact = vec![
+            still(RedactMode::Pixelate, 0.25, 0.5, 0.25, 0.25),
+            still(RedactMode::Blur, 0.0, 0.0, 0.5, 0.5),
+        ];
         let chain = vf(&build_args(&j, "libx264", true, 1920, 1080, 30.0, None));
-        assert_eq!(chain, "drawbox=x=192:y=108:w=384:h=216:color=black:t=fill");
+        assert!(chain.starts_with("split=3[fcm0][fcp0][fck0];[fcp0]scale=120:67:flags=area,scale=1920:1080:flags=neighbor[fcq0];"), "{chain}");
+        assert!(chain.contains("[fck0]format=gray,drawbox=x=0:y=0:w=iw:h=ih:color=black:t=fill,drawbox@fcr0=x=480:y=540:w=480:h=270:color=white:t=fill[fcn0]"), "{chain}");
+        assert!(chain.contains("[fcq0][fcn0]alphamerge[fca0];[fcm0][fca0]overlay,split=3[fcm1]"), "{chain}");
+        assert!(chain.contains("[fcp1]gblur=sigma=16.0[fcq1]"), "{chain}");
+        assert!(chain.ends_with("[fcm1][fca1]overlay"), "{chain}");
     }
 
     #[test]
-    fn the_redact_region_is_measured_in_the_cropped_frame() {
-        // The region is a fraction of what the export contains, so with a crop the same
-        // fractions land on the crop's pixels and never reach outside it.
+    fn a_redaction_selects_every_pixel_it_touches() {
+        // 0.10 + 0.23 of 100 px ends inside column 32, so column 32 has to be covered.
+        assert_eq!(redact_rect(0.10, 0.10, 0.23, 0.23, 100, 100), Rect { x: 10, y: 10, w: 23, h: 23 });
+        let r = redact_rect(0.9, 0.95, 0.5, 0.5, 1001, 999);
+        assert_eq!((r.x + r.w, r.y + r.h), (1001, 999), "{r:?}");
+        assert_eq!(redact_rect(0.98, 0.98, 0.02, 0.02, 20, 20), Rect { x: 18, y: 18, w: 2, h: 2 });
+    }
+
+    #[test]
+    fn the_region_is_measured_in_the_cropped_frame() {
         let mut j = job(QualityPreset::Balanced);
         j.crop = Some(Rect { x: 100, y: 100, w: 800, h: 400 });
-        j.effects.redact = Some(redact(RedactMode::Box, 0.5, 0.5, 0.5, 0.5));
+        j.effects.redact = vec![still(RedactMode::Box, 0.5, 0.5, 0.5, 0.5)];
         let chain = vf(&build_args(&j, "libx264", true, 1920, 1080, 30.0, None));
-        assert!(chain.contains("drawbox=x=400:y=200:w=400:h=200"), "{chain}");
+        assert!(chain.contains("drawbox@fcr0=x=400:y=200:w=400:h=200"), "{chain}");
     }
 
     #[test]
-    fn redact_goes_after_the_crop_and_before_the_scale_and_the_text() {
+    fn redact_runs_after_the_crop_and_before_the_retime_scale_and_text() {
+        // Before setpts, so keyframes stay on the source clock whatever the speed.
         let mut j = job(QualityPreset::Balanced);
+        j.speed = 2.0;
         j.crop = Some(Rect { x: 0, y: 0, w: 1280, h: 720 });
-        j.effects.redact = Some(redact(RedactMode::Pixelate, 0.4, 0.4, 0.2, 0.2));
+        j.effects.redact = vec![still(RedactMode::Pixelate, 0.4, 0.4, 0.2, 0.2)];
         j.effects.text = Some(overlay("hello"));
         j.output_height = Some(480);
         let chain = vf(&build_args(&j, "libx264", true, 1920, 1080, 30.0, Some(&font())));
         let crop = chain.find("crop=1280").expect("no crop");
-        let redact = chain.find("split[fcmain]").expect("no redact");
-        let scale = chain.find("scale=-2").or_else(|| chain.rfind("scale=")).expect("no scale");
+        let redact = chain.find("split=3[fcm0]").expect("no redact");
+        let setpts = chain.find("setpts").expect("no setpts");
         let text = chain.find("drawtext").expect("no text");
-        assert!(crop < redact && redact < scale && scale < text, "{chain}");
+        assert!(crop < redact && redact < setpts && setpts < text, "{chain}");
     }
 
     #[test]
-    fn a_redact_region_covers_every_selected_pixel_and_stays_in_the_frame() {
-        // 0.10 + 0.23 of 100 px ends inside column 32, so column 32 has to be covered.
-        let r = redact_rect(&RedactRegion { x: 0.10, y: 0.10, w: 0.23, h: 0.23 }, 100, 100).unwrap();
-        assert_eq!((r.x, r.w), (10, 23), "{r:?}");
+    fn visibility_keyframes_become_an_enable_window_on_the_stream_clock() {
+        // Keyframes are on the source timeline; the stream starts at the in point (1.5 s).
+        let mut j = job(QualityPreset::Balanced);
+        j.effects.redact = vec![redact(
+            RedactMode::Box,
+            vec![
+                key(2.0, 0.1, 0.1, 0.2, 0.2, true),
+                key(4.5, 0.1, 0.1, 0.2, 0.2, false),
+                key(6.0, 0.1, 0.1, 0.2, 0.2, true),
+            ],
+        )];
+        let chain = vf(&build_args(&j, "libx264", true, 1920, 1080, 30.0, None));
+        assert!(chain.ends_with(":enable='lt(t,3.0)+gte(t,4.5)'"), "{chain}");
+    }
 
-        let r = redact_rect(&RedactRegion { x: 0.9, y: 0.95, w: 0.5, h: 0.5 }, 1001, 999).unwrap();
-        assert_eq!((r.x + r.w, r.y + r.h), (1001, 999), "{r:?}");
-        let r = redact_rect(&RedactRegion { x: 0.98, y: 0.0, w: 0.02, h: 1.0 }, 21, 21).unwrap();
-        assert_eq!((r.x, r.w), (18, 3), "{r:?}");
-        let r = redact_rect(&RedactRegion { x: 0.11, y: 0.11, w: 0.23, h: 0.23 }, 100, 100).unwrap();
-        assert_eq!((r.x, r.y, r.w, r.h), (10, 10, 24, 24), "{r:?}");
+    #[test]
+    fn a_redaction_hidden_for_the_whole_trim_is_left_out() {
+        let mut j = job(QualityPreset::Balanced);
+        j.effects.redact = vec![redact(
+            RedactMode::Box,
+            vec![key(0.0, 0.1, 0.1, 0.2, 0.2, true), key(1.0, 0.1, 0.1, 0.2, 0.2, false)],
+        )];
+        // The trim starts at 1.5 s, after it was switched off.
+        assert!(!has(&build_args(&j, "libx264", true, 1920, 1080, 30.0, None), "-vf"));
+    }
 
-        // A sliver at the far edge of a small frame still hides something.
-        let r = redact_rect(&RedactRegion { x: 0.98, y: 0.98, w: 0.02, h: 0.02 }, 20, 20).unwrap();
-        assert_eq!((r.x, r.y, r.w, r.h), (18, 18, 2, 2), "{r:?}");
+    #[test]
+    fn a_moving_redaction_is_driven_frame_by_frame_from_the_command_file() {
+        let mut j = job(QualityPreset::Balanced);
+        j.in_point = 0.0;
+        j.out_point = 1.0;
+        j.effects.redact = vec![redact(
+            RedactMode::Blur,
+            vec![key(0.0, 0.0, 0.0, 0.1, 0.1, true), key(1.0, 0.5, 0.0, 0.1, 0.1, true)],
+        )];
+        let chain = vf(&build_args(&j, "libx264", true, 1000, 1000, 10.0, None));
+        assert!(chain.starts_with(&format!("sendcmd=f={REDACT_COMMANDS_FILE},split=3")), "{chain}");
+        assert!(chain.contains("drawbox@fcr0=x=0:y=0:w=100:h=100:color=white"), "{chain}");
+
+        let commands = redact_commands(&j, 1000, 1000, 10.0).expect("no commands");
+        let lines: Vec<&str> = commands.lines().collect();
+        // Ten frames at 10 fps: frames 1 to 9 each move the box 50 px right.
+        assert_eq!(lines.len(), 9, "{commands}");
+        assert_eq!(
+            lines[0],
+            "0.0500 drawbox@fcr0 x 50, drawbox@fcr0 y 0, drawbox@fcr0 w 100, drawbox@fcr0 h 100;"
+        );
+        assert!(lines[8].starts_with("0.8500 drawbox@fcr0 x 450,"), "{commands}");
+    }
+
+    #[test]
+    fn a_resize_between_keyframes_is_interpolated() {
+        let keys = vec![key(0.0, 0.0, 0.0, 0.2, 0.2, true), key(2.0, 0.2, 0.2, 0.4, 0.6, false)];
+        let (x, y, w, h, on) = redact_state(&keys, 1.0);
+        assert!((x - 0.1).abs() < 1e-9 && (y - 0.1).abs() < 1e-9, "{x} {y}");
+        assert!((w - 0.3).abs() < 1e-9 && (h - 0.4).abs() < 1e-9, "{w} {h}");
+        assert!(on, "visibility holds until the next keyframe");
+        assert!(!redact_state(&keys, 5.0).4);
     }
 
     #[test]
@@ -2209,11 +2394,11 @@ mod tests {
         let mut j = job(QualityPreset::Balanced);
         j.format = ExportFormat::Gif;
         j.output = "C:\\clips\\out.gif".to_string();
-        j.effects.redact = Some(redact(RedactMode::Pixelate, 0.1, 0.1, 0.3, 0.3));
+        j.effects.redact = vec![still(RedactMode::Pixelate, 0.1, 0.1, 0.3, 0.3)];
         let chain = value_after(&build_args(&j, "libx264", true, 1920, 1080, 30.0, None), "-filter_complex")
             .unwrap()
             .to_string();
-        let redact = chain.find("[fcmain][fcred]overlay").expect("no redact");
+        let redact = chain.find("[fcm0][fca0]overlay").expect("no redact");
         assert!(redact < chain.find("palettegen").unwrap(), "{chain}");
     }
 
@@ -2222,16 +2407,20 @@ mod tests {
         let mut j = job(QualityPreset::Balanced);
         j.format = ExportFormat::Mp3;
         j.output = "C:\\clips\\out.mp3".to_string();
-        j.effects.redact = Some(redact(RedactMode::Blur, 0.1, 0.1, 0.3, 0.3));
+        j.effects.redact = vec![still(RedactMode::Blur, 0.1, 0.1, 0.3, 0.3)];
         let args = build_args(&j, "libx264", true, 1920, 1080, 30.0, None);
-        assert!(!args.iter().any(|a| a.contains("fcred") || a.contains("drawbox")), "{args:?}");
+        assert!(!args.iter().any(|a| a.contains("fcr0")), "{args:?}");
+        assert_eq!(redact_commands(&j, 1920, 1080, 30.0), None);
     }
 
     #[test]
-    fn export_job_reads_the_redact_block_the_frontend_sends() {
-        let json = r#"{"mode":"pixelate","strength":12,"region":{"x":0.1,"y":0.2,"w":0.3,"h":0.4}}"#;
-        let r: Redact = serde_json::from_str(json).unwrap();
-        assert_eq!(r, redact(RedactMode::Pixelate, 0.1, 0.2, 0.3, 0.4).with_strength(12.0));
+    fn export_job_reads_the_redact_list_the_frontend_sends() {
+        let json = r#"[{"mode":"pixelate","strength":12,"keys":[{"t":0.5,"x":0.1,"y":0.2,"w":0.3,"h":0.4,"on":true}]}]"#;
+        let r: Vec<Redact> = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            r,
+            vec![Redact { mode: RedactMode::Pixelate, strength: 12.0, keys: vec![key(0.5, 0.1, 0.2, 0.3, 0.4, true)] }]
+        );
     }
 
     #[test]

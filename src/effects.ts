@@ -17,9 +17,9 @@ import type {
   EffectsJob,
   EffectsState,
   RedactMode,
-  RedactRegion,
   TextOverlay,
 } from './types';
+import { everShown, newRedaction, toRedactJob } from './redact';
 
 /** Display order in the tab: the colour dials, then the two that reshape the frame, then the
  *  two that add something to it. */
@@ -54,7 +54,8 @@ export const EFFECT_HINT: Record<EffectId, string> = {
   hue: 'Rotates every colour around the wheel.',
   blur: 'Measured on the source frame, so it looks the same at any export size.',
   vignette: 'Darkens the corners.',
-  redact: 'Hides one part of the frame. Drag the box on the picture to move it, or its corners to resize it.',
+  redact:
+    'Hides parts of the frame. Drag a box on the picture to move it, or its corners to resize it. Add a keyframe to animate it, then move the playhead and move the box.',
   text: 'Drawn at the export size, over the cropped frame.',
   fade: 'Timed on the finished clip, and the audio fades with the picture.',
 };
@@ -94,7 +95,7 @@ export function defaultEffects(): EffectsState {
       hue: { degrees: 30 },
       blur: { sigma: 8 },
       vignette: { amount: 0.5 },
-      redact: { mode: 'pixelate', strength: 16, region: { x: 0.35, y: 0.35, w: 0.3, h: 0.3 } },
+      redact: { items: [newRedaction([])] },
       text: {
         text: 'Your text',
         size: 0.07,
@@ -117,6 +118,7 @@ export function enabledIds(effects: EffectsState): EffectId[] {
 export function hasEffect(effects: EffectsState, id: EffectId): boolean {
   if (!effects.on[id]) return false;
   if (id === 'text') return effects.settings.text.text.trim() !== '';
+  if (id === 'redact') return effects.settings.redact.items.some(everShown);
   return true;
 }
 
@@ -136,8 +138,11 @@ export function effectSummary(effects: EffectsState, id: EffectId): string {
       return `${oneDecimal(s.blur.sigma)} px`;
     case 'vignette':
       return `${Math.round(s.vignette.amount * 100)}%`;
-    case 'redact':
-      return REDACT_MODE_LABEL[s.redact.mode];
+    case 'redact': {
+      const n = s.redact.items.length;
+      if (n === 0) return 'none';
+      return n === 1 ? REDACT_MODE_LABEL[s.redact.items[0].mode] : `${n} regions`;
+    }
     case 'fade':
       return `${oneDecimal(s.fade.inSeconds)}s in · ${oneDecimal(s.fade.outSeconds)}s out`;
     case 'text': {
@@ -155,21 +160,6 @@ export const REDACT_MODE_LABEL: Record<RedactMode, string> = {
   pixelate: 'Pixelate',
   box: 'Black box',
 };
-
-/** The smallest side a region can be dragged down to, as a fraction of the frame. */
-export const REDACT_MIN = 0.02;
-
-/** A region kept inside the frame and no smaller than REDACT_MIN on either side. */
-export function clampRegion(region: RedactRegion): RedactRegion {
-  const w = Math.min(Math.max(region.w, REDACT_MIN), 1);
-  const h = Math.min(Math.max(region.h, REDACT_MIN), 1);
-  return {
-    x: Math.min(Math.max(region.x, 0), 1 - w),
-    y: Math.min(Math.max(region.y, 0), 1 - h),
-    w,
-    h,
-  };
-}
 
 /** A multiplier read the way a user thinks of it: 1.2 is "+20%". */
 function signedPercent(amount: number): string {
@@ -208,7 +198,7 @@ export function toEffectsJob(effects: EffectsState, audioOnly: boolean): Effects
     fadeIn: effects.on.fade && s.fade.inSeconds > 0 ? s.fade.inSeconds : null,
     fadeOut: effects.on.fade && s.fade.outSeconds > 0 ? s.fade.outSeconds : null,
     text,
-    redact: picture && effects.on.redact ? { ...s.redact, region: clampRegion(s.redact.region) } : null,
+    redact: picture && effects.on.redact ? s.redact.items.filter(everShown).map(toRedactJob) : [],
   };
 }
 

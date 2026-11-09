@@ -24,6 +24,8 @@ export interface UiState {
   rampOpen: boolean;
   playing: boolean;
   cropping: boolean;
+  /** The redaction the panel, the picture and the timeline lane are editing. */
+  redactSelected: number;
   exporting: boolean;
   exportPercent: number;
   filmstrip: string[];
@@ -75,6 +77,7 @@ export const ui: UiState = {
   rampOpen: false,
   playing: false,
   cropping: false,
+  redactSelected: 1,
   exporting: false,
   exportPercent: 0,
   filmstrip: [],

@@ -20,9 +20,21 @@ import {
   withSetting,
   withSwitch,
 } from './effects';
+import { onTime } from './player';
+import { REDACT_MAX_ITEMS, keyIndexAt, stateAt, withEdit, withKeyToggled } from './redact';
+import {
+  addRedaction,
+  keyTolerance,
+  playheadTime,
+  redactItems,
+  removeRedaction,
+  selectRedaction,
+  selectedRedaction,
+  updateRedaction,
+} from './redactedit';
 import { edit, patchEdit, patchUi, subscribe, ui } from './state';
 import { isTurned } from './types';
-import type { EffectId, EffectSettings, Orientation, TextAnchorX, TextAnchorY } from './types';
+import type { EffectId, EffectSettings, Orientation, RedactItem, TextAnchorX, TextAnchorY } from './types';
 
 const ANCHORS_X: TextAnchorX[] = ['left', 'center', 'right'];
 const ANCHORS_Y: TextAnchorY[] = ['top', 'middle', 'bottom'];
@@ -265,16 +277,30 @@ function buildBody(id: EffectId): HTMLElement[] {
 }
 
 function buildRedactBody(): HTMLElement[] {
+  const regions = document.createElement('div');
+  regions.className = 'chips fx-modes';
+  regions.setAttribute('role', 'group');
+  regions.setAttribute('aria-label', 'Redactions');
+  let regionsKey = '';
+
+  const add = document.createElement('button');
+  add.type = 'button';
+  add.className = 'chip';
+  add.textContent = '+';
+  add.title = 'Add a redaction';
+  add.setAttribute('aria-label', 'Add a redaction');
+  add.addEventListener('click', addRedaction);
+
   const modes = document.createElement('div');
   modes.className = 'chips fx-modes';
   modes.setAttribute('role', 'group');
   modes.setAttribute('aria-label', 'Redact style');
-  const chips = REDACT_MODES.map((mode) => {
+  const modeChips = REDACT_MODES.map((mode) => {
     const button = document.createElement('button');
     button.type = 'button';
     button.className = 'chip';
     button.textContent = REDACT_MODE_LABEL[mode];
-    button.addEventListener('click', () => setSetting('redact', { mode }));
+    button.addEventListener('click', () => editSelected((item) => ({ ...item, mode })));
     modes.append(button);
     return { button, mode };
   });
@@ -282,22 +308,97 @@ function buildRedactBody(): HTMLElement[] {
   const strength = slider({
     label: 'Strength',
     ...EFFECT_RANGE.redact,
-    read: () => edit.effects.settings.redact.strength,
+    read: () => selectedRedaction()?.strength ?? 16,
     show: (v) => `${Math.round(v)} px`,
-    write: (v) => setSetting('redact', { strength: v }),
+    write: (v) => editSelected((item) => ({ ...item, strength: v })),
   });
 
-  updaters.push(() => {
-    const current = edit.effects.settings.redact.mode;
-    for (const chip of chips) {
-      chip.button.classList.toggle('active', chip.mode === current);
-      chip.button.setAttribute('aria-pressed', String(chip.mode === current));
+  const visible = document.createElement('label');
+  visible.className = 'fx-check';
+  visible.title = 'Show or hide this redaction from the playhead on. With keyframes, this sets a keyframe here.';
+  const visibleBox = document.createElement('input');
+  visibleBox.type = 'checkbox';
+  const visibleText = document.createElement('span');
+  visibleText.textContent = 'Visible';
+  visible.append(visibleBox, visibleText);
+  visibleBox.addEventListener('change', () => {
+    const t = playheadTime();
+    editSelected((item) => withEdit(item, t, { on: visibleBox.checked }, keyTolerance()));
+  });
+
+  const keyButton = document.createElement('button');
+  keyButton.type = 'button';
+  keyButton.className = 'btn fx-key';
+  keyButton.addEventListener('click', () => {
+    const t = playheadTime();
+    editSelected((item) => withKeyToggled(item, t, keyTolerance()));
+  });
+
+  const remove = document.createElement('button');
+  remove.type = 'button';
+  remove.className = 'btn';
+  remove.textContent = 'Remove';
+  remove.title = 'Remove this redaction';
+  remove.addEventListener('click', () => {
+    const item = selectedRedaction();
+    if (item) removeRedaction(item.id);
+  });
+
+  const actions = document.createElement('div');
+  actions.className = 'fx-line';
+  actions.append(visible, keyButton, remove);
+
+  const update = () => {
+    const items = redactItems();
+    const selected = selectedRedaction();
+    const key = items.map((item) => item.id).join(',') + '|' + (selected?.id ?? '');
+    if (key !== regionsKey) {
+      regionsKey = key;
+      const chips = items.map((item, index) => {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'chip';
+        button.textContent = String(index + 1);
+        button.title = `Redaction ${index + 1}`;
+        button.setAttribute('aria-label', `Redaction ${index + 1}`);
+        button.classList.toggle('active', item.id === selected?.id);
+        button.setAttribute('aria-pressed', String(item.id === selected?.id));
+        button.addEventListener('click', () => selectRedaction(item.id));
+        return button;
+      });
+      regions.replaceChildren(...chips, add);
     }
-    // A black box has no strength to set.
-    strength.hidden = current === 'box';
+    add.disabled = items.length >= REDACT_MAX_ITEMS;
+
+    const has = selected !== null;
+    modes.hidden = !has;
+    actions.hidden = !has;
+    strength.hidden = !has || selected.mode === 'box';
+    if (!selected) return;
+    for (const chip of modeChips) {
+      chip.button.classList.toggle('active', chip.mode === selected.mode);
+      chip.button.setAttribute('aria-pressed', String(chip.mode === selected.mode));
+    }
+    const t = playheadTime();
+    visibleBox.checked = stateAt(selected, t).on;
+    const onKey = keyIndexAt(selected, t, keyTolerance()) >= 0;
+    keyButton.textContent = onKey ? '◆ Remove keyframe' : '◇ Add keyframe';
+    keyButton.title = onKey
+      ? 'Remove the keyframe at the playhead'
+      : 'Add a keyframe at the playhead. Then move the playhead and move the box to animate it.';
+  };
+  updaters.push(update);
+  // The keyframe button and the Visible box describe the playhead, so they follow it.
+  onTime(() => {
+    if (ui.effectsOpen) update();
   });
 
-  return [modes, strength];
+  return [regions, modes, strength, actions];
+}
+
+function editSelected(change: (item: RedactItem) => RedactItem): void {
+  const item = selectedRedaction();
+  if (item) updateRedaction(item.id, change);
 }
 
 function multiplier(label: string, id: 'brightness' | 'contrast' | 'saturation'): HTMLElement {

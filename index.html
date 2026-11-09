@@ -34,13 +34,7 @@
              applies them: vignette, then redact, then text, then the fade over all three. -->
         <div id="fx-overlay" hidden>
           <div id="fx-vignette"></div>
-          <div id="fx-redact">
-            <canvas id="fx-redact-canvas"></canvas>
-            <span class="ch ch-nw" data-handle="nw"></span>
-            <span class="ch ch-ne" data-handle="ne"></span>
-            <span class="ch ch-se" data-handle="se"></span>
-            <span class="ch ch-sw" data-handle="sw"></span>
-          </div>
+          <div id="fx-redact-layer"></div>
           <div id="fx-text"><span id="fx-text-span"></span></div>
           <div id="fx-fade"></div>
         </div>
@@ -286,6 +280,8 @@
               <div id="tl-ramp-points"></div>
               <span id="tl-ramp-readout" hidden></span>
             </div>
+            <!-- One row per redaction: where it shows, and its keyframes. -->
+            <div id="tl-redact" hidden></div>
 
             <div id="tl-playhead"></div>
           </div>

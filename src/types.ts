@@ -108,11 +108,34 @@ export interface RedactRegion {
   h: number;
 }
 
-export interface Redact {
+/** One keyframe of a redaction, at a moment on the source timeline. */
+export interface RedactKey {
+  t: number;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  /** Shown from this keyframe until the next one. */
+  on: boolean;
+}
+
+/** One redaction. With no keyframes, `region` and `on` hold for the whole clip; with any,
+ *  the keyframes decide and those two are ignored. */
+export interface RedactItem {
+  id: number;
   mode: RedactMode;
   /** Blur sigma or pixel block size, in source pixels. Unused by 'box'. */
   strength: number;
   region: RedactRegion;
+  on: boolean;
+  keys: RedactKey[];
+}
+
+/** A redaction as the export takes it: always at least one keyframe. */
+export interface RedactJob {
+  mode: RedactMode;
+  strength: number;
+  keys: RedactKey[];
 }
 
 /** What the export applies. Null is off: a switched-off effect keeps its dial in
@@ -132,7 +155,7 @@ export interface EffectsJob {
   fadeIn: number | null;
   fadeOut: number | null;
   text: TextOverlay | null;
-  redact: Redact | null;
+  redact: RedactJob[];
 }
 
 /** The dials themselves, kept whether or not the effect is switched on. */
@@ -145,7 +168,7 @@ export interface EffectSettings {
   vignette: { amount: number };
   fade: { inSeconds: number; outSeconds: number };
   text: TextOverlay;
-  redact: Redact;
+  redact: { items: RedactItem[] };
 }
 
 export type EffectId = keyof EffectSettings;

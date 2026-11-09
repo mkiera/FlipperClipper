@@ -58,6 +58,7 @@
   --row: 48px;
   --strip: 64px;
   --ramp-lane: 54px;
+  --redact-lane: 20px;
 
   color-scheme: dark;
 }
@@ -1055,33 +1056,53 @@ select option:disabled {
   inset: 0;
 }
 
-#fx-overlay > #fx-redact {
-  inset: auto;
+.fx-redact-box {
+  position: absolute;
   touch-action: none;
 }
 
-#fx-redact canvas {
+.fx-redact-clip {
   position: absolute;
   inset: 0;
-  width: 100%;
-  height: 100%;
+  overflow: hidden;
+}
+
+.fx-redact-box canvas {
+  position: absolute;
   image-rendering: pixelated;
 }
 
-#fx-redact .ch {
+.fx-redact-box .ch {
   display: none;
 }
 
-/* Editable only while the Effects tab is open, so the box never catches a click meant for
-   the picture once the tab is shut. */
-#fx-redact.editing {
+/* Boxes take the pointer only while the Effects tab is open, so they never catch a click
+   meant for the picture once it is shut. */
+.fx-redact-box.selectable {
+  pointer-events: auto;
+  cursor: pointer;
+  outline: 1px dashed rgba(255, 255, 255, 0.35);
+}
+
+.fx-redact-box.editing {
   pointer-events: auto;
   cursor: move;
   outline: 1px dashed rgba(255, 255, 255, 0.9);
 }
 
-#fx-redact.editing .ch {
+.fx-redact-box.editing .ch {
   display: block;
+}
+
+/* Hidden at the playhead by a keyframe: drawn as an outline only, so it can still be found
+   and edited, and nothing about it reaches the export at this moment. */
+.fx-redact-box.off {
+  background: transparent !important;
+  backdrop-filter: none !important;
+}
+
+.fx-redact-box.off canvas {
+  display: none;
 }
 
 .fx-modes {
@@ -1313,6 +1334,83 @@ select option:disabled {
 
 #timeline.has-ramp #tl-strip {
   bottom: var(--ramp-lane);
+}
+
+/* The redaction channel sits at the very bottom, under the speed lane when both show. */
+#timeline.has-redact {
+  height: calc(var(--strip) + var(--redact-lane));
+}
+
+#timeline.has-ramp.has-redact {
+  height: calc(var(--strip) + var(--ramp-lane) + var(--redact-lane));
+}
+
+#timeline.has-redact #tl-strip {
+  bottom: var(--redact-lane);
+}
+
+#timeline.has-ramp.has-redact #tl-strip {
+  bottom: calc(var(--ramp-lane) + var(--redact-lane));
+}
+
+#timeline.has-redact #tl-ramp {
+  bottom: var(--redact-lane);
+}
+
+#tl-redact {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: var(--redact-lane);
+  padding-top: 2px;
+  border-top: 1px solid var(--line);
+  background: rgba(8, 16, 26, 0.72);
+}
+
+.tl-redact-row {
+  position: relative;
+  height: 16px;
+}
+
+.tl-redact-row.selected {
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.tl-redact-span {
+  position: absolute;
+  top: 6px;
+  height: 4px;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.28);
+  pointer-events: none;
+}
+
+.tl-redact-row.selected .tl-redact-span {
+  background: var(--accent);
+  opacity: 0.6;
+}
+
+.tl-redact-key {
+  position: absolute;
+  top: 3px;
+  width: 10px;
+  height: 10px;
+  margin-left: -5px;
+  padding: 0;
+  border: 2px solid var(--accent);
+  background: var(--accent);
+  transform: rotate(45deg);
+  cursor: grab;
+}
+
+.tl-redact-key.off {
+  background: var(--panel);
+}
+
+.tl-redact-key:hover,
+.tl-redact-key:focus-visible {
+  outline: 1px solid #fff;
 }
 
 #tl-ramp {
