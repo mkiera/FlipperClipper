@@ -474,5 +474,8 @@ export function isTrimOnly(state: EditState): boolean {
 export function losslessEligible(state: EditState): boolean {
   if (!isTrimOnly(state) || state.audioOnly || state.format === 'gif') return false;
   if (state.media === null) return false;
-  return state.format === defaultFormatFor(state.media.path) || state.format === 'mkv';
+  if (state.format === 'mkv') return true;
+  // defaultFormatFor maps WMV, OGV and the rest to mp4, which cannot hold their codecs.
+  const ext = state.media.path.slice(state.media.path.lastIndexOf('.') + 1).toLowerCase();
+  return ['mp4', 'm4v', 'mov', 'webm'].includes(ext) && state.format === defaultFormatFor(state.media.path);
 }

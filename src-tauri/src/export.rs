@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitStatus, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
@@ -29,7 +29,7 @@ const STDERR_TAIL_LINES: usize = 40;
 const ENCODER_CANDIDATES: [&str; 3] = ["h264_nvenc", "h264_qsv", "h264_amf"];
 
 /// The only thing keeping an arbitrary height out of a job that arrives over IPC.
-const OUTPUT_HEIGHTS: [i64; 6] = [2160, 1440, 1080, 720, 480, 360];
+pub(crate) const OUTPUT_HEIGHTS: [i64; 6] = [2160, 1440, 1080, 720, 480, 360];
 
 /// Long enough for a caption or two lines of credits. drawtext draws every character whether
 /// or not the frame is wide enough to hold them, so this only guards the temp file.
@@ -47,10 +47,80 @@ struct ExportProgress {
     eta_seconds: Option<f64>,
 }
 
-/// A poisoned lock here holds a process handle and a bool, neither half-writable, so taking
+/// A poisoned lock here holds a process handle and two ids, none half-writable, so taking
 /// the value out beats refusing to export until the app restarts.
 fn lock_slot(slot: &Mutex<ExportSlot>) -> MutexGuard<'_, ExportSlot> {
     slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+impl ExportSlot {
+    fn is_cancelled(&self, job: u64) -> bool {
+        self.cancelled_jobs.contains(&job)
+    }
+
+    fn cancel(&mut self, job: u64) {
+        self.cancelled_jobs.insert(job);
+        if self.job == Some(job) {
+            if let Some(child) = self.child.as_mut() {
+                let _ = child.kill();
+            }
+        }
+    }
+
+    // Stored even when already cancelled, so the watcher reaps it and removes the temp file.
+    fn attach(&mut self, job: u64, mut child: Child) {
+        if self.is_cancelled(job) {
+            let _ = child.kill();
+        }
+        self.child = Some(child);
+    }
+}
+
+/// One export's hold on the slot, released on every return path including errors.
+struct Claim {
+    slot: Arc<Mutex<ExportSlot>>,
+    job: u64,
+    overlay_text: Option<PathBuf>,
+    redact_commands: Option<PathBuf>,
+}
+
+impl Claim {
+    fn take(slot: &Arc<Mutex<ExportSlot>>, job: u64) -> Result<Self, String> {
+        let mut guard = lock_slot(slot);
+        if guard.closing {
+            guard.cancelled_jobs.remove(&job);
+            return Err("FlipperClipper is closing.".to_string());
+        }
+        // Two ffmpegs on one output write a corrupt file and neither of them reports an error.
+        if guard.job.is_some() {
+            guard.cancelled_jobs.remove(&job);
+            return Err("An export is already running. Cancel it first.".to_string());
+        }
+        guard.job = Some(job);
+        Ok(Self {
+            slot: Arc::clone(slot),
+            job,
+            overlay_text: None,
+            redact_commands: None,
+        })
+    }
+}
+
+impl Drop for Claim {
+    fn drop(&mut self) {
+        // ffmpeg has read all of it by now, and the words are the user's.
+        if let Some(path) = self.overlay_text.take() {
+            let _ = std::fs::remove_file(path);
+        }
+        if let Some(path) = self.redact_commands.take() {
+            let _ = std::fs::remove_file(path);
+        }
+        let mut slot = lock_slot(&self.slot);
+        slot.cancelled_jobs.remove(&self.job);
+        if slot.job == Some(self.job) {
+            slot.job = None;
+        }
+    }
 }
 
 #[tauri::command(async)]
@@ -120,10 +190,14 @@ fn test_encode(encoder: &str) -> bool {
 /// filtergraph path has to be quoted and a quoted one cannot express an apostrophe - which a
 /// Windows user name is allowed to contain. One folder per process, reused across exports.
 fn overlay_dir() -> Result<PathBuf, String> {
-    let dir = std::env::temp_dir().join(format!("flipperclipper-overlay-{}", std::process::id()));
+    let dir = overlay_dir_path();
     std::fs::create_dir_all(&dir)
         .map_err(|_| "Windows would not let FlipperClipper write to the temp folder.".to_string())?;
     Ok(dir)
+}
+
+fn overlay_dir_path() -> PathBuf {
+    std::env::temp_dir().join(format!("flipperclipper-overlay-{}", std::process::id()))
 }
 
 fn overlay_font() -> Option<PathBuf> {
@@ -153,14 +227,12 @@ fn prepare_overlay(text: &str) -> Result<(PathBuf, PathBuf), String> {
 }
 
 #[tauri::command(async)]
-pub fn start_export(app: AppHandle, job: ExportJob) -> Result<(), String> {
+pub fn start_export(app: AppHandle, job: ExportJob, job_id: u64) -> Result<(), String> {
     validate(&job)?;
 
     let state = app.state::<AppState>();
     let slot_arc = Arc::clone(&state.export);
-    if lock_slot(&slot_arc).child.is_some() {
-        return Err("An export is already running. Cancel it first.".to_string());
-    }
+    let mut claim = Claim::take(&slot_arc, job_id)?;
 
     // The job carries what the user asked for, not what is in the file. Without this probe a
     // clip recorded with the mic off fails on "Stream map '0:a:0' matches no streams".
@@ -184,6 +256,9 @@ pub fn start_export(app: AppHandle, job: ExportJob) -> Result<(), String> {
         Some(text) => Some(prepare_overlay(&text.text)?),
         None => None,
     };
+    claim.overlay_text = overlay
+        .as_ref()
+        .map(|(dir, _)| dir.join(ffmpeg::OVERLAY_TEXT_FILE));
 
     let commands = match ffmpeg::redact_commands(&job, info.width, info.height, info.fps) {
         Some(text) => {
@@ -192,7 +267,8 @@ pub fn start_export(app: AppHandle, job: ExportJob) -> Result<(), String> {
             std::fs::write(&path, text.as_bytes()).map_err(|_| {
                 "The redaction keyframes could not be written to a temporary file.".to_string()
             })?;
-            Some((dir, path))
+            claim.redact_commands = Some(path);
+            Some(dir)
         }
         None => None,
     };
@@ -203,8 +279,13 @@ pub fn start_export(app: AppHandle, job: ExportJob) -> Result<(), String> {
         &encoder,
         &info,
         overlay.as_ref(),
-        commands.as_ref().map(|(dir, _)| dir.as_path()),
+        commands.as_deref(),
     )?;
+
+    // The probe and the encoder test runs above can take seconds, and Cancel is live throughout.
+    if lock_slot(&slot_arc).is_cancelled(job_id) {
+        return Ok(());
+    }
 
     let mut child = command
         .stdin(Stdio::null())
@@ -225,26 +306,12 @@ pub fn start_export(app: AppHandle, job: ExportJob) -> Result<(), String> {
         }
     };
 
-    {
-        // Checked again now the child exists: two ffmpegs on one output write a corrupt file and
-        // neither of them reports an error.
-        let mut slot = lock_slot(&slot_arc);
-        if slot.child.is_some() {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err("An export is already running. Cancel it first.".to_string());
-        }
-        slot.cancelled = false;
-        slot.child = Some(child);
-    }
+    lock_slot(&slot_arc).attach(job_id, child);
 
     let stderr_reader = std::thread::spawn(move || collect_stderr_tail(stderr));
 
     let total = ffmpeg::output_duration(&job);
     let output_path = job.output.clone();
-    let overlay_text = overlay
-        .as_ref()
-        .map(|(dir, _)| dir.join(ffmpeg::OVERLAY_TEXT_FILE));
     let watcher_app = app.clone();
     let watcher_slot = Arc::clone(&slot_arc);
 
@@ -252,22 +319,18 @@ pub fn start_export(app: AppHandle, job: ExportJob) -> Result<(), String> {
         read_progress(&watcher_app, stdout, total);
 
         let tail = stderr_reader.join().unwrap_or_default();
-        // ffmpeg has read all of it by now, and the words are the user's.
-        if let Some(path) = overlay_text {
-            let _ = std::fs::remove_file(path);
-        }
-        if let Some((_, path)) = commands {
-            let _ = std::fs::remove_file(path);
-        }
 
         let (child, cancelled) = {
             let mut slot = lock_slot(&watcher_slot);
-            (slot.child.take(), slot.cancelled)
+            (slot.child.take(), slot.is_cancelled(job_id))
         };
         // Reaped even when cancelled, or the killed ffmpeg lingers as a zombie.
         let status = child.map(|mut child| child.wait());
 
-        match finish_export(pending_output, status, cancelled, &tail) {
+        let outcome = finish_export(pending_output, status, cancelled, &tail);
+        // Released before the UI hears, or an Export clicked on the toast finds the slot taken.
+        drop(claim);
+        match outcome {
             Ok(true) => {
                 let _ = watcher_app.emit(EVENT_DONE, output_path);
             }
@@ -321,7 +384,18 @@ fn finish_export(
     let message = match status {
         Some(Ok(status)) if status.success() => match output.publish() {
             Ok(()) => return Ok(true),
-            Err(message) => message,
+            // The encode is complete, so it is kept where it is rather than thrown away.
+            Err(message) => {
+                let kept = output.keep();
+                let message = match kept.as_ref().and_then(|path| path.file_name()) {
+                    Some(name) => format!(
+                        "{message} The new export was kept in the same folder as {}.",
+                        name.to_string_lossy()
+                    ),
+                    None => message,
+                };
+                return Err(ExportFailure::new(message, tail, false));
+            }
         },
         Some(Ok(_)) => explain_failure(tail),
         _ => "FFmpeg stopped unexpectedly and the export did not finish.".to_string(),
@@ -355,13 +429,33 @@ impl ExportFailure {
 }
 
 #[tauri::command]
-pub fn cancel_export(app: AppHandle) {
-    let state = app.state::<AppState>();
-    let mut slot = lock_slot(&state.export);
-    slot.cancelled = true;
-    if let Some(child) = slot.child.as_mut() {
-        let _ = child.kill();
+pub fn cancel_export(app: AppHandle, job_id: u64) {
+    lock_slot(&app.state::<AppState>().export).cancel(job_id);
+}
+
+/// Stops any export and returns once its watcher has removed the part-written file, or after
+/// `limit`. The process exits as soon as the last window is gone, which ends the watcher
+/// thread wherever it has got to. True when the slot emptied in time.
+pub fn close_export(slot: &Mutex<ExportSlot>, limit: Duration) -> bool {
+    {
+        let mut slot = lock_slot(slot);
+        slot.closing = true;
+        if let Some(job) = slot.job {
+            slot.cancel(job);
+        }
     }
+    let deadline = Instant::now() + limit;
+    let idle = loop {
+        if lock_slot(slot).job.is_none() {
+            break true;
+        }
+        if Instant::now() >= deadline {
+            break false;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    let _ = std::fs::remove_dir_all(overlay_dir_path());
+    idle
 }
 
 /// Matched here rather than imported, so a new container fails to compile in this match
@@ -734,8 +828,18 @@ fn parse_timestamp(value: &str) -> Option<f64> {
 
 fn collect_stderr_tail<R: std::io::Read>(stderr: R) -> VecDeque<String> {
     let mut tail: VecDeque<String> = VecDeque::with_capacity(STDERR_TAIL_LINES);
-    for line in BufReader::new(stderr).lines() {
-        let Ok(line) = line else { break };
+    let mut reader = BufReader::new(stderr);
+    let mut bytes = Vec::new();
+    loop {
+        bytes.clear();
+        match reader.read_until(b'\n', &mut bytes) {
+            Ok(0) | Err(_) => break,
+            Ok(_) => {}
+        }
+        // Metadata in Latin-1, or a line ffmpeg cut mid-character, is not UTF-8.
+        let line = String::from_utf8_lossy(&bytes)
+            .trim_end_matches(['\r', '\n'])
+            .to_string();
         // Stored raw: the leading whitespace is what tells ffmpeg's indented metadata dump apart
         // from a real error message.
         if line.trim().is_empty() {
@@ -816,6 +920,134 @@ mod tests {
             video_kbps: None,
             effects: Effects::default(),
         }
+    }
+
+    fn empty_slot() -> Arc<Mutex<ExportSlot>> {
+        Arc::new(Mutex::new(ExportSlot {
+            child: None,
+            job: None,
+            cancelled_jobs: Default::default(),
+            closing: false,
+        }))
+    }
+
+    fn long_running_child() -> Child {
+        Command::new("ping")
+            .args(["-n", "60", "127.0.0.1"])
+            .stdout(Stdio::null())
+            .spawn()
+            .unwrap()
+    }
+
+    fn exits_within(child: &mut Child, limit: Duration) -> bool {
+        let deadline = Instant::now() + limit;
+        while Instant::now() < deadline {
+            if child.try_wait().unwrap().is_some() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+        false
+    }
+
+    #[test]
+    fn a_cancel_before_ffmpeg_is_stored_still_stops_that_export() {
+        let slot = empty_slot();
+        let claim = Claim::take(&slot, 7).unwrap();
+        // Lands while start_export is still probing, before any child exists.
+        lock_slot(&slot).cancel(7);
+        assert!(lock_slot(&slot).is_cancelled(7));
+
+        lock_slot(&slot).attach(7, long_running_child());
+        assert!(lock_slot(&slot).is_cancelled(7), "storing the child reset the cancel");
+        let mut child = lock_slot(&slot).child.take().unwrap();
+        assert!(exits_within(&mut child, Duration::from_secs(5)), "the child was not killed");
+
+        assert!(Claim::take(&slot, 8).is_err(), "a second export started beside the first");
+        drop(claim);
+        let _next = Claim::take(&slot, 8).unwrap();
+        assert!(!lock_slot(&slot).is_cancelled(8), "the next export inherited the cancel");
+    }
+
+    #[test]
+    fn a_cancel_that_lands_before_the_claim_is_kept() {
+        let slot = empty_slot();
+        lock_slot(&slot).cancel(3);
+        let _claim = Claim::take(&slot, 3).unwrap();
+        assert!(lock_slot(&slot).is_cancelled(3));
+    }
+
+    #[test]
+    fn a_cancel_for_a_rejected_export_keeps_the_running_one_cancelled() {
+        let slot = empty_slot();
+        let _running = Claim::take(&slot, 10).unwrap();
+        lock_slot(&slot).cancel(10);
+        // The UI cancels the next export before its start reaches the backend and is turned away.
+        lock_slot(&slot).cancel(11);
+        assert!(Claim::take(&slot, 11).is_err());
+        assert!(lock_slot(&slot).is_cancelled(10), "a later cancel undid the first one");
+        assert!(!lock_slot(&slot).is_cancelled(11), "the rejected export left its cancel behind");
+    }
+
+    #[test]
+    fn a_cancel_for_an_earlier_export_does_not_stop_the_current_one() {
+        let slot = empty_slot();
+        lock_slot(&slot).cancel(1);
+        let _claim = Claim::take(&slot, 2).unwrap();
+        lock_slot(&slot).attach(2, long_running_child());
+        let mut child = lock_slot(&slot).child.take().unwrap();
+        assert!(!exits_within(&mut child, Duration::from_millis(300)));
+    }
+
+    #[test]
+    fn closing_waits_until_the_cancelled_export_has_removed_its_temp_file() {
+        let slot = empty_slot();
+        let dir = tempfile::tempdir().unwrap();
+        let partial = dir.path().join(".flipperclipper-export-test.mp4");
+        std::fs::write(&partial, b"part-written").unwrap();
+        let claim = Claim::take(&slot, 5).unwrap();
+        lock_slot(&slot).attach(5, long_running_child());
+
+        // Does what the real watcher does after ffmpeg's pipes close: reap, clean up, release.
+        let watcher_slot = Arc::clone(&slot);
+        let watcher_partial = partial.clone();
+        let watcher = std::thread::spawn(move || {
+            loop {
+                let exited = lock_slot(&watcher_slot)
+                    .child
+                    .as_mut()
+                    .is_some_and(|child| child.try_wait().unwrap().is_some());
+                if exited {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            let _ = lock_slot(&watcher_slot).child.take().map(|mut child| child.wait());
+            std::thread::sleep(Duration::from_millis(200));
+            std::fs::remove_file(watcher_partial).unwrap();
+            drop(claim);
+        });
+
+        std::fs::write(overlay_dir().unwrap().join(ffmpeg::OVERLAY_TEXT_FILE), b"words").unwrap();
+
+        assert!(close_export(&slot, Duration::from_secs(10)));
+        assert!(!partial.exists(), "the window closed before the temp file was removed");
+        assert!(!overlay_dir_path().exists(), "the overlay text outlived the app");
+        assert!(Claim::take(&slot, 6).is_err(), "an export started while closing");
+        watcher.join().unwrap();
+    }
+
+    #[test]
+    fn stderr_after_a_line_that_is_not_utf8_is_still_collected() {
+        let stderr: &[u8] =
+            b"  title           : Caf\xe9 replay\r\nUnknown encoder 'nope'\r\nConversion failed!\n";
+        let tail = collect_stderr_tail(stderr);
+        assert_eq!(tail.len(), 3);
+        assert_eq!(tail[0], "  title           : Caf\u{fffd} replay");
+        assert_eq!(tail[1], "Unknown encoder 'nope'");
+        assert_eq!(explain_failure(&tail), "Unknown encoder 'nope'\nConversion failed!");
     }
 
     #[test]

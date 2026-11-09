@@ -1,0 +1,128 @@
+name: UI Check
+
+# Builds the app on a clean GitHub Windows machine, drives it with the scripts in tests/ui-checks
+# and uploads screenshots, so a change can be checked in the running app without a desktop.
+on:
+  workflow_dispatch:
+    inputs:
+      filter:
+        description: Check name wildcard (file name in tests/ui-checks/checks without .ps1)
+        default: '*'
+  push:
+    branches:
+      - '**'
+    paths-ignore:
+      - '**.md'
+
+concurrency:
+  group: ui-check-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  FFMPEG_VERSION: 9.0.2
+  FFMPEG_SHA256: 60f467265b1e312373dbcd92200c2618a74850f98d3d078e94296bb3fa2047ba
+
+jobs:
+  ui:
+    runs-on: windows-latest
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache the Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+          key: ui-check
+
+      - name: Cache FFmpeg
+        id: ffmpeg-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/ffmpeg
+          key: ffmpeg-${{ env.FFMPEG_VERSION }}-essentials
+
+      # A pinned essentials build from the same publisher the app's own installer downloads from.
+      - name: Download FFmpeg
+        if: steps.ffmpeg-cache.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          $zip = Join-Path $env:RUNNER_TEMP 'ffmpeg.zip'
+          $url = "https://github.com/GyanD/codexffmpeg/releases/download/$env:FFMPEG_VERSION/ffmpeg-$env:FFMPEG_VERSION-essentials_build.zip"
+          Invoke-WebRequest -Uri $url -OutFile $zip
+          $hash = (Get-FileHash -Algorithm SHA256 $zip).Hash
+          if ($hash -ne $env:FFMPEG_SHA256) { throw "FFmpeg zip SHA256 $hash does not match $env:FFMPEG_SHA256" }
+          $unpacked = Join-Path $env:RUNNER_TEMP 'ffmpeg-unpacked'
+          Expand-Archive $zip -DestinationPath $unpacked
+          $bin = Get-ChildItem $unpacked -Recurse -Filter ffmpeg.exe | Select-Object -First 1
+          New-Item -ItemType Directory -Force (Join-Path $env:RUNNER_TEMP 'ffmpeg') | Out-Null
+          Copy-Item (Join-Path $bin.DirectoryName '*.exe') (Join-Path $env:RUNNER_TEMP 'ffmpeg')
+
+      - name: Put FFmpeg on PATH
+        shell: pwsh
+        run: |
+          # Earlier on PATH than any FFmpeg the image may carry, so every run uses the pinned build.
+          Add-Content -Path $env:GITHUB_PATH -Value (Join-Path $env:RUNNER_TEMP 'ffmpeg')
+          & (Join-Path $env:RUNNER_TEMP 'ffmpeg\ffmpeg.exe') -hide_banner -version | Select-Object -First 1
+
+      - name: Screen and WebView2
+        shell: pwsh
+        run: |
+          # The runner's screen starts at 1024x768, smaller than the app's 1100x800 window.
+          try { Set-DisplayResolution -Width 1920 -Height 1080 -Force -ErrorAction Stop } catch { Write-Host "Set-DisplayResolution failed: $_" }
+          Add-Type -AssemblyName System.Windows.Forms
+          Write-Host "screen: $([System.Windows.Forms.SystemInformation]::VirtualScreen)"
+          Write-Host "session: $([System.Diagnostics.Process]::GetCurrentProcess().SessionId) interactive: $([Environment]::UserInteractive)"
+          $key = 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}'
+          $wv = (Get-ItemProperty $key -ErrorAction SilentlyContinue).pv
+          if (-not $wv) {
+            Write-Host 'WebView2 runtime missing - installing it.'
+            $setup = Join-Path $env:RUNNER_TEMP 'MicrosoftEdgeWebview2Setup.exe'
+            Invoke-WebRequest -Uri 'https://go.microsoft.com/fwlink/p/?LinkId=2124703' -OutFile $setup
+            Start-Process $setup -ArgumentList '/silent', '/install' -Wait
+            $wv = (Get-ItemProperty $key -ErrorAction SilentlyContinue).pv
+          }
+          Write-Host "WebView2 runtime: $wv"
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      - name: Stamp the build with its commit and run
+        run: node scripts/build_info.mjs
+
+      # npx, not `npm run tauri build -- --no-bundle`: npm swallows the flag.
+      - name: Build the app
+        run: npx tauri build --no-bundle
+
+      - name: Run UI checks
+        shell: pwsh
+        env:
+          FILTER: ${{ github.event.inputs.filter }}
+        run: |
+          $filter = $env:FILTER
+          if (-not $filter) { $filter = '*' }
+          ./tests/ui-checks/Invoke-UiChecks.ps1 -AppPath src-tauri/target/release/flipperclipper.exe -OutDir ui-results -Filter $filter
+
+      - name: Upload screenshots and logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ui-check-results
+          path: ui-results
+          retention-days: 14
+          if-no-files-found: warn

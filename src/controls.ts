@@ -829,6 +829,10 @@ function buildJob(input: string, output: string): ExportJob {
  *  making the user walk the save dialog a second time. Cleared once one succeeds. */
 let lastAttempt: string | null = null;
 
+// Seeded from the clock so an id from before a webview reload never matches a new export.
+let lastJobId = Date.now();
+let currentJobId: number | null = null;
+
 async function runExport(retryTarget?: string): Promise<void> {
   const media = edit.media;
   if (!media || ui.exporting) return;
@@ -840,10 +844,15 @@ async function runExport(retryTarget?: string): Promise<void> {
   if (!target) return;
   lastAttempt = target;
 
+  const jobId = ++lastJobId;
+  currentJobId = jobId;
   patchUi({ exporting: true, exportPercent: 0 });
   try {
-    await startExport(buildJob(media.path, target));
+    await startExport(buildJob(media.path, target), jobId);
   } catch (error) {
+    // The user cancelled this one already and may have started another since.
+    if (currentJobId !== jobId) return;
+    currentJobId = null;
     patchUi({ exporting: false, exportPercent: 0 });
     recordError(describe(error));
     showToast(describe(error), [], true);
@@ -871,9 +880,11 @@ async function ffmpegReady(): Promise<boolean> {
 
 // A cancel emits neither export-done nor export-error, so nothing else clears ui.exporting.
 function cancelRunningExport(): void {
-  if (!ui.exporting) return;
+  if (!ui.exporting || currentJobId === null) return;
+  const jobId = currentJobId;
+  currentJobId = null;
   patchUi({ exporting: false, exportPercent: 0 });
-  void cancelExport().catch(reportFailure);
+  void cancelExport(jobId).catch(reportFailure);
 }
 
 function onExportFinished(outputPath: string): void {
