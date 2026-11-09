@@ -935,24 +935,20 @@ mod tests {
             strength: 16.0,
             region: RedactRegion { x: 0.5, y: 0.5, w: 0.5, h: 0.5 },
         };
-        let mut j = job();
-        j.effects.redact = Some(good.clone());
-        assert!(validate(&j).is_ok(), "{:?}", validate(&j));
+        let check = |redact: Redact| validate_effects(&Effects { redact: Some(redact), ..Effects::default() });
+        assert!(check(good.clone()).is_ok());
 
         let mut off = good.clone();
         off.region.x = 0.6;
-        j.effects.redact = Some(off);
-        assert!(validate(&j).unwrap_err().contains("inside the frame"));
+        assert!(check(off).unwrap_err().contains("inside the frame"));
 
         let mut nan = good.clone();
         nan.region.w = f64::NAN;
-        j.effects.redact = Some(nan);
-        assert!(validate(&j).unwrap_err().contains("inside the frame"));
+        assert!(check(nan).unwrap_err().contains("inside the frame"));
 
         let mut weak = good;
         weak.strength = 1.0;
-        j.effects.redact = Some(weak);
-        assert!(validate(&j).unwrap_err().contains("redact strength"));
+        assert!(check(weak).unwrap_err().contains("redact strength"));
     }
 
     #[test]
