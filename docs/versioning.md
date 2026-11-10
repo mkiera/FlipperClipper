@@ -29,10 +29,16 @@ version read by Tauri and the updater.
    the results of the beta series under a separate stable heading.
 4. Run `npm ci`, `npm test`, `npm run build`, and
    `cargo test --manifest-path src-tauri/Cargo.toml --locked -- --test-threads=1`.
-5. On an explicit release request, create a lightweight beta tag at the prepared
+5. Commit the prepared changelog and any required version-file changes. On an
+   explicit release request, create a lightweight beta tag on that commit at the
    `beta` head. For stable, merge `beta` into `main` with `--no-ff` and tag that
    merge. Push the branch and tag atomically. Verify the workflow and its
    `FlipperClipper-Setup.exe` asset.
+
+A separate alpha build is optional testing, not a required step before release
+preparation. Keep existing workflow triggers. Pushing a branch and tag atomically
+does not suppress overlapping triggers. Inspect actual runs before claiming one
+build, especially when the pushed changes include version files or application code.
 
 Keep tagged changelog sections frozen. Historical releases retain their existing
 GitHub notes and do not need backfilled sections. New releases require one exact,

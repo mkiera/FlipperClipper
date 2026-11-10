@@ -96,6 +96,63 @@ export interface TextOverlay {
   boxed: boolean;
 }
 
+/** How a redacted region hides what is under it. */
+export type RedactMode = 'blur' | 'pixelate' | 'box';
+
+/** The region is in fractions of the exported frame (the crop when there is one), so a later
+ *  crop keeps it over the same part of the picture rather than over the same pixels. */
+export interface RedactRegion {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+/** One keyframe of a redaction, at a moment on the source timeline. */
+export interface RedactKey {
+  t: number;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  /** Shown from this keyframe until the next one. */
+  on: boolean;
+}
+
+/** One redaction. With no keyframes, `region` and `on` hold for the whole clip; with any,
+ *  the keyframes decide and those two are ignored. */
+export interface RedactItem {
+  id: number;
+  mode: RedactMode;
+  /** Blur sigma or pixel block size, in source pixels. Unused by 'box'. */
+  strength: number;
+  region: RedactRegion;
+  on: boolean;
+  keys: RedactKey[];
+}
+
+/** A redaction as the export takes it: always at least one keyframe. */
+export interface RedactJob {
+  mode: RedactMode;
+  strength: number;
+  keys: RedactKey[];
+}
+
+/** One keyframe of an effect's dial, at a moment on the source timeline. */
+export interface ValueKey {
+  t: number;
+  /** The dial's value: the amount, the degrees, the sigma, or the text's opacity. */
+  v: number;
+  /** On from this keyframe until the next one. */
+  on: boolean;
+}
+
+/** The effects whose dial can be keyframed. Fade is timed already and redact has its own. */
+export type KeyedEffectId = 'brightness' | 'contrast' | 'saturation' | 'hue' | 'blur' | 'vignette' | 'text';
+
+/** Each keyed effect's keyframes, as the export takes them. An empty list is the dial alone. */
+export type EffectKeysJob = Record<KeyedEffectId, ValueKey[]>;
+
 /** What the export applies. Null is off: a switched-off effect keeps its dial in
  *  EffectsState, and nothing here remembers it. */
 export interface EffectsJob {
@@ -113,18 +170,22 @@ export interface EffectsJob {
   fadeIn: number | null;
   fadeOut: number | null;
   text: TextOverlay | null;
+  redact: RedactJob[];
+  keys: EffectKeysJob;
 }
 
 /** The dials themselves, kept whether or not the effect is switched on. */
 export interface EffectSettings {
-  blur: { sigma: number };
-  brightness: { amount: number };
-  contrast: { amount: number };
-  saturation: { amount: number };
-  hue: { degrees: number };
-  vignette: { amount: number };
+  blur: { sigma: number; keys: ValueKey[] };
+  brightness: { amount: number; keys: ValueKey[] };
+  contrast: { amount: number; keys: ValueKey[] };
+  saturation: { amount: number; keys: ValueKey[] };
+  hue: { degrees: number; keys: ValueKey[] };
+  vignette: { amount: number; keys: ValueKey[] };
   fade: { inSeconds: number; outSeconds: number };
-  text: TextOverlay;
+  /** The keyframes animate the opacity and whether the text shows. */
+  text: TextOverlay & { keys: ValueKey[] };
+  redact: { items: RedactItem[] };
 }
 
 export type EffectId = keyof EffectSettings;
@@ -430,5 +491,8 @@ export function isTrimOnly(state: EditState): boolean {
 export function losslessEligible(state: EditState): boolean {
   if (!isTrimOnly(state) || state.audioOnly || state.format === 'gif') return false;
   if (state.media === null) return false;
-  return state.format === defaultFormatFor(state.media.path) || state.format === 'mkv';
+  if (state.format === 'mkv') return true;
+  // defaultFormatFor maps WMV, OGV and the rest to mp4, which cannot hold their codecs.
+  const ext = state.media.path.slice(state.media.path.lastIndexOf('.') + 1).toLowerCase();
+  return ['mp4', 'm4v', 'mov', 'webm'].includes(ext) && state.format === defaultFormatFor(state.media.path);
 }

@@ -2,7 +2,8 @@ import { applyUpdate, checkForUpdate, onUpdateProgress } from './ipc';
 import { settings } from './state';
 import { type UpdateInfo } from './types';
 
-const CHECK_COOLDOWN_MS = 60 * 60 * 1000;
+// Shorter than RECHECK_MS: equal values made each tick land a little inside the cooldown and skip.
+const CHECK_COOLDOWN_MS = 55 * 60 * 1000;
 
 const LAST_CHECK_KEY = 'flipperclipper.lastUpdateCheck';
 
@@ -94,6 +95,7 @@ const STYLE_TEXT = `
 
 let pill: HTMLDivElement | null = null;
 let unlistenProgress: (() => void) | null = null;
+let downloading = false;
 
 /** The version the user waved away. A later release is a new offer and shows again. */
 let dismissedVersion: string | null = null;
@@ -164,6 +166,8 @@ function ensureStyle(): void {
 export function showUpdate(info: UpdateInfo, asked = false): void {
   // A dismissal silences the automatic offer, never an answer the user went and asked for.
   if (!asked && info.version === dismissedVersion) return;
+  // Replacing the pill mid-download would hide its progress and offer a second download.
+  if (downloading) return;
   if (pill) {
     // A newer release than the one already on offer replaces it rather than queueing behind it.
     pill.remove();
@@ -223,6 +227,7 @@ async function startUpdate(
   track: HTMLElement,
   fill: HTMLElement,
 ): Promise<void> {
+  downloading = true;
   action.disabled = true;
   action.hidden = true;
   dismiss.hidden = true;
@@ -242,6 +247,7 @@ async function startUpdate(
     await applyUpdate(info);
     label.textContent = 'Installing…';
   } catch (error) {
+    downloading = false;
     unlistenProgress?.();
     unlistenProgress = null;
     track.hidden = true;

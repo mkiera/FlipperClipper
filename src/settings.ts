@@ -68,7 +68,6 @@ let activeChannel: UpdateChannel = DEFAULT_SETTINGS.updateChannel;
 let selectedRunId: number | null = null;
 let loadingAlpha = false;
 let alphaError: string | null = null;
-let alphaArmed = false;
 
 const cache = new Map<UpdateChannel, Cached>();
 // Anonymous GitHub allows 60 requests an hour, so this only refills on refresh.
@@ -254,7 +253,6 @@ function open(): void {
 function close(): void {
   modal.hidden = true;
   downgradeArmed = false;
-  alphaArmed = false;
   if (keyboardDriven()) openBtn.focus();
 }
 
@@ -640,7 +638,6 @@ function alphaRow(build: AlphaBuild): HTMLButtonElement {
 
   row.addEventListener('click', () => {
     selectedRunId = build.runId;
-    alphaArmed = false;
     note.textContent = '';
     renderAlpha();
   });
@@ -658,21 +655,13 @@ function renderAlphaButton(): void {
 
 function clearAlphaSelection(): void {
   selectedRunId = null;
-  alphaArmed = false;
 }
 
 async function installAlpha(): Promise<void> {
   const build = selectedAlpha();
   if (!build || installing) return;
 
-  if (!alphaArmed) {
-    alphaArmed = true;
-    note.textContent = `${build.branch} at ${build.sha} is a test build, not a release. Press Install this build again to replace the running app.`;
-    return;
-  }
-
   installing = true;
-  alphaArmed = false;
   renderAlphaButton();
   note.textContent = `Downloading ${build.artifactName}…`;
 
