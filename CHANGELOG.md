@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- The window grows to fit the keyframe lane under the timeline, so the video keeps its size and place.
+- Moving redactions follow their path more closely in variable frame rate clips, such as screen recordings.
+
 ## 1.3.0-beta.1 - 2026-11-10
 
 - Cancel now stops an export even when it is clicked in the first moments after Export, so the existing file is left alone.

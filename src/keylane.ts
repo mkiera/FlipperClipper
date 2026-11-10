@@ -16,6 +16,7 @@ import {
   withEffectKeyMoved,
   withoutEffectKey,
 } from './effects';
+import { initStripWindowResize } from './mixer-window';
 import { seek } from './player';
 import { withKeyMoved, withoutKey } from './redact';
 import { redactItems, selectRedaction, selectedRedaction, updateRedaction } from './redactedit';
@@ -44,6 +45,7 @@ interface LaneRow {
 }
 
 let lane!: HTMLElement;
+let resizeWindow: ((height: number) => void) | null = null;
 let dragging: { row: string; index: number } | null = null;
 let lastTap: { row: string; index: number; at: number; x: number } | null = null;
 
@@ -51,6 +53,7 @@ export function initKeyLane(): void {
   const found = document.getElementById('tl-keys');
   if (!found) throw new Error('FlipperClipper: index.html is missing #tl-keys');
   lane = found;
+  resizeWindow = initStripWindowResize();
 
   lane.addEventListener('pointerdown', onPointerDown);
   lane.addEventListener('pointermove', onPointerMove);
@@ -195,6 +198,8 @@ function render(): void {
   const media = edit.media;
   const rows = media ? laneRows(media.duration) : [];
   const open = media !== null && rows.length > 0;
+  // The window grows by the lane, so the video keeps its size and place.
+  resizeWindow?.(open ? rows.length * ROW + 4 : 0);
   lane.hidden = !open;
   document.getElementById('timeline')?.classList.toggle('has-keys', open);
   if (!open || !media) return;

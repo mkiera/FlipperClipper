@@ -937,8 +937,12 @@ struct RedactPlan {
 /// the crop; the stream's clock starts at the in point because the input is seeked with -ss.
 fn redact_plans(job: &ExportJob, width: i64, height: i64, fps: f64) -> Vec<RedactPlan> {
     let duration = source_duration(job);
-    // Positions are worked out per source frame rather than from the in point.
-    let (fps, first_frame, last_frame) = source_frames(job, fps);
+    let fps = if fps.is_finite() && fps > 0.0 { fps } else { 30.0 };
+    // Positions are worked out on the source clock rather than from the in point, four times
+    // per frame: a variable frame rate clip's frames fall between the average grid, and a box
+    // then trails its target by at most an eighth of a frame's motion. On a constant rate
+    // every frame still lands exactly on a sample.
+    let (rate, first_sample, last_sample) = source_frames(job, fps * 4.0);
     let mut plans = Vec::new();
 
     for redact in &job.effects.redact {
@@ -956,20 +960,20 @@ fn redact_plans(job: &ExportJob, width: i64, height: i64, fps: f64) -> Vec<Redac
         let enable = enable_expr(&spans, duration);
 
         let rect_at = |k: i64| {
-            let (x, y, w, h, _) = redact_state(&keys, k as f64 / fps);
+            let (x, y, w, h, _) = redact_state(&keys, k as f64 / rate);
             redact_rect(x, y, w, h, width, height)
         };
-        let start = rect_at(first_frame);
+        let start = rect_at(first_sample);
         let mut moves = Vec::new();
         let moving = keys.windows(2).any(|w| {
             (w[0].x, w[0].y, w[0].w, w[0].h) != (w[1].x, w[1].y, w[1].w, w[1].h)
         });
         if moving {
             let mut previous = start;
-            for k in first_frame + 1..last_frame {
+            for k in first_sample + 1..last_sample {
                 let rect = rect_at(k);
                 if rect != previous {
-                    moves.push((command_time(job, k, fps), rect));
+                    moves.push((command_time(job, k, rate), rect));
                     previous = rect;
                 }
             }
@@ -2762,21 +2766,39 @@ mod tests {
         assert!(chain.contains("drawbox@fcr0=x=0:y=0:w=100:h=100:color=white"), "{chain}");
 
         let commands = filter_commands(&j, 1000, 1000, 10.0).expect("no commands");
-        let lines: Vec<&str> = commands.lines().collect();
-        // Ten frames at 10 fps: frames 1 to 9 each move the box 50 px right.
-        assert_eq!(lines.len(), 9, "{commands}");
+        // Four samples a frame at 10 fps, each moving the box 12.5 px right, and every frame
+        // carrying the box exactly where it is at that frame.
+        assert_eq!(commands.lines().count(), 39, "{commands}");
         assert_eq!(
-            lines[0],
-            "0.0500 drawbox@fcr0 x 50, drawbox@fcr0 y 0, drawbox@fcr0 w 100, drawbox@fcr0 h 100;"
+            commands.lines().nth(3).unwrap(),
+            "0.0875 drawbox@fcr0 x 50, drawbox@fcr0 y 0, drawbox@fcr0 w 100, drawbox@fcr0 h 100;"
         );
-        assert!(lines[8].starts_with("0.8500 drawbox@fcr0 x 450,"), "{commands}");
+        for k in 1..10 {
+            assert_eq!(box_x_at(0, &commands, k as f64 / 10.0), 50 * k, "frame {k}");
+        }
+    }
+
+    /// The box's x at stream time `at`: the starting x, then every command due by then.
+    fn box_x_at(start: i64, commands: &str, at: f64) -> i64 {
+        let mut x = start;
+        for line in commands.lines() {
+            let (time, rest) = line.split_once(' ').unwrap();
+            if time.parse::<f64>().unwrap() > at {
+                break;
+            }
+            let value = rest.split(", ").find_map(|c| c.strip_prefix("drawbox@fcr0 x "));
+            if let Some(v) = value {
+                x = v.parse().unwrap();
+            }
+        }
+        x
     }
 
     #[test]
     fn a_trim_between_frames_moves_the_box_on_the_source_frames() {
-        // At 10 fps with the in point at 0.02 s, the first frames are source 0.1, 0.2, ...
-        // (stream 0.08, 0.18, ...). Each command must land before its frame and carry the
-        // position of that source frame, not of in point + n/fps.
+        // At 10 fps with the in point at 0.02 s, the frames are source 0.1, 0.2, ... (stream
+        // 0.08, 0.18, ...). Each must carry the position of that source frame, not of in point
+        // + n/fps. The box runs 500 px a second.
         let mut j = job(QualityPreset::Balanced);
         j.in_point = 0.02;
         j.out_point = 1.0;
@@ -2785,10 +2807,21 @@ mod tests {
             vec![key(0.0, 0.0, 0.0, 0.1, 0.1, true), key(1.0, 0.5, 0.0, 0.1, 0.1, true)],
         )];
         let chain = vf(&build_args(&j, "libx264", true, 1000, 1000, 10.0, None));
-        assert!(chain.contains("drawbox@fcr0=x=50:y=0:w=100:h=100"), "{chain}");
+        let start: i64 = chain
+            .split("drawbox@fcr0=x=")
+            .nth(1)
+            .and_then(|rest| rest.split(':').next())
+            .and_then(|x| x.parse().ok())
+            .expect("no box");
         let commands = filter_commands(&j, 1000, 1000, 10.0).expect("no commands");
-        let first = commands.lines().next().unwrap();
-        assert!(first.starts_with("0.1300 drawbox@fcr0 x 100,"), "{commands}");
+        for k in 1..10 {
+            let source = k as f64 / 10.0;
+            assert_eq!(box_x_at(start, &commands, source - 0.02), 50 * k, "frame {k}\n{commands}");
+        }
+        // A variable frame rate frame between the average grid lands within a few pixels of
+        // where the box is at that moment, not a whole frame behind.
+        let x = box_x_at(start, &commands, 0.149 - 0.02);
+        assert!((x - 74).abs() <= 7, "{x}");
     }
 
     fn vk(t: f64, v: f64, on: bool) -> ValueKey {
