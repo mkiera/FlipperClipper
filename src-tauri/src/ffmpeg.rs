@@ -1168,25 +1168,27 @@ const TEXT_SAMPLE_BUDGET: f64 = 120.0;
 
 /// The opacity as (finished clip time, value) points. The opacity moves in a straight line on
 /// the source clock, and a speed curve bends that line on the finished clip, so under a curve
-/// the fades between keyframes are sampled, at most once per source frame and
-/// TEXT_SAMPLE_BUDGET points in all, shared by length.
+/// the fades between keyframes are sampled, at most once per source frame. TEXT_SAMPLE_BUDGET
+/// is shared by each fade's length on the finished clip, where slow motion stretches it, and
+/// every fade gets at least 8 points, so a short one keeps its shape.
 fn text_points(job: &ExportJob, keys: &[ValueKey], fps: f64) -> Vec<(f64, f64)> {
     let source = trim_points(job, keys, |t| t);
     if !ramp::has_ramp(&job.ramp) {
         return source.into_iter().map(|(t, v)| (output_time(job, t), v)).collect();
     }
     let fps = if fps.is_finite() && fps > 0.0 { fps } else { 30.0 };
+    let span = |s0: f64, s1: f64| (output_time(job, s1) - output_time(job, s0)).max(0.0);
     let fading: f64 = source
         .windows(2)
         .filter(|w| w[0].1 != w[1].1)
-        .map(|w| (w[1].0 - w[0].0).max(0.0))
+        .map(|w| span(w[0].0, w[1].0))
         .sum();
     let mut points = Vec::new();
     for w in source.windows(2) {
         let ((s0, v0), (s1, v1)) = (w[0], w[1]);
         points.push((output_time(job, s0), v0));
         if v0 != v1 && s1 > s0 {
-            let share = (TEXT_SAMPLE_BUDGET * (s1 - s0) / fading).floor().max(1.0) as usize;
+            let share = (TEXT_SAMPLE_BUDGET * span(s0, s1) / fading).floor().max(8.0) as usize;
             let steps = (((s1 - s0) * fps).ceil() as usize).clamp(1, share);
             for i in 1..steps {
                 let f = i as f64 / steps as f64;
@@ -2919,6 +2921,25 @@ mod tests {
         let v = v0 + (v1 - v0) * (at - t0) / (t1 - t0);
         // Halfway through the source is half opacity, wherever the curve puts it.
         assert!((v - 0.5).abs() < 0.01, "{v}");
+    }
+
+    /// Opacity on the finished clip at `at`, read off the points the way drawtext's alpha does.
+    fn opacity_at(points: &[(f64, f64)], at: f64) -> f64 {
+        let i = points.windows(2).position(|w| w[1].0 >= at).unwrap();
+        let ((t0, v0), (t1, v1)) = (points[i], points[i + 1]);
+        if t1 > t0 { v0 + (v1 - v0) * (at - t0) / (t1 - t0) } else { v1 }
+    }
+
+    #[test]
+    fn a_short_fade_in_slow_motion_keeps_its_shape_beside_a_long_one() {
+        let mut j = job(QualityPreset::Balanced);
+        j.in_point = 0.0;
+        j.out_point = 30.0;
+        j.ramp = vec![SpeedPoint { t: 0.0, speed: 0.05 }, SpeedPoint { t: 0.2, speed: 1.6 }];
+        let keys = vec![vk(0.0, 0.0, true), vk(0.2, 1.0, true), vk(30.0, 0.0, true)];
+        let points = text_points(&j, &keys, 30.0);
+        let v = opacity_at(&points, output_time(&j, 0.1));
+        assert!((v - 0.5).abs() < 0.05, "{v}");
     }
 
     #[test]
