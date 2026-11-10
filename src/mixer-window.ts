@@ -69,13 +69,18 @@ export function initStripWindowResize(): ((height: number) => void) | null {
   let originalY: number | null = null;
   let openedY: number | null = null;
   let queue = Promise.resolve();
+  // One pin for every request still queued: a second pin would record the first one's styles
+  // as the originals and put them back for good.
+  let release: (() => void) | null = null;
+  let pending = 0;
 
   return (height: number) => {
     const target = Math.max(0, Math.round(height));
     if (target === cssHeight) return;
     const from = cssHeight;
     cssHeight = target;
-    const release = pinWorkspace();
+    release ??= pinWorkspace();
+    pending += 1;
     queue = queue
       .then(async () => {
         if (target > from) {
@@ -95,6 +100,12 @@ export function initStripWindowResize(): ((height: number) => void) | null {
       .catch(() => {
         /* the window keeps its size, and the lane takes its height from the video instead */
       })
-      .finally(release);
+      .finally(() => {
+        pending -= 1;
+        if (pending === 0) {
+          release?.();
+          release = null;
+        }
+      });
   };
 }
