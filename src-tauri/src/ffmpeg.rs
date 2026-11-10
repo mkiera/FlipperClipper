@@ -587,7 +587,8 @@ fn keyed_dials(fx: &Effects) -> Vec<KeyedDial<'_>> {
         (fx.contrast, &fx.keys.contrast, "eq@fcxc", &["contrast"][..]),
         (fx.saturation, &fx.keys.saturation, "eq@fcxs", &["saturation"][..]),
         (fx.hue, &fx.keys.hue, "hue@fcxh", &["h"][..]),
-        (fx.blur, &fx.keys.blur, "gblur@fcxg", &["sigma"][..]),
+        // gblur copies sigma into sigmaV once, at startup, so a command has to set both.
+        (fx.blur, &fx.keys.blur, "gblur@fcxg", &["sigma", "sigmaV"][..]),
     ] {
         if value.is_some() && !keys.is_empty() {
             dials.push(KeyedDial { keys, target, options });
@@ -720,28 +721,27 @@ fn dial_plan(job: &ExportJob, keys: &[ValueKey], fps: f64) -> Option<DialPlan> {
 }
 
 /// A value that moves in straight lines through (time, value) points and holds past both ends,
-/// as an ffmpeg expression in `t`.
+/// as an ffmpeg expression in `t`. A flat sum with one gated term per piece: ffmpeg refuses
+/// expressions nested about 100 deep, which a chain of if() would reach.
 fn lerp_expr(points: &[(f64, f64)]) -> String {
-    let Some(&(_, end)) = points.last() else {
+    let (Some(&(first_t, first_v)), Some(&(last_t, last_v))) = (points.first(), points.last()) else {
         return "0".to_string();
     };
-    let mut expr = fmt_num(end);
-    for i in (0..points.len().saturating_sub(1)).rev() {
-        let ((t0, v0), (t1, v1)) = (points[i], points[i + 1]);
-        let piece = if t1 > t0 && v1 != v0 {
-            format!(
-                "{}+({})*(t-({}))/{}",
-                fmt_num(v0),
-                fmt_num(v1 - v0),
-                fmt_num(t0),
-                fmt_num(t1 - t0)
-            )
+    let mut terms = vec![format!("lt(t,{})*({})", fmt_num(first_t), fmt_num(first_v))];
+    for w in points.windows(2) {
+        let ((t0, v0), (t1, v1)) = (w[0], w[1]);
+        if t1 <= t0 {
+            continue;
+        }
+        let piece = if v1 != v0 {
+            format!("{}+({})*(t-({}))/{}", fmt_num(v0), fmt_num(v1 - v0), fmt_num(t0), fmt_num(t1 - t0))
         } else {
             fmt_num(v0)
         };
-        expr = format!("if(lt(t,{}),{piece},{expr})", fmt_num(t1));
+        terms.push(format!("gte(t,{})*lt(t,{})*({piece})", fmt_num(t0), fmt_num(t1)));
     }
-    expr
+    terms.push(format!("gte(t,{})*({})", fmt_num(last_t), fmt_num(last_v)));
+    terms.join("+")
 }
 
 /// The keyframes as (stream time, value) points across the trim: the value at each edge, and
@@ -1162,6 +1162,33 @@ fn drawtext_filter(overlay: &TextOverlay, font: &Path) -> String {
     format!("drawtext={}", parts.join(":"))
 }
 
+/// The opacity as (finished clip time, value) points. The opacity moves in a straight line on
+/// the source clock, and a speed curve bends that line on the finished clip, so under a curve
+/// each fade between keyframes is sampled up to once per source frame (at most 200 points).
+fn text_points(job: &ExportJob, keys: &[ValueKey], fps: f64) -> Vec<(f64, f64)> {
+    let source = trim_points(job, keys, |t| t);
+    if !ramp::has_ramp(&job.ramp) {
+        return source.into_iter().map(|(t, v)| (output_time(job, t), v)).collect();
+    }
+    let fps = if fps.is_finite() && fps > 0.0 { fps } else { 30.0 };
+    let mut points = Vec::new();
+    for w in source.windows(2) {
+        let ((s0, v0), (s1, v1)) = (w[0], w[1]);
+        points.push((output_time(job, s0), v0));
+        if v0 != v1 && s1 > s0 {
+            let steps = (((s1 - s0) * fps).ceil() as usize).clamp(1, 200);
+            for i in 1..steps {
+                let f = i as f64 / steps as f64;
+                points.push((output_time(job, s0 + (s1 - s0) * f), v0 + (v1 - v0) * f));
+            }
+        }
+    }
+    if let Some(&(t, v)) = source.last() {
+        points.push((output_time(job, t), v));
+    }
+    points
+}
+
 /// Where source time `t` lands on the finished clip, before any reverse. drawtext runs after
 /// the speed change, so the text's keyframes are moved onto that clock.
 fn output_time(job: &ExportJob, t: f64) -> f64 {
@@ -1178,10 +1205,8 @@ fn output_time(job: &ExportJob, t: f64) -> f64 {
 
 /// The text overlay, with its keyframes when it has any. On/off becomes an `enable`. A moving
 /// opacity becomes drawtext's `alpha`, which would fade the plate as well, so the plate is
-/// drawn by a pass of its own and keeps its fixed shade. Between keyframes the opacity moves
-/// in a straight line on the finished clip's clock, which under a speed curve bends a little
-/// from the preview's straight line on the source clock.
-fn drawtext_filters(job: &ExportJob, overlay: &TextOverlay, font: &Path) -> Vec<String> {
+/// drawn by a pass of its own and keeps its fixed shade.
+fn drawtext_filters(job: &ExportJob, overlay: &TextOverlay, font: &Path, fps: f64) -> Vec<String> {
     let keys = &job.effects.keys.text;
     if keys.is_empty() {
         return vec![drawtext_filter(overlay, font)];
@@ -1195,7 +1220,7 @@ fn drawtext_filters(job: &ExportJob, overlay: &TextOverlay, font: &Path) -> Vec<
         return Vec::new();
     }
     let enable = enable_option(&enable_expr(&spans, total));
-    let points = trim_points(job, &keys, |t| output_time(job, t));
+    let points = text_points(job, &keys, fps);
     if points.windows(2).all(|w| w[0].1 == w[1].1) {
         let steady = TextOverlay { opacity: points[0].1, ..overlay.clone() };
         return vec![format!("{}{enable}", drawtext_filter(&steady, font))];
@@ -1704,7 +1729,7 @@ pub fn build_args(
         // it - the same relative order as the video branch, minus the split.
         chain.extend(retimed_effect_filters(job, fps));
         if let (Some(overlay), Some(font)) = (job.effects.text.as_ref(), font) {
-            chain.extend(drawtext_filters(job, overlay, font));
+            chain.extend(drawtext_filters(job, overlay, font, fps));
         }
         if job.reverse {
             chain.push("reverse".to_string());
@@ -1778,7 +1803,7 @@ pub fn build_args(
     // After the scale, so the letters are rasterised at the size they will be read at rather
     // than drawn large and then thrown away.
     if let (Some(overlay), Some(font)) = (job.effects.text.as_ref(), font) {
-        vfilters.extend(drawtext_filters(job, overlay, font));
+        vfilters.extend(drawtext_filters(job, overlay, font, fps));
     }
     if job.reverse {
         // Last of the frame-shaping filters on purpose: reverse holds every frame it will emit
@@ -2826,7 +2851,9 @@ mod tests {
         j.effects.keys.vignette = vec![vk(1.0, 0.0, true), vk(3.0, 1.0, true)];
         let chain = vf(&build_args(&j, "libx264", true, 1920, 1080, 30.0, None));
         let max = fmt_num(VIGNETTE_MAX_ANGLE);
-        let expected = format!("vignette=angle='if(lt(t,2.0),0.0+({max})*(t-(0.0))/2.0,{max})':eval=frame");
+        let expected = format!(
+            "vignette=angle='lt(t,0.0)*(0.0)+gte(t,0.0)*lt(t,2.0)*(0.0+({max})*(t-(0.0))/2.0)+gte(t,2.0)*({max})':eval=frame"
+        );
         assert!(chain.contains(&expected), "{chain}");
     }
 
@@ -2840,7 +2867,10 @@ mod tests {
         j.effects.blur = Some(1.0);
         j.effects.keys.blur = vec![vk(0.0, 1.0, true), vk(1.0, 11.0, true)];
         let commands = filter_commands(&j, 1000, 1000, 10.0).expect("no commands");
-        assert_eq!(commands.lines().next().unwrap(), "0.0500 hue@fcxh h 10.0, gblur@fcxg sigma 2.0;");
+        assert_eq!(
+            commands.lines().next().unwrap(),
+            "0.0500 hue@fcxh h 10.0, gblur@fcxg sigma 2.0, gblur@fcxg sigmaV 2.0;"
+        );
         assert_eq!(commands.lines().count(), 9);
     }
 
@@ -2858,10 +2888,27 @@ mod tests {
         let args = build_args(&j, "libx264", true, 1920, 1080, 30.0, Some(&font()));
         let chain = vf(&args);
         let plate = chain.find("@0.0:x=(w-text_w)/2").expect("no plate pass");
-        let words = chain.find("alpha='if(lt(t,1.0),0.2,if(lt(t,2.0),0.2+(0.8)*(t-(1.0))/1.0,1.0))':enable='gte(t,1.0)'");
+        let words = chain.find("alpha='lt(t,0.0)*(0.2)+gte(t,0.0)*lt(t,1.0)*(0.2)+gte(t,1.0)*lt(t,2.0)*(0.2+(0.8)*(t-(1.0))/1.0)+gte(t,2.0)*(1.0)':enable='gte(t,1.0)'");
         let words = words.unwrap_or_else(|| panic!("{chain}"));
         assert!(plate < words, "{chain}");
         assert_eq!(chain.matches("box=1").count(), 1, "{chain}");
+    }
+
+    #[test]
+    fn under_a_speed_curve_text_opacity_still_moves_evenly_on_the_source_clock() {
+        let mut j = job(QualityPreset::Balanced);
+        j.in_point = 0.0;
+        j.out_point = 4.0;
+        j.ramp = vec![SpeedPoint { t: 0.0, speed: 1.0 }, SpeedPoint { t: 4.0, speed: 16.0 }];
+        let keys = vec![vk(0.0, 0.0, true), vk(4.0, 1.0, true)];
+        let points = text_points(&j, &keys, 30.0);
+        let at = output_time(&j, 2.0);
+        let i = points.windows(2).position(|w| w[1].0 >= at).unwrap();
+        let ((t0, v0), (t1, v1)) = (points[i], points[i + 1]);
+        let v = v0 + (v1 - v0) * (at - t0) / (t1 - t0);
+        // Halfway through the source is half opacity, wherever the curve puts it.
+        assert!((v - 0.5).abs() < 0.01, "{v}");
+        assert!(points.len() <= 202, "{}", points.len());
     }
 
     #[test]
