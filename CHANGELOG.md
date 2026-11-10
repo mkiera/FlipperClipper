@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 1.3.0-beta.2 - 2026-11-10
+
 - The window grows to fit the keyframe lane under the timeline, so the video keeps its size and place.
 - Moving redactions follow their path more closely in variable frame rate clips, such as screen recordings.
 
