@@ -138,6 +138,21 @@ export interface RedactJob {
   keys: RedactKey[];
 }
 
+/** One keyframe of an effect's dial, at a moment on the source timeline. */
+export interface ValueKey {
+  t: number;
+  /** The dial's value: the amount, the degrees, the sigma, or the text's opacity. */
+  v: number;
+  /** On from this keyframe until the next one. */
+  on: boolean;
+}
+
+/** The effects whose dial can be keyframed. Fade is timed already and redact has its own. */
+export type KeyedEffectId = 'brightness' | 'contrast' | 'saturation' | 'hue' | 'blur' | 'vignette' | 'text';
+
+/** Each keyed effect's keyframes, as the export takes them. An empty list is the dial alone. */
+export type EffectKeysJob = Record<KeyedEffectId, ValueKey[]>;
+
 /** What the export applies. Null is off: a switched-off effect keeps its dial in
  *  EffectsState, and nothing here remembers it. */
 export interface EffectsJob {
@@ -156,18 +171,20 @@ export interface EffectsJob {
   fadeOut: number | null;
   text: TextOverlay | null;
   redact: RedactJob[];
+  keys: EffectKeysJob;
 }
 
 /** The dials themselves, kept whether or not the effect is switched on. */
 export interface EffectSettings {
-  blur: { sigma: number };
-  brightness: { amount: number };
-  contrast: { amount: number };
-  saturation: { amount: number };
-  hue: { degrees: number };
-  vignette: { amount: number };
+  blur: { sigma: number; keys: ValueKey[] };
+  brightness: { amount: number; keys: ValueKey[] };
+  contrast: { amount: number; keys: ValueKey[] };
+  saturation: { amount: number; keys: ValueKey[] };
+  hue: { degrees: number; keys: ValueKey[] };
+  vignette: { amount: number; keys: ValueKey[] };
   fade: { inSeconds: number; outSeconds: number };
-  text: TextOverlay;
+  /** The keyframes animate the opacity and whether the text shows. */
+  text: TextOverlay & { keys: ValueKey[] };
   redact: { items: RedactItem[] };
 }
 

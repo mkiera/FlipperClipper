@@ -13,7 +13,7 @@
  */
 
 import { frameGeometry } from './crop';
-import { blurPixels, cssFilterFor, hasEffect, rgba } from './effects';
+import { KEYED_IDS, activeAt, blurPixels, cssFilterFor, dialAt, effectKeys, hasEffect, rgba } from './effects';
 import { currentTime, onTime, videoElement } from './player';
 import { blockSize, clampRegion, sourceBounds, stateAt, withEdit } from './redact';
 import {
@@ -78,8 +78,13 @@ export function initOverlay(): void {
   subscribe(render);
   // Per presented frame, so the fade tracks the playhead without re-laying out the rest.
   onTime(() => {
+    // A keyframed dial changes with the playhead, so the filter and the layers follow it.
+    if (KEYED_IDS.some((id) => effectKeys(edit.effects, id).length > 0)) render();
     renderFade();
     renderRedactions();
+  });
+  video.addEventListener('seeked', () => {
+    if (KEYED_IDS.some((id) => effectKeys(edit.effects, id).length > 0)) render();
   });
   video.addEventListener('seeked', renderRedactions);
   video.addEventListener('loadeddata', renderRedactions);
@@ -89,18 +94,19 @@ export function initOverlay(): void {
 export function render(): void {
   const video = videoElement();
   const effects = edit.effects;
+  const t = currentTime();
 
   applyTurn(video);
 
   const geometry = edit.media ? frameGeometry(stage) : null;
   const scale = geometry?.scale ?? 1;
   // Set before the filter is applied, so the first blurred frame is drawn at the right radius.
-  blurAmount.setAttribute('stdDeviation', blurPixels(effects, scale).toFixed(2));
-  const filter = cssFilterFor(effects, scale);
+  blurAmount.setAttribute('stdDeviation', blurPixels(effects, scale, t).toFixed(2));
+  const filter = cssFilterFor(effects, scale, t);
   if (video.style.filter !== filter) video.style.filter = filter;
 
-  const drawsText = hasEffect(effects, 'text');
-  const drawsVignette = hasEffect(effects, 'vignette');
+  const drawsText = activeAt(effects, 'text', t);
+  const drawsVignette = activeAt(effects, 'vignette', t);
   const drawsFade = hasEffect(effects, 'fade');
   const drawsRedact = hasEffect(effects, 'redact');
 
@@ -116,7 +122,7 @@ export function render(): void {
 
   vignette.hidden = !drawsVignette;
   if (drawsVignette) {
-    const strength = effects.settings.vignette.amount;
+    const strength = dialAt(effects, 'vignette', t).v;
     // An approximation of ffmpeg's lens falloff, which is a cosine law rather than a gradient
     // stop. Close enough to place the effect; the exported file is the real answer.
     vignette.style.background = `radial-gradient(ellipse at center, rgba(0,0,0,0) 35%, rgba(0,0,0,${(
@@ -129,7 +135,7 @@ export function render(): void {
   renderRedactions();
 
   textLayer.hidden = !drawsText;
-  if (drawsText) renderText(geometry.height);
+  if (drawsText) renderText(geometry.height, dialAt(effects, 'text', t).v);
 
   fadeShade.hidden = !drawsFade;
   renderFade();
@@ -177,7 +183,7 @@ function applyTurn(video: HTMLVideoElement): void {
   if (video.style.transform !== transform) video.style.transform = transform;
 }
 
-function renderText(frameHeight: number): void {
+function renderText(frameHeight: number, opacity: number): void {
   const text = edit.effects.settings.text;
 
   Object.assign(textLayer.style, {
@@ -190,7 +196,7 @@ function renderText(frameHeight: number): void {
   Object.assign(textSpan.style, {
     fontFamily: TEXT_FONT,
     fontSize: `${frameHeight * text.size}px`,
-    color: rgba(text.color, text.opacity),
+    color: rgba(text.color, opacity),
     background: text.boxed ? 'rgba(0, 0, 0, 0.45)' : 'transparent',
     padding: text.boxed ? `${frameHeight * TEXT_PAD}px` : '0',
   });

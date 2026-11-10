@@ -26,8 +26,9 @@ async function load(name, links = {}) {
 
 async function modules() {
   const redact = await load('redact');
-  const effects = await load('effects', { './redact': { ...redact } });
-  return { redact, fx: effects };
+  const valuekeys = await load('valuekeys');
+  const effects = await load('effects', { './redact': { ...redact }, './valuekeys': { ...valuekeys } });
+  return { redact, valuekeys, fx: effects };
 }
 
 const plain = (value) => JSON.parse(JSON.stringify(value));
@@ -155,4 +156,78 @@ test('the preview rebuilds every pixel an earlier redaction reads', async () => 
   // A redaction elsewhere in the frame changes nothing.
   const away = { item: item({ mode: 'blur', strength: 10 }), region: { x: 0.9, y: 0.9, w: 0.1, h: 0.1 } };
   assert.deepEqual(plain(redact.sourceBounds(target, [away], 1000, 1000)), target);
+});
+
+test('a keyframed dial moves between keyframes and switches off at a keyframe', async () => {
+  const { fx } = await modules();
+  let state = fx.withSwitch(fx.defaultEffects(), 'brightness', true);
+  // Without keyframes the slider changes the dial for the whole clip.
+  state = fx.withDial(state, 'brightness', 3, { v: 1.5 }, 0.02);
+  assert.equal(state.settings.brightness.amount, 1.5);
+  assert.equal(state.settings.brightness.keys.length, 0);
+
+  state = fx.withEffectKeyToggled(state, 'brightness', 1, 0.02);
+  state = fx.withDial(state, 'brightness', 3, { v: 0.5 }, 0.02);
+  state = fx.withDial(state, 'brightness', 4, { on: false }, 0.02);
+  assert.deepEqual(plain(state.settings.brightness.keys.map((k) => [k.t, k.v, k.on])), [
+    [1, 1.5, true],
+    [3, 0.5, true],
+    [4, 0.5, false],
+  ]);
+  assert.ok(Math.abs(fx.dialAt(state, 'brightness', 2).v - 1) < 1e-9);
+  assert.equal(fx.activeAt(state, 'brightness', 3.5), true);
+  assert.equal(fx.activeAt(state, 'brightness', 4.5), false);
+  assert.equal(fx.cssFilterFor(state, 1, 2), 'brightness(1)');
+  assert.equal(fx.cssFilterFor(state, 1, 5), 'none');
+  assert.equal(fx.effectSummary(state, 'brightness'), '3 keyframes');
+});
+
+test('the export gets each dial keyframes, and the first keyframe as the dial', async () => {
+  const { fx } = await modules();
+  let state = fx.withSwitch(fx.defaultEffects(), 'blur', true);
+  state = fx.withEffectKeyToggled(state, 'blur', 2, 0.02);
+  state = fx.withDial(state, 'blur', 4, { v: 20 }, 0.02);
+  state = fx.withDial(state, 'blur', 2, { v: 3 }, 0.02);
+  const job = fx.toEffectsJob(state, false);
+  assert.equal(job.blur, 3);
+  assert.deepEqual(plain(job.keys.blur), [
+    { t: 2, v: 3, on: true },
+    { t: 4, v: 20, on: true },
+  ]);
+  assert.deepEqual(plain(job.keys.brightness), []);
+  // Keyframes that never switch it on send nothing.
+  const off = fx.withSetting(state, 'blur', { keys: [{ t: 0, v: 3, on: false }] });
+  assert.equal(fx.toEffectsJob(off, false).blur, null);
+  assert.deepEqual(plain(fx.toEffectsJob(off, false).keys.blur), []);
+});
+
+test('text keyframes animate the opacity the export gets, and not the overlay fields', async () => {
+  const { fx } = await modules();
+  let state = fx.withSwitch(fx.defaultEffects(), 'text', true);
+  state = fx.withSetting(state, 'text', { keys: [{ t: 1, v: 0.3, on: true }, { t: 2, v: 1, on: true }] });
+  const job = fx.toEffectsJob(state, false);
+  assert.equal(job.text.opacity, 0.3);
+  assert.equal('keys' in job.text, false);
+  assert.equal(job.keys.text.length, 2);
+});
+
+test('removing the last keyframe leaves the dial where that keyframe had it', async () => {
+  const { fx } = await modules();
+  let state = fx.withSwitch(fx.defaultEffects(), 'hue', true);
+  state = fx.withSetting(state, 'hue', { keys: [{ t: 1, v: -90, on: true }] });
+  state = fx.withoutEffectKey(state, 'hue', 0);
+  assert.equal(state.settings.hue.keys.length, 0);
+  assert.equal(state.settings.hue.degrees, -90);
+});
+
+test('a dial keyframe dragged past its neighbour keeps its place', async () => {
+  const { valuekeys } = await modules();
+  const keys = [
+    { t: 1, v: 1, on: true },
+    { t: 2, v: 2, on: true },
+  ];
+  const moved = valuekeys.withValueKeyMoved(keys, 0, 3);
+  assert.deepEqual(plain(moved.keys.map((k) => k.t)), [2, 3]);
+  assert.equal(moved.index, 1);
+  assert.deepEqual(plain(valuekeys.onSpans([{ t: 1, on: false }, { t: 2, on: true }], 5)), [[2, 5]]);
 });

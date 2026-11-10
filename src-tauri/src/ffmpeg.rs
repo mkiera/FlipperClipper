@@ -160,6 +160,30 @@ pub struct Redact {
     pub keys: Vec<RedactKey>,
 }
 
+/// One keyframe of an effect dial, at a moment on the source timeline.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct ValueKey {
+    pub t: f64,
+    /// The dial's value, in the same units as the effect's own field. For text, the opacity.
+    pub v: f64,
+    /// On from this keyframe until the next.
+    pub on: bool,
+}
+
+/// Each dial's keyframes. Empty is the dial alone for the whole clip. The value moves in a
+/// straight line between keyframes and on/off switches at each one.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct EffectKeys {
+    pub brightness: Vec<ValueKey>,
+    pub contrast: Vec<ValueKey>,
+    pub saturation: Vec<ValueKey>,
+    pub hue: Vec<ValueKey>,
+    pub blur: Vec<ValueKey>,
+    pub vignette: Vec<ValueKey>,
+    pub text: Vec<ValueKey>,
+}
+
 /// The quick-effects tab, resolved: None is off. Container-level `default` so a job built
 /// before this existed - or by anything that leaves the block out - deserialises to no effects
 /// rather than failing.
@@ -181,6 +205,7 @@ pub struct Effects {
     pub fade_out: Option<f64>,
     pub text: Option<TextOverlay>,
     pub redact: Vec<Redact>,
+    pub keys: EffectKeys,
 }
 
 impl Effects {
@@ -546,54 +571,314 @@ const TEXT_PLATE_COLOR: &str = "black@0.45";
 /// filename resolved from the cwd sidesteps the escaping rules entirely.
 pub const OVERLAY_TEXT_FILE: &str = "flipperclipper-overlay.txt";
 
+/// A keyframed dial: the filter instance it lives in and the options a command sets.
+struct KeyedDial<'a> {
+    keys: &'a [ValueKey],
+    target: &'static str,
+    options: &'static [&'static str],
+}
+
+/// The dials that move by command, each switched on and keyframed. The vignette is not here:
+/// its filter takes no commands, so it gets an expression instead.
+fn keyed_dials(fx: &Effects) -> Vec<KeyedDial<'_>> {
+    let mut dials = Vec::new();
+    for (value, keys, target, options) in [
+        (fx.brightness, &fx.keys.brightness, "colorchannelmixer@fcxb", &["rr", "gg", "bb"][..]),
+        (fx.contrast, &fx.keys.contrast, "eq@fcxc", &["contrast"][..]),
+        (fx.saturation, &fx.keys.saturation, "eq@fcxs", &["saturation"][..]),
+        (fx.hue, &fx.keys.hue, "hue@fcxh", &["h"][..]),
+        (fx.blur, &fx.keys.blur, "gblur@fcxg", &["sigma"][..]),
+    ] {
+        if value.is_some() && !keys.is_empty() {
+            dials.push(KeyedDial { keys, target, options });
+        }
+    }
+    dials
+}
+
+/// Whether any picture dial is keyframed. Then the effects run on the source clock, ahead of
+/// the speed change, like the redactions: their keyframes are on the source timeline.
+fn effects_keyed(fx: &Effects) -> bool {
+    !keyed_dials(fx).is_empty() || (fx.vignette.is_some() && !fx.keys.vignette.is_empty())
+}
+
+/// The value and on/off at source time `t`. Before the first keyframe and after the last, the
+/// nearest one holds.
+fn value_at(keys: &[ValueKey], t: f64) -> (f64, bool) {
+    let (Some(first), Some(last)) = (keys.first(), keys.last()) else {
+        return (0.0, false);
+    };
+    if t <= first.t {
+        return (first.v, first.on);
+    }
+    if t >= last.t {
+        return (last.v, last.on);
+    }
+    let i = keys.windows(2).position(|w| w[1].t > t).unwrap_or(0);
+    let (a, b) = (keys[i], keys[i + 1]);
+    let f = if b.t > a.t { (t - a.t) / (b.t - a.t) } else { 0.0 };
+    (a.v + (b.v - a.v) * f, a.on)
+}
+
+fn sorted_values(keys: &[ValueKey]) -> Vec<ValueKey> {
+    let mut keys = keys.to_vec();
+    keys.sort_by(|a, b| a.t.total_cmp(&b.t));
+    keys
+}
+
+/// The stretches of a `duration`-long stream where keyframes at these (time, on) pairs have
+/// the effect on. Times are on the stream's clock already; on/off is a step at each one.
+fn on_spans(keys: &[(f64, bool)], duration: f64) -> Vec<(f64, f64)> {
+    let mut spans: Vec<(f64, f64)> = Vec::new();
+    if keys.is_empty() {
+        return spans;
+    }
+    let mut edges: Vec<f64> = vec![0.0];
+    edges.extend(keys.iter().map(|k| k.0.clamp(0.0, duration)));
+    edges.push(duration);
+    for i in 0..edges.len() - 1 {
+        let on = keys[i.saturating_sub(1)].1;
+        let (from, to) = (edges[i], edges[i + 1]);
+        if on && to > from {
+            match spans.last_mut() {
+                Some(last) if (last.1 - from).abs() < 1e-9 => last.1 = to,
+                _ => spans.push((from, to)),
+            }
+        }
+    }
+    spans
+}
+
+/// The `enable` expression for those stretches, or None when they cover the whole stream.
+fn enable_expr(spans: &[(f64, f64)], duration: f64) -> Option<String> {
+    let always = spans.len() == 1 && spans[0].0 <= 0.0 && spans[0].1 >= duration;
+    (!always).then(|| {
+        spans
+            .iter()
+            .map(|&(from, to)| match (from <= 0.0, to >= duration) {
+                (true, _) => format!("lt(t,{})", fmt_num(to)),
+                (_, true) => format!("gte(t,{})", fmt_num(from)),
+                _ => format!("gte(t,{})*lt(t,{})", fmt_num(from), fmt_num(to)),
+            })
+            .collect::<Vec<_>>()
+            .join("+")
+    })
+}
+
+fn enable_option(enable: &Option<String>) -> String {
+    enable.as_ref().map(|e| format!(":enable='{e}'")).unwrap_or_default()
+}
+
+/// The source frames of the trim: they sit on the k/fps grid from the file's start, and a trim
+/// can begin between two of them.
+fn source_frames(job: &ExportJob, fps: f64) -> (f64, i64, i64) {
+    let fps = if fps.is_finite() && fps > 0.0 { fps } else { 30.0 };
+    let first = (job.in_point * fps - 1e-6).ceil() as i64;
+    let last = (job.out_point * fps).ceil() as i64;
+    (fps, first, last)
+}
+
+/// When a command for source frame `k` goes out, on the stream's clock: half a frame early,
+/// so it never lands just after the frame it belongs to.
+fn command_time(job: &ExportJob, k: i64, fps: f64) -> f64 {
+    ((k as f64 - 0.5) / fps - job.in_point).max(0.0)
+}
+
+/// A keyframed dial resolved against the trim.
+struct DialPlan {
+    /// The value at the first exported frame.
+    start: f64,
+    /// When it acts, on the stream's clock. None is always.
+    enable: Option<String>,
+    /// (stream time, value) whenever the value changes after the first frame.
+    changes: Vec<(f64, String)>,
+}
+
+/// None when the keyframes never switch the effect on inside the trim.
+fn dial_plan(job: &ExportJob, keys: &[ValueKey], fps: f64) -> Option<DialPlan> {
+    let keys = sorted_values(keys);
+    let duration = source_duration(job);
+    let pairs: Vec<(f64, bool)> = keys.iter().map(|k| (k.t - job.in_point, k.on)).collect();
+    let spans = on_spans(&pairs, duration);
+    if spans.is_empty() {
+        return None;
+    }
+    let (fps, first, last) = source_frames(job, fps);
+    let start = value_at(&keys, first as f64 / fps).0;
+    let mut changes = Vec::new();
+    if keys.windows(2).any(|w| w[0].v != w[1].v) {
+        let mut previous = fmt_num(start);
+        for k in first + 1..last {
+            let value = fmt_num(value_at(&keys, k as f64 / fps).0);
+            if value != previous {
+                changes.push((command_time(job, k, fps), value.clone()));
+                previous = value;
+            }
+        }
+    }
+    Some(DialPlan { start, enable: enable_expr(&spans, duration), changes })
+}
+
+/// A value that moves in straight lines through (time, value) points and holds past both ends,
+/// as an ffmpeg expression in `t`.
+fn lerp_expr(points: &[(f64, f64)]) -> String {
+    let Some(&(_, end)) = points.last() else {
+        return "0".to_string();
+    };
+    let mut expr = fmt_num(end);
+    for i in (0..points.len().saturating_sub(1)).rev() {
+        let ((t0, v0), (t1, v1)) = (points[i], points[i + 1]);
+        let piece = if t1 > t0 && v1 != v0 {
+            format!(
+                "{}+({})*(t-({}))/{}",
+                fmt_num(v0),
+                fmt_num(v1 - v0),
+                fmt_num(t0),
+                fmt_num(t1 - t0)
+            )
+        } else {
+            fmt_num(v0)
+        };
+        expr = format!("if(lt(t,{}),{piece},{expr})", fmt_num(t1));
+    }
+    expr
+}
+
+/// The keyframes as (stream time, value) points across the trim: the value at each edge, and
+/// every keyframe between. `clock` maps a source time inside the trim onto the stream.
+fn trim_points(job: &ExportJob, keys: &[ValueKey], clock: impl Fn(f64) -> f64) -> Vec<(f64, f64)> {
+    let keys = sorted_values(keys);
+    let mut points = vec![(clock(job.in_point), value_at(&keys, job.in_point).0)];
+    for k in keys.iter().filter(|k| k.t > job.in_point && k.t < job.out_point) {
+        points.push((clock(k.t), k.v));
+    }
+    points.push((clock(job.out_point), value_at(&keys, job.out_point).0));
+    points
+}
+
 /// Everything that repaints the pixels, in the order the preview's CSS filter applies the same
 /// list. drawtext is not here: it goes in after the scale, so the text is rasterised at the
 /// size it will be read at instead of being downsampled with the frame.
-fn effect_filters(fx: &Effects) -> Vec<String> {
+///
+/// A keyframed dial gets a named instance that the sendcmd script moves, and an `enable` for
+/// its off stretches. These run on the source clock, so build_args puts them ahead of the
+/// speed change when any dial is keyframed.
+fn effect_filters(job: &ExportJob, fps: f64) -> Vec<String> {
+    let fx = &job.effects;
     let mut parts: Vec<String> = Vec::new();
+    let keyed = |value: Option<f64>, keys: &[ValueKey]| value.is_some() && !keys.is_empty();
 
     // A multiply across RGB, which is what CSS brightness() does, so the preview and the file
     // agree. `eq`'s own brightness is an addition and would not. The cost is that ffmpeg
     // inserts a conversion either side of it - paid only when the dial is switched on.
     if let Some(k) = fx.brightness {
-        parts.push(format!(
-            "colorchannelmixer=rr={0}:gg={0}:bb={0}",
-            fmt_num(k)
-        ));
+        if !keyed(fx.brightness, &fx.keys.brightness) {
+            parts.push(format!("colorchannelmixer=rr={0}:gg={0}:bb={0}", fmt_num(k)));
+        } else if let Some(plan) = dial_plan(job, &fx.keys.brightness, fps) {
+            parts.push(format!(
+                "colorchannelmixer@fcxb=rr={0}:gg={0}:bb={0}{1}",
+                fmt_num(plan.start),
+                enable_option(&plan.enable)
+            ));
+        }
     }
 
-    // Two dials, one filter, one pass.
-    let mut eq: Vec<String> = Vec::new();
-    if let Some(c) = fx.contrast {
-        eq.push(format!("contrast={}", fmt_num(c)));
-    }
-    if let Some(sat) = fx.saturation {
-        eq.push(format!("saturation={}", fmt_num(sat)));
-    }
-    if !eq.is_empty() {
-        parts.push(format!("eq={}", eq.join(":")));
+    // Two dials, one filter, one pass - unless either is keyframed, when each needs its own
+    // on/off.
+    if !keyed(fx.contrast, &fx.keys.contrast) && !keyed(fx.saturation, &fx.keys.saturation) {
+        let mut eq: Vec<String> = Vec::new();
+        if let Some(c) = fx.contrast {
+            eq.push(format!("contrast={}", fmt_num(c)));
+        }
+        if let Some(sat) = fx.saturation {
+            eq.push(format!("saturation={}", fmt_num(sat)));
+        }
+        if !eq.is_empty() {
+            parts.push(format!("eq={}", eq.join(":")));
+        }
+    } else {
+        for (value, keys, name, option) in [
+            (fx.contrast, &fx.keys.contrast, "eq@fcxc", "contrast"),
+            (fx.saturation, &fx.keys.saturation, "eq@fcxs", "saturation"),
+        ] {
+            let Some(v) = value else { continue };
+            if keys.is_empty() {
+                parts.push(format!("eq={option}={}", fmt_num(v)));
+            } else if let Some(plan) = dial_plan(job, keys, fps) {
+                parts.push(format!(
+                    "{name}={option}={}{}",
+                    fmt_num(plan.start),
+                    enable_option(&plan.enable)
+                ));
+            }
+        }
     }
 
     if let Some(degrees) = fx.hue {
-        parts.push(format!("hue=h={}", fmt_num(degrees)));
+        if !keyed(fx.hue, &fx.keys.hue) {
+            parts.push(format!("hue=h={}", fmt_num(degrees)));
+        } else if let Some(plan) = dial_plan(job, &fx.keys.hue, fps) {
+            parts.push(format!("hue@fcxh=h={}{}", fmt_num(plan.start), enable_option(&plan.enable)));
+        }
     }
     if let Some(sigma) = fx.blur {
-        parts.push(format!("gblur=sigma={}", fmt_num(sigma)));
+        if !keyed(fx.blur, &fx.keys.blur) {
+            parts.push(format!("gblur=sigma={}", fmt_num(sigma)));
+        } else if let Some(plan) = dial_plan(job, &fx.keys.blur, fps) {
+            parts.push(format!(
+                "gblur@fcxg=sigma={}{}",
+                fmt_num(plan.start),
+                enable_option(&plan.enable)
+            ));
+        }
     }
     if let Some(strength) = fx.vignette {
-        parts.push(format!(
-            "vignette=angle={}",
-            fmt_num(strength * VIGNETTE_MAX_ANGLE)
-        ));
+        if !keyed(fx.vignette, &fx.keys.vignette) {
+            parts.push(format!(
+                "vignette=angle={}",
+                fmt_num(strength * VIGNETTE_MAX_ANGLE)
+            ));
+        } else if let Some(plan) = dial_plan(job, &fx.keys.vignette, fps) {
+            // vignette takes no commands, so its angle is an expression it works out per frame.
+            let points: Vec<(f64, f64)> =
+                trim_points(job, &fx.keys.vignette, |t| t - job.in_point)
+                    .into_iter()
+                    .map(|(t, v)| (t, v * VIGNETTE_MAX_ANGLE))
+                    .collect();
+            let angle = if plan.changes.is_empty() {
+                fmt_num(plan.start * VIGNETTE_MAX_ANGLE)
+            } else {
+                format!("'{}':eval=frame", lerp_expr(&points))
+            };
+            parts.push(format!("vignette=angle={angle}{}", enable_option(&plan.enable)));
+        }
     }
     parts
 }
 
-/// The file sendcmd reads a moving redaction's per-frame positions from, relative to ffmpeg's
-/// working directory - the same arrangement, and the same folder, as OVERLAY_TEXT_FILE.
-/// drawbox's own x/y/w/h expressions are evaluated once, not per frame, in the FFmpeg 6 builds
-/// still in use, so the positions are sent as commands instead.
-pub const REDACT_COMMANDS_FILE: &str = "flipperclipper-redact.cmd";
+/// The sendcmd lines for the keyframed dials, on the stream's clock.
+fn dial_commands(job: &ExportJob, fps: f64) -> Vec<(f64, String)> {
+    let mut lines = Vec::new();
+    for dial in keyed_dials(&job.effects) {
+        let Some(plan) = dial_plan(job, dial.keys, fps) else { continue };
+        for (at, value) in plan.changes {
+            let command = dial
+                .options
+                .iter()
+                .map(|option| format!("{} {option} {value}", dial.target))
+                .collect::<Vec<_>>()
+                .join(", ");
+            lines.push((at, command));
+        }
+    }
+    lines
+}
+
+/// The file sendcmd reads the keyframes' per-frame changes from (a moving redaction's box, a
+/// keyframed dial's value), relative to ffmpeg's working directory - the same arrangement, and
+/// the same folder, as OVERLAY_TEXT_FILE. drawbox's own x/y/w/h expressions are evaluated
+/// once, not per frame, in the FFmpeg 6 builds still in use, so they are sent as commands.
+pub const COMMANDS_FILE: &str = "flipperclipper-commands.cmd";
 
 /// A rectangle in fractions to whole pixels of a `width` x `height` frame, rounded outward so
 /// no selected pixel is left showing.
@@ -652,11 +937,8 @@ struct RedactPlan {
 /// the crop; the stream's clock starts at the in point because the input is seeked with -ss.
 fn redact_plans(job: &ExportJob, width: i64, height: i64, fps: f64) -> Vec<RedactPlan> {
     let duration = source_duration(job);
-    let fps = if fps.is_finite() && fps > 0.0 { fps } else { 30.0 };
-    // Source frames sit on the k/fps grid from the file's start, and a trim can begin between
-    // two of them, so positions are worked out per source frame rather than from the in point.
-    let first_frame = (job.in_point * fps - 1e-6).ceil() as i64;
-    let last_frame = (job.out_point * fps).ceil() as i64;
+    // Positions are worked out per source frame rather than from the in point.
+    let (fps, first_frame, last_frame) = source_frames(job, fps);
     let mut plans = Vec::new();
 
     for redact in &job.effects.redact {
@@ -666,35 +948,12 @@ fn redact_plans(job: &ExportJob, width: i64, height: i64, fps: f64) -> Vec<Redac
         }
 
         // Visibility is a step at each keyframe: the stretches where it is on, in stream time.
-        let mut spans: Vec<(f64, f64)> = Vec::new();
-        let mut edges: Vec<f64> = vec![0.0];
-        edges.extend(keys.iter().map(|k| (k.t - job.in_point).clamp(0.0, duration)));
-        edges.push(duration);
-        for i in 0..edges.len() - 1 {
-            let on = keys[i.saturating_sub(1)].on;
-            let (from, to) = (edges[i], edges[i + 1]);
-            if on && to > from {
-                match spans.last_mut() {
-                    Some(last) if (last.1 - from).abs() < 1e-9 => last.1 = to,
-                    _ => spans.push((from, to)),
-                }
-            }
-        }
+        let pairs: Vec<(f64, bool)> = keys.iter().map(|k| (k.t - job.in_point, k.on)).collect();
+        let spans = on_spans(&pairs, duration);
         if spans.is_empty() {
             continue;
         }
-        let always = spans.len() == 1 && spans[0].0 <= 0.0 && spans[0].1 >= duration;
-        let enable = (!always).then(|| {
-            spans
-                .iter()
-                .map(|&(from, to)| match (from <= 0.0, to >= duration) {
-                    (true, _) => format!("lt(t,{})", fmt_num(to)),
-                    (_, true) => format!("gte(t,{})", fmt_num(from)),
-                    _ => format!("gte(t,{})*lt(t,{})", fmt_num(from), fmt_num(to)),
-                })
-                .collect::<Vec<_>>()
-                .join("+")
-        });
+        let enable = enable_expr(&spans, duration);
 
         let rect_at = |k: i64| {
             let (x, y, w, h, _) = redact_state(&keys, k as f64 / fps);
@@ -710,10 +969,7 @@ fn redact_plans(job: &ExportJob, width: i64, height: i64, fps: f64) -> Vec<Redac
             for k in first_frame + 1..last_frame {
                 let rect = rect_at(k);
                 if rect != previous {
-                    // Half a frame early, on the stream's clock, so a command never lands
-                    // just after the frame it belongs to.
-                    let at = ((k as f64) - 0.5) / fps - job.in_point;
-                    moves.push((at.max(0.0), rect));
+                    moves.push((command_time(job, k, fps), rect));
                     previous = rect;
                 }
             }
@@ -723,14 +979,9 @@ fn redact_plans(job: &ExportJob, width: i64, height: i64, fps: f64) -> Vec<Redac
     plans
 }
 
-/// The sendcmd script for the moving redactions, or None when nothing moves. export.rs writes
-/// it to REDACT_COMMANDS_FILE; build_args emits the sendcmd that reads it from the same plans.
-pub fn redact_commands(job: &ExportJob, width: i64, height: i64, fps: f64) -> Option<String> {
-    if job.lossless || job.format.is_audio() {
-        return None;
-    }
-    let (width, height) = turned_size(job, width, height);
-    let (width, height) = cropped_size(job, width, height);
+/// Every per-frame change on the source clock: the moving redactions' boxes and the keyframed
+/// dials' values. `width` x `height` is the frame after the crop.
+fn command_lines(job: &ExportJob, width: i64, height: i64, fps: f64) -> Vec<(f64, String)> {
     let mut lines: Vec<(f64, String)> = Vec::new();
     for (i, plan) in redact_plans(job, width, height, fps).iter().enumerate() {
         for (at, r) in &plan.moves {
@@ -743,16 +994,62 @@ pub fn redact_commands(job: &ExportJob, width: i64, height: i64, fps: f64) -> Op
             ));
         }
     }
+    if effects_keyed(&job.effects) {
+        lines.extend(dial_commands(job, fps));
+    }
+    lines
+}
+
+/// The sendcmd script, or None when nothing changes per frame. export.rs writes it to
+/// COMMANDS_FILE, and build_args emits the sendcmd that reads it from the same plans. Commands
+/// due at the same moment share one line.
+pub fn filter_commands(job: &ExportJob, width: i64, height: i64, fps: f64) -> Option<String> {
+    if job.lossless || job.format.is_audio() {
+        return None;
+    }
+    let (width, height) = turned_size(job, width, height);
+    let (width, height) = cropped_size(job, width, height);
+    let mut lines = command_lines(job, width, height, fps);
     if lines.is_empty() {
         return None;
     }
     lines.sort_by(|a, b| a.0.total_cmp(&b.0));
-    Some(
-        lines
-            .into_iter()
-            .map(|(at, cmd)| format!("{:.4} {cmd};\n", at.max(0.0)))
-            .collect(),
-    )
+    let mut merged: Vec<(String, String)> = Vec::new();
+    for (at, command) in lines {
+        let at = format!("{:.4}", at.max(0.0));
+        match merged.last_mut() {
+            Some(last) if last.0 == at => {
+                last.1.push_str(", ");
+                last.1.push_str(&command);
+            }
+            _ => merged.push((at, command)),
+        }
+    }
+    Some(merged.into_iter().map(|(at, command)| format!("{at} {command};\n")).collect())
+}
+
+/// The filters that run on the source clock, after the crop and before anything retimes the
+/// stream: the sendcmd that drives the keyframes, the redactions, and the effects when a dial
+/// is keyframed. `width` x `height` is the frame after the crop.
+fn source_clock_filters(job: &ExportJob, width: i64, height: i64, fps: f64) -> Vec<String> {
+    let mut parts = Vec::new();
+    if !command_lines(job, width, height, fps).is_empty() {
+        parts.push(format!("sendcmd=f={COMMANDS_FILE}"));
+    }
+    parts.extend(redact_filters(job, width, height, fps));
+    if effects_keyed(&job.effects) {
+        parts.extend(effect_filters(job, fps));
+    }
+    parts
+}
+
+/// The effects when no dial is keyframed: after the speed change, so a sped-up clip grades
+/// only the frames it keeps.
+fn retimed_effect_filters(job: &ExportJob, fps: f64) -> Vec<String> {
+    if effects_keyed(&job.effects) {
+        return Vec::new();
+    }
+    effect_filters(job, fps)
 }
 
 /// The mask is cut with extractplanes rather than format=gray: split hands every branch the
@@ -768,16 +1065,9 @@ fn redact_filters(job: &ExportJob, width: i64, height: i64, fps: f64) -> Option<
         return None;
     }
     let mut parts: Vec<String> = Vec::new();
-    if plans.iter().any(|p| !p.moves.is_empty()) {
-        parts.push(format!("sendcmd=f={REDACT_COMMANDS_FILE}"));
-    }
     for (i, plan) in plans.iter().enumerate() {
         let r = plan.start;
-        let enable = plan
-            .enable
-            .as_ref()
-            .map(|e| format!(":enable='{e}'"))
-            .unwrap_or_default();
+        let enable = enable_option(&plan.enable);
         let place = format!("drawbox@fcr{i}=x={}:y={}:w={}:h={}", r.x, r.y, r.w, r.h);
         let changed = match plan.mode {
             RedactMode::Box => {
@@ -870,6 +1160,58 @@ fn drawtext_filter(overlay: &TextOverlay, font: &Path) -> String {
         parts.push(format!("boxborderw={}", TEXT_PLATE_BORDER));
     }
     format!("drawtext={}", parts.join(":"))
+}
+
+/// Where source time `t` lands on the finished clip, before any reverse. drawtext runs after
+/// the speed change, so the text's keyframes are moved onto that clock.
+fn output_time(job: &ExportJob, t: f64) -> f64 {
+    let t = t.clamp(job.in_point, job.out_point);
+    if ramp::has_ramp(&job.ramp) {
+        return ramp::ramped_duration(&job.ramp, job.speed, job.in_point, t);
+    }
+    if job.speed > 0.0 {
+        (t - job.in_point) / job.speed
+    } else {
+        t - job.in_point
+    }
+}
+
+/// The text overlay, with its keyframes when it has any. On/off becomes an `enable`. A moving
+/// opacity becomes drawtext's `alpha`, which would fade the plate as well, so the plate is
+/// drawn by a pass of its own and keeps its fixed shade. Between keyframes the opacity moves
+/// in a straight line on the finished clip's clock, which under a speed curve bends a little
+/// from the preview's straight line on the source clock.
+fn drawtext_filters(job: &ExportJob, overlay: &TextOverlay, font: &Path) -> Vec<String> {
+    let keys = &job.effects.keys.text;
+    if keys.is_empty() {
+        return vec![drawtext_filter(overlay, font)];
+    }
+    let keys = sorted_values(keys);
+    let total = output_duration(job);
+    let pairs: Vec<(f64, bool)> = keys.iter().map(|k| (output_time(job, k.t), k.on)).collect();
+    // A keyframe at or before the in point rules from the start, wherever it sits.
+    let spans = on_spans(&pairs, total);
+    if spans.is_empty() {
+        return Vec::new();
+    }
+    let enable = enable_option(&enable_expr(&spans, total));
+    let points = trim_points(job, &keys, |t| output_time(job, t));
+    if points.windows(2).all(|w| w[0].1 == w[1].1) {
+        let steady = TextOverlay { opacity: points[0].1, ..overlay.clone() };
+        return vec![format!("{}{enable}", drawtext_filter(&steady, font))];
+    }
+    let mut parts = Vec::new();
+    if overlay.boxed {
+        let plate = TextOverlay { opacity: 0.0, ..overlay.clone() };
+        parts.push(format!("{}{enable}", drawtext_filter(&plate, font)));
+    }
+    let words = TextOverlay { opacity: 1.0, boxed: false, ..overlay.clone() };
+    parts.push(format!(
+        "{}:alpha='{}'{enable}",
+        drawtext_filter(&words, font),
+        lerp_expr(&points)
+    ));
+    parts
 }
 
 /// A path for a filtergraph: quoted, forward slashes, drive colon escaped. Measured against
@@ -1356,13 +1698,13 @@ pub fn build_args(
             chain.push(format!("crop={}:{}:{}:{}", r.w, r.h, r.x, r.y));
         }
         let (cut_width, cut_height) = cropped_size(job, width, height);
-        chain.extend(redact_filters(job, cut_width, cut_height, fps));
+        chain.extend(source_clock_filters(job, cut_width, cut_height, fps));
         chain.extend(retime_filters(job, fps));
         // The gif branch owns its own scale, so the effects and the text both go in ahead of
         // it - the same relative order as the video branch, minus the split.
-        chain.extend(effect_filters(&job.effects));
+        chain.extend(retimed_effect_filters(job, fps));
         if let (Some(overlay), Some(font)) = (job.effects.text.as_ref(), font) {
-            chain.push(drawtext_filter(overlay, font));
+            chain.extend(drawtext_filters(job, overlay, font));
         }
         if job.reverse {
             chain.push("reverse".to_string());
@@ -1425,18 +1767,18 @@ pub fn build_args(
     }
     // After the crop, so the boxes are measured in the frame the user drew them on, and before
     // anything retimes the stream, so their keyframes run on the source clock.
-    vfilters.extend(redact_filters(job, effective_width, effective_height, fps));
+    vfilters.extend(source_clock_filters(job, effective_width, effective_height, fps));
     vfilters.extend(retime_filters(job, fps));
     // Ahead of the scale, so a sigma given in source pixels means the same thing whatever
     // size the clip is exported at - which is what the preview shows.
-    vfilters.extend(effect_filters(&job.effects));
+    vfilters.extend(retimed_effect_filters(job, fps));
     if let Some(filter) = scale_filter {
         vfilters.push(filter);
     }
     // After the scale, so the letters are rasterised at the size they will be read at rather
     // than drawn large and then thrown away.
     if let (Some(overlay), Some(font)) = (job.effects.text.as_ref(), font) {
-        vfilters.push(drawtext_filter(overlay, font));
+        vfilters.extend(drawtext_filters(job, overlay, font));
     }
     if job.reverse {
         // Last of the frame-shaping filters on purpose: reverse holds every frame it will emit
@@ -2288,7 +2630,7 @@ mod tests {
         j.effects.redact = vec![still(RedactMode::Box, 0.1, 0.1, 0.2, 0.2)];
         let chain = vf(&build_args(&j, "libx264", true, 1920, 1080, 30.0, None));
         assert_eq!(chain, "drawbox@fcr0=x=192:y=108:w=384:h=216:color=black:t=fill");
-        assert_eq!(redact_commands(&j, 1920, 1080, 30.0), None);
+        assert_eq!(filter_commands(&j, 1920, 1080, 30.0), None);
     }
 
     #[test]
@@ -2378,10 +2720,10 @@ mod tests {
             vec![key(0.0, 0.0, 0.0, 0.1, 0.1, true), key(1.0, 0.5, 0.0, 0.1, 0.1, true)],
         )];
         let chain = vf(&build_args(&j, "libx264", true, 1000, 1000, 10.0, None));
-        assert!(chain.starts_with(&format!("sendcmd=f={REDACT_COMMANDS_FILE},split=3")), "{chain}");
+        assert!(chain.starts_with(&format!("sendcmd=f={COMMANDS_FILE},split=3")), "{chain}");
         assert!(chain.contains("drawbox@fcr0=x=0:y=0:w=100:h=100:color=white"), "{chain}");
 
-        let commands = redact_commands(&j, 1000, 1000, 10.0).expect("no commands");
+        let commands = filter_commands(&j, 1000, 1000, 10.0).expect("no commands");
         let lines: Vec<&str> = commands.lines().collect();
         // Ten frames at 10 fps: frames 1 to 9 each move the box 50 px right.
         assert_eq!(lines.len(), 9, "{commands}");
@@ -2406,9 +2748,133 @@ mod tests {
         )];
         let chain = vf(&build_args(&j, "libx264", true, 1000, 1000, 10.0, None));
         assert!(chain.contains("drawbox@fcr0=x=50:y=0:w=100:h=100"), "{chain}");
-        let commands = redact_commands(&j, 1000, 1000, 10.0).expect("no commands");
+        let commands = filter_commands(&j, 1000, 1000, 10.0).expect("no commands");
         let first = commands.lines().next().unwrap();
         assert!(first.starts_with("0.1300 drawbox@fcr0 x 100,"), "{commands}");
+    }
+
+    fn vk(t: f64, v: f64, on: bool) -> ValueKey {
+        ValueKey { t, v, on }
+    }
+
+    #[test]
+    fn a_keyframed_dial_runs_on_the_source_clock_and_moves_by_command() {
+        let mut j = job(QualityPreset::Balanced);
+        j.in_point = 0.0;
+        j.out_point = 1.0;
+        j.speed = 2.0;
+        j.effects.brightness = Some(1.0);
+        j.effects.keys.brightness = vec![vk(0.0, 1.0, true), vk(1.0, 2.0, true)];
+        j.effects.vignette = Some(0.5);
+        let chain = vf(&build_args(&j, "libx264", true, 1000, 1000, 10.0, None));
+        let mixer = chain.find("colorchannelmixer@fcxb=rr=1.0:gg=1.0:bb=1.0").expect("no keyed mixer");
+        assert!(chain.starts_with(&format!("sendcmd=f={COMMANDS_FILE}")), "{chain}");
+        // Ahead of the speed change, with the static vignette, so the keyframes are source time.
+        assert!(mixer < chain.find("setpts").unwrap(), "{chain}");
+        assert!(chain.find("vignette=angle").unwrap() < chain.find("setpts").unwrap(), "{chain}");
+        let commands = filter_commands(&j, 1000, 1000, 10.0).expect("no commands");
+        let first = commands.lines().next().unwrap();
+        assert_eq!(
+            first,
+            "0.0500 colorchannelmixer@fcxb rr 1.1, colorchannelmixer@fcxb gg 1.1, colorchannelmixer@fcxb bb 1.1;"
+        );
+    }
+
+    #[test]
+    fn unkeyed_effects_stay_after_the_speed_change() {
+        let mut j = job(QualityPreset::Balanced);
+        j.speed = 2.0;
+        j.effects.brightness = Some(1.2);
+        let chain = vf(&build_args(&j, "libx264", true, 1920, 1080, 30.0, None));
+        assert!(chain.find("setpts").unwrap() < chain.find("colorchannelmixer=rr=1.2").unwrap(), "{chain}");
+        assert!(!chain.contains("sendcmd"), "{chain}");
+    }
+
+    #[test]
+    fn a_dial_switched_off_by_a_keyframe_gets_an_enable_and_its_own_eq() {
+        let mut j = job(QualityPreset::Balanced);
+        j.in_point = 1.0;
+        j.out_point = 5.0;
+        j.effects.contrast = Some(1.5);
+        j.effects.saturation = Some(0.5);
+        j.effects.keys.contrast = vec![vk(2.0, 1.5, true), vk(4.0, 1.5, false)];
+        let chain = vf(&build_args(&j, "libx264", true, 1920, 1080, 30.0, None));
+        // On until source 4 s, which is stream 3 s. A flat dial sends no commands.
+        assert!(chain.contains("eq@fcxc=contrast=1.5:enable='lt(t,3.0)'"), "{chain}");
+        assert!(chain.contains("eq=saturation=0.5"), "{chain}");
+        assert!(!chain.contains("sendcmd"), "{chain}");
+        assert_eq!(filter_commands(&j, 1920, 1080, 30.0), None);
+    }
+
+    #[test]
+    fn keyframes_that_never_turn_a_dial_on_inside_the_trim_drop_it() {
+        let mut j = job(QualityPreset::Balanced);
+        j.in_point = 0.0;
+        j.out_point = 2.0;
+        j.effects.blur = Some(4.0);
+        j.effects.keys.blur = vec![vk(0.0, 4.0, false), vk(3.0, 4.0, true)];
+        let chain = vf(&build_args(&j, "libx264", true, 1920, 1080, 30.0, None));
+        assert!(!chain.contains("gblur"), "{chain}");
+    }
+
+    #[test]
+    fn a_keyframed_vignette_is_an_expression_in_stream_time() {
+        let mut j = job(QualityPreset::Balanced);
+        j.in_point = 1.0;
+        j.out_point = 3.0;
+        j.effects.vignette = Some(0.0);
+        j.effects.keys.vignette = vec![vk(1.0, 0.0, true), vk(3.0, 1.0, true)];
+        let chain = vf(&build_args(&j, "libx264", true, 1920, 1080, 30.0, None));
+        let max = fmt_num(VIGNETTE_MAX_ANGLE);
+        let expected = format!("vignette=angle='if(lt(t,2.0),0.0+({max})*(t-(0.0))/2.0,{max})':eval=frame");
+        assert!(chain.contains(&expected), "{chain}");
+    }
+
+    #[test]
+    fn commands_due_together_share_one_line() {
+        let mut j = job(QualityPreset::Balanced);
+        j.in_point = 0.0;
+        j.out_point = 1.0;
+        j.effects.hue = Some(0.0);
+        j.effects.keys.hue = vec![vk(0.0, 0.0, true), vk(1.0, 100.0, true)];
+        j.effects.blur = Some(1.0);
+        j.effects.keys.blur = vec![vk(0.0, 1.0, true), vk(1.0, 11.0, true)];
+        let commands = filter_commands(&j, 1000, 1000, 10.0).expect("no commands");
+        assert_eq!(commands.lines().next().unwrap(), "0.0500 hue@fcxh h 10.0, gblur@fcxg sigma 2.0;");
+        assert_eq!(commands.lines().count(), 9);
+    }
+
+    #[test]
+    fn text_keyframes_land_on_the_finished_clip_and_keep_the_plate_steady() {
+        let mut j = job(QualityPreset::Balanced);
+        j.in_point = 2.0;
+        j.out_point = 6.0;
+        j.speed = 2.0;
+        let mut text = overlay("hi");
+        text.boxed = true;
+        j.effects.text = Some(text);
+        // Off until source 4 s (finished clip 1 s), then fading in to full by source 6 s (2 s).
+        j.effects.keys.text = vec![vk(2.0, 0.2, false), vk(4.0, 0.2, true), vk(6.0, 1.0, true)];
+        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0, Some(&font()));
+        let chain = vf(&args);
+        let plate = chain.find("@0.0:x=(w-text_w)/2").expect("no plate pass");
+        let words = chain.find("alpha='if(lt(t,1.0),0.2,if(lt(t,2.0),0.2+(0.8)*(t-(1.0))/1.0,1.0))':enable='gte(t,1.0)'");
+        let words = words.unwrap_or_else(|| panic!("{chain}"));
+        assert!(plate < words, "{chain}");
+        assert_eq!(chain.matches("box=1").count(), 1, "{chain}");
+    }
+
+    #[test]
+    fn text_keyframes_with_one_opacity_only_switch_it() {
+        let mut j = job(QualityPreset::Balanced);
+        j.in_point = 0.0;
+        j.out_point = 4.0;
+        j.effects.text = Some(overlay("hi"));
+        j.effects.keys.text = vec![vk(1.0, 0.9, true), vk(3.0, 0.9, false)];
+        let chain = vf(&build_args(&j, "libx264", true, 1920, 1080, 30.0, Some(&font())));
+        assert_eq!(chain.matches("drawtext=").count(), 1, "{chain}");
+        assert!(chain.contains("@0.9:x=(w-text_w)/2:y=h-text_h-h*0.04:enable='lt(t,3.0)'"), "{chain}");
+        assert!(!chain.contains("alpha="), "{chain}");
     }
 
     #[test]
@@ -2442,7 +2908,7 @@ mod tests {
         j.effects.redact = vec![still(RedactMode::Blur, 0.1, 0.1, 0.3, 0.3)];
         let args = build_args(&j, "libx264", true, 1920, 1080, 30.0, None);
         assert!(!args.iter().any(|a| a.contains("fcr0")), "{args:?}");
-        assert_eq!(redact_commands(&j, 1920, 1080, 30.0), None);
+        assert_eq!(filter_commands(&j, 1920, 1080, 30.0), None);
     }
 
     #[test]

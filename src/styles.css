@@ -58,7 +58,7 @@
   --row: 48px;
   --strip: 64px;
   --ramp-lane: 54px;
-  --redact-lane: 20px;
+  --key-lane: 20px;
 
   color-scheme: dark;
 }
@@ -1342,48 +1342,59 @@ select option:disabled {
   bottom: var(--ramp-lane);
 }
 
-/* The redaction channel sits at the very bottom, under the speed lane when both show. */
-#timeline.has-redact {
-  height: calc(var(--strip) + var(--redact-lane));
+/* The keyframe channel sits at the very bottom, under the speed lane when both show. */
+#timeline.has-keys {
+  height: calc(var(--strip) + var(--key-lane));
 }
 
-#timeline.has-ramp.has-redact {
-  height: calc(var(--strip) + var(--ramp-lane) + var(--redact-lane));
+#timeline.has-ramp.has-keys {
+  height: calc(var(--strip) + var(--ramp-lane) + var(--key-lane));
 }
 
-#timeline.has-redact #tl-strip {
-  bottom: var(--redact-lane);
+#timeline.has-keys #tl-strip {
+  bottom: var(--key-lane);
 }
 
-#timeline.has-ramp.has-redact #tl-strip {
-  bottom: calc(var(--ramp-lane) + var(--redact-lane));
+#timeline.has-ramp.has-keys #tl-strip {
+  bottom: calc(var(--ramp-lane) + var(--key-lane));
 }
 
-#timeline.has-redact #tl-ramp {
-  bottom: var(--redact-lane);
+#timeline.has-keys #tl-ramp {
+  bottom: var(--key-lane);
 }
 
-#tl-redact {
+#tl-keys {
   position: absolute;
   left: 0;
   right: 0;
   bottom: 0;
-  height: var(--redact-lane);
+  height: var(--key-lane);
   padding-top: 2px;
   border-top: 1px solid var(--line);
   background: rgba(8, 16, 26, 0.72);
 }
 
-.tl-redact-row {
+.tl-key-row {
   position: relative;
   height: 16px;
 }
 
-.tl-redact-row.selected {
+.tl-key-row.selected {
   background: rgba(255, 255, 255, 0.06);
 }
 
-.tl-redact-span {
+.tl-key-name {
+  position: absolute;
+  left: 4px;
+  top: 0;
+  font-size: 9px;
+  line-height: 16px;
+  color: var(--fg-dim);
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+.tl-key-span {
   position: absolute;
   top: 6px;
   height: 4px;
@@ -1392,12 +1403,12 @@ select option:disabled {
   pointer-events: none;
 }
 
-.tl-redact-row.selected .tl-redact-span {
+.tl-key-row.selected .tl-key-span {
   background: var(--accent);
   opacity: 0.6;
 }
 
-.tl-redact-key {
+.tl-key {
   position: absolute;
   top: 3px;
   width: 10px;
@@ -1410,12 +1421,12 @@ select option:disabled {
   cursor: grab;
 }
 
-.tl-redact-key.off {
+.tl-key.off {
   background: var(--panel);
 }
 
-.tl-redact-key:hover,
-.tl-redact-key:focus-visible {
+.tl-key:hover,
+.tl-key:focus-visible {
   outline: 1px solid #fff;
 }
 

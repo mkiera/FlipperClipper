@@ -81,7 +81,7 @@ struct Claim {
     slot: Arc<Mutex<ExportSlot>>,
     job: u64,
     overlay_text: Option<PathBuf>,
-    redact_commands: Option<PathBuf>,
+    commands: Option<PathBuf>,
 }
 
 impl Claim {
@@ -101,7 +101,7 @@ impl Claim {
             slot: Arc::clone(slot),
             job,
             overlay_text: None,
-            redact_commands: None,
+            commands: None,
         })
     }
 }
@@ -112,7 +112,7 @@ impl Drop for Claim {
         if let Some(path) = self.overlay_text.take() {
             let _ = std::fs::remove_file(path);
         }
-        if let Some(path) = self.redact_commands.take() {
+        if let Some(path) = self.commands.take() {
             let _ = std::fs::remove_file(path);
         }
         let mut slot = lock_slot(&self.slot);
@@ -260,14 +260,14 @@ pub fn start_export(app: AppHandle, job: ExportJob, job_id: u64) -> Result<(), S
         .as_ref()
         .map(|(dir, _)| dir.join(ffmpeg::OVERLAY_TEXT_FILE));
 
-    let commands = match ffmpeg::redact_commands(&job, info.width, info.height, info.fps) {
+    let commands = match ffmpeg::filter_commands(&job, info.width, info.height, info.fps) {
         Some(text) => {
             let dir = overlay_dir()?;
-            let path = dir.join(ffmpeg::REDACT_COMMANDS_FILE);
+            let path = dir.join(ffmpeg::COMMANDS_FILE);
             std::fs::write(&path, text.as_bytes()).map_err(|_| {
-                "The redaction keyframes could not be written to a temporary file.".to_string()
+                "The keyframes could not be written to a temporary file.".to_string()
             })?;
-            claim.redact_commands = Some(path);
+            claim.commands = Some(path);
             Some(dir)
         }
         None => None,
@@ -714,6 +714,24 @@ fn validate_effects(fx: &Effects) -> Result<(), String> {
             if !inside {
                 return Err("The redacted region has to sit inside the frame.".to_string());
             }
+        }
+    }
+
+    let k = &fx.keys;
+    for (keys, low, high, name) in [
+        (&k.brightness, 0.2, 2.0, "Brightness"),
+        (&k.contrast, 0.2, 3.0, "Contrast"),
+        (&k.saturation, 0.0, 3.0, "Saturation"),
+        (&k.hue, -180.0, 180.0, "The hue shift"),
+        (&k.blur, 0.5, 50.0, "Blur"),
+        (&k.vignette, 0.0, 1.0, "The vignette"),
+        (&k.text, 0.0, 1.0, "The text opacity"),
+    ] {
+        for key in keys {
+            if !key.t.is_finite() || key.t < 0.0 {
+                return Err("A keyframe has to sit on the clip's timeline.".to_string());
+            }
+            bounded(Some(key.v), low, high, name)?;
         }
     }
 
@@ -1191,6 +1209,20 @@ mod tests {
                 "{name} accepted {refused}"
             );
         }
+    }
+
+    #[test]
+    fn keyframes_outside_the_dial_range_or_off_the_timeline_are_refused() {
+        use crate::ffmpeg::ValueKey;
+        let check = |keys| {
+            let mut fx = Effects::default();
+            fx.keys.blur = keys;
+            validate_effects(&fx)
+        };
+        assert!(check(vec![ValueKey { t: 1.0, v: 50.0, on: true }]).is_ok());
+        assert!(check(vec![ValueKey { t: 1.0, v: 51.0, on: true }]).unwrap_err().starts_with("Blur"));
+        assert!(check(vec![ValueKey { t: -1.0, v: 4.0, on: true }]).is_err());
+        assert!(check(vec![ValueKey { t: f64::NAN, v: 4.0, on: true }]).is_err());
     }
 
     #[test]
