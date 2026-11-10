@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 1.3.0-beta.4 - 2026-11-10
+
+- Opening the audio tracks and the keyframe lane at the same moment no longer leaves the video unable to resize with the window.
+
 ## 1.3.0-beta.3 - 2026-11-10
 
 - Switching several keyframed effects on or off quickly no longer leaves the video unable to resize with the window.
