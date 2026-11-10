@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 1.3.0-beta.1 - 2026-11-10
+
 - Cancel now stops an export even when it is clicked in the first moments after Export, so the existing file is left alone.
 - If a finished export cannot replace a locked or read-only file, it is kept beside it, and the message says where.
 - Closing the window during an export no longer leaves a part-written file in the export folder.
