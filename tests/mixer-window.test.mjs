@@ -93,3 +93,18 @@ test('lane changes that overlap leave the video area unpinned once the window se
     ['shrink', 36, 100],
   ]);
 });
+
+test('the mixer and the keyframe lane pinning at once leave the video area free in either release order', async () => {
+  for (const order of [['a', 'b'], ['b', 'a']]) {
+    const workspace = { style: { flex: '', height: '' }, getBoundingClientRect: () => ({ height: 653 }) };
+    const { pinWorkspace } = await loadWith(
+      { window: { __TAURI_INTERNALS__: {} }, document: { getElementById: () => workspace } },
+      { growWindowForMixer: async () => ({}), shrinkWindowAfterMixer: async () => {} },
+    );
+    const releases = { a: pinWorkspace(), b: pinWorkspace() };
+    releases[order[0]]();
+    assert.equal(workspace.style.height, '653px', `still held after ${order[0]}`);
+    releases[order[1]]();
+    assert.deepEqual({ ...workspace.style }, { flex: '', height: '' }, order.join(' then '));
+  }
+});

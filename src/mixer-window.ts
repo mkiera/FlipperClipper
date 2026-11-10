@@ -37,19 +37,35 @@ export function initMixerWindowResize(): MixerWindowResize | null {
   };
 }
 
+/** Every caller holding the video area, and its own styles from before the first of them. The
+ *  mixer and the keyframe lane can both resize at once, and a second pin of its own would
+ *  record the first one's styles as the originals and put them back for good. */
+let pins = 0;
+let unpinned: { flex: string; height: string } | null = null;
+
 /** Holds the video area at its current height while the window grows or shrinks around a
- *  change below it, so the picture does not jump. Returns the release. */
+ *  change below it, so the picture does not jump. Returns the release; the area is let go
+ *  when the last holder releases. */
 export function pinWorkspace(): () => void {
   const workspace = document.getElementById('workspace');
   if (!workspace) return () => {};
-  const flex = workspace.style.flex;
-  const height = workspace.style.height;
-  const pixelHeight = workspace.getBoundingClientRect().height;
-  workspace.style.flex = `0 0 ${pixelHeight}px`;
-  workspace.style.height = `${pixelHeight}px`;
+  if (pins === 0) {
+    unpinned = { flex: workspace.style.flex, height: workspace.style.height };
+    const pixelHeight = workspace.getBoundingClientRect().height;
+    workspace.style.flex = `0 0 ${pixelHeight}px`;
+    workspace.style.height = `${pixelHeight}px`;
+  }
+  pins += 1;
+  let released = false;
   return () => {
-    workspace.style.flex = flex;
-    workspace.style.height = height;
+    if (released) return;
+    released = true;
+    pins -= 1;
+    if (pins === 0 && unpinned) {
+      workspace.style.flex = unpinned.flex;
+      workspace.style.height = unpinned.height;
+      unpinned = null;
+    }
   };
 }
 
