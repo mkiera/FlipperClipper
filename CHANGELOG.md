@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 1.3.0-beta.3 - 2026-11-10
+
+- Switching several keyframed effects on or off quickly no longer leaves the video unable to resize with the window.
+
 ## 1.3.0-beta.2 - 2026-11-10
 
 - The window grows to fit the keyframe lane under the timeline, so the video keeps its size and place.
