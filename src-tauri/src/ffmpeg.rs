@@ -1162,21 +1162,32 @@ fn drawtext_filter(overlay: &TextOverlay, font: &Path) -> String {
     format!("drawtext={}", parts.join(":"))
 }
 
+/// How many extra points a text fade under a speed curve may add, across all its fades. Each is
+/// about 90 characters of filter graph, and Windows refuses a command line past 32,767.
+const TEXT_SAMPLE_BUDGET: f64 = 120.0;
+
 /// The opacity as (finished clip time, value) points. The opacity moves in a straight line on
 /// the source clock, and a speed curve bends that line on the finished clip, so under a curve
-/// each fade between keyframes is sampled up to once per source frame (at most 200 points).
+/// the fades between keyframes are sampled, at most once per source frame and
+/// TEXT_SAMPLE_BUDGET points in all, shared by length.
 fn text_points(job: &ExportJob, keys: &[ValueKey], fps: f64) -> Vec<(f64, f64)> {
     let source = trim_points(job, keys, |t| t);
     if !ramp::has_ramp(&job.ramp) {
         return source.into_iter().map(|(t, v)| (output_time(job, t), v)).collect();
     }
     let fps = if fps.is_finite() && fps > 0.0 { fps } else { 30.0 };
+    let fading: f64 = source
+        .windows(2)
+        .filter(|w| w[0].1 != w[1].1)
+        .map(|w| (w[1].0 - w[0].0).max(0.0))
+        .sum();
     let mut points = Vec::new();
     for w in source.windows(2) {
         let ((s0, v0), (s1, v1)) = (w[0], w[1]);
         points.push((output_time(job, s0), v0));
         if v0 != v1 && s1 > s0 {
-            let steps = (((s1 - s0) * fps).ceil() as usize).clamp(1, 200);
+            let share = (TEXT_SAMPLE_BUDGET * (s1 - s0) / fading).floor().max(1.0) as usize;
+            let steps = (((s1 - s0) * fps).ceil() as usize).clamp(1, share);
             for i in 1..steps {
                 let f = i as f64 / steps as f64;
                 points.push((output_time(job, s0 + (s1 - s0) * f), v0 + (v1 - v0) * f));
@@ -2908,7 +2919,21 @@ mod tests {
         let v = v0 + (v1 - v0) * (at - t0) / (t1 - t0);
         // Halfway through the source is half opacity, wherever the curve puts it.
         assert!((v - 0.5).abs() < 0.01, "{v}");
-        assert!(points.len() <= 202, "{}", points.len());
+    }
+
+    #[test]
+    fn several_text_fades_under_a_speed_curve_stay_inside_a_windows_command_line() {
+        let mut j = job(QualityPreset::Balanced);
+        j.in_point = 0.0;
+        j.out_point = 30.0;
+        j.ramp = vec![SpeedPoint { t: 0.0, speed: 1.0 }, SpeedPoint { t: 30.0, speed: 16.0 }];
+        j.effects.text = Some(overlay("hi"));
+        j.effects.keys.text =
+            vec![vk(0.0, 0.0, true), vk(10.0, 1.0, true), vk(20.0, 0.0, true), vk(30.0, 1.0, true)];
+        assert!(text_points(&j, &j.effects.keys.text, 30.0).len() <= 125);
+        let args = build_args(&j, "libx264", true, 1920, 1080, 30.0, Some(&font()));
+        let length: usize = args.iter().map(|a| a.len() + 3).sum();
+        assert!(length < 20_000, "{length}");
     }
 
     #[test]

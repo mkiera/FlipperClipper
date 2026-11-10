@@ -361,6 +361,9 @@ fn prepare_export(
         info.fps,
         overlay.map(|(_, font)| font.as_path()),
     );
+    if !fits_command_line(&args) {
+        return Err("This edit has too many keyframes to export. Remove some and try again.".to_string());
+    }
     let mut command = ffmpeg::hidden_command("ffmpeg");
     command.args(&args);
     // The overlay text and the redaction commands are named relative to this directory. Both
@@ -369,6 +372,12 @@ fn prepare_export(
         command.current_dir(dir);
     }
     Ok((command, pending_output))
+}
+
+/// Windows refuses a command line past 32,767 characters before ffmpeg starts. Each argument
+/// may be quoted and is followed by a space, and the rest leaves room for ffmpeg's path.
+fn fits_command_line(args: &[String]) -> bool {
+    args.iter().map(|a| a.len() + 3).sum::<usize>() <= 32_000
 }
 
 fn finish_export(
@@ -1209,6 +1218,12 @@ mod tests {
                 "{name} accepted {refused}"
             );
         }
+    }
+
+    #[test]
+    fn a_filter_graph_past_the_windows_command_line_is_refused() {
+        assert!(fits_command_line(&["-vf".to_string(), "x".repeat(31_000)]));
+        assert!(!fits_command_line(&["-vf".to_string(), "x".repeat(33_000)]));
     }
 
     #[test]
