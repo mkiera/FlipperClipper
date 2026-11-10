@@ -15,6 +15,7 @@ import { edit, loadMedia, patchEdit, patchUi, subscribe, ui } from './state';
 import { initPlayer, loadSource, loadTrackPreviews, onPreviewTrouble, videoElement } from './player';
 import { initTimeline } from './timeline';
 import { initCrop } from './crop';
+import { initKeyLane } from './keylane';
 import { initRampLane } from './ramplane';
 import { initOverlay } from './overlay';
 import { initEffectsPanel } from './effectspanel';
@@ -55,6 +56,7 @@ function boot(): void {
   initTimeline();
   initCrop();
   initRampLane();
+  initKeyLane();
   // After crop: the overlays are placed on the crop rectangle when there is one.
   initOverlay();
   initEffectsPanel();

@@ -81,6 +81,7 @@ struct Claim {
     slot: Arc<Mutex<ExportSlot>>,
     job: u64,
     overlay_text: Option<PathBuf>,
+    commands: Option<PathBuf>,
 }
 
 impl Claim {
@@ -100,6 +101,7 @@ impl Claim {
             slot: Arc::clone(slot),
             job,
             overlay_text: None,
+            commands: None,
         })
     }
 }
@@ -108,6 +110,9 @@ impl Drop for Claim {
     fn drop(&mut self) {
         // ffmpeg has read all of it by now, and the words are the user's.
         if let Some(path) = self.overlay_text.take() {
+            let _ = std::fs::remove_file(path);
+        }
+        if let Some(path) = self.commands.take() {
             let _ = std::fs::remove_file(path);
         }
         let mut slot = lock_slot(&self.slot);
@@ -255,9 +260,27 @@ pub fn start_export(app: AppHandle, job: ExportJob, job_id: u64) -> Result<(), S
         .as_ref()
         .map(|(dir, _)| dir.join(ffmpeg::OVERLAY_TEXT_FILE));
 
+    let commands = match ffmpeg::filter_commands(&job, info.width, info.height, info.fps) {
+        Some(text) => {
+            let dir = overlay_dir()?;
+            let path = dir.join(ffmpeg::COMMANDS_FILE);
+            std::fs::write(&path, text.as_bytes()).map_err(|_| {
+                "The keyframes could not be written to a temporary file.".to_string()
+            })?;
+            claim.commands = Some(path);
+            Some(dir)
+        }
+        None => None,
+    };
+
     let mut encoding_job = job.clone();
-    let (mut command, pending_output) =
-        prepare_export(&mut encoding_job, &encoder, &info, overlay.as_ref())?;
+    let (mut command, pending_output) = prepare_export(
+        &mut encoding_job,
+        &encoder,
+        &info,
+        overlay.as_ref(),
+        commands.as_deref(),
+    )?;
 
     // The probe and the encoder test runs above can take seconds, and Cancel is live throughout.
     if lock_slot(&slot_arc).is_cancelled(job_id) {
@@ -326,6 +349,7 @@ fn prepare_export(
     encoder: &str,
     info: &ffmpeg::MediaInfo,
     overlay: Option<&(PathBuf, PathBuf)>,
+    work_dir: Option<&Path>,
 ) -> Result<(Command, PendingOutput), String> {
     let pending_output = PendingOutput::new(job)?;
     let args = ffmpeg::build_args(
@@ -337,13 +361,23 @@ fn prepare_export(
         info.fps,
         overlay.map(|(_, font)| font.as_path()),
     );
+    if !fits_command_line(&args) {
+        return Err("This edit has too many keyframes to export. Remove some and try again.".to_string());
+    }
     let mut command = ffmpeg::hidden_command("ffmpeg");
     command.args(&args);
-    if let Some((dir, _)) = overlay {
-        // The overlay text filename is relative to this directory.
+    // The overlay text and the redaction commands are named relative to this directory. Both
+    // live in overlay_dir(), so either one's folder serves for both.
+    if let Some(dir) = overlay.map(|(dir, _)| dir.as_path()).or(work_dir) {
         command.current_dir(dir);
     }
     Ok((command, pending_output))
+}
+
+/// Windows refuses a command line past 32,767 characters before ffmpeg starts. Each argument
+/// may be quoted and is followed by a space, and the rest leaves room for ffmpeg's path.
+fn fits_command_line(args: &[String]) -> bool {
+    args.iter().map(|a| a.len() + 3).sum::<usize>() <= 32_000
 }
 
 fn finish_export(
@@ -655,6 +689,10 @@ fn validate_ramp(job: &ExportJob) -> Result<(), String> {
     Ok(())
 }
 
+/// The most redactions the frontend allows. Each is a full-frame pass, so the count bounds the
+/// export's cost.
+const REDACT_MAX_ITEMS: usize = 8;
+
 fn validate_effects(fx: &Effects) -> Result<(), String> {
     bounded(fx.brightness, 0.2, 2.0, "Brightness")?;
     bounded(fx.contrast, 0.2, 3.0, "Contrast")?;
@@ -664,6 +702,47 @@ fn validate_effects(fx: &Effects) -> Result<(), String> {
     bounded(fx.vignette, 0.0, 1.0, "The vignette")?;
     bounded(fx.fade_in, 0.0, 60.0, "The fade in")?;
     bounded(fx.fade_out, 0.0, 60.0, "The fade out")?;
+
+    if fx.redact.len() > REDACT_MAX_ITEMS {
+        return Err(format!("An export can use at most {REDACT_MAX_ITEMS} redactions."));
+    }
+    for redact in &fx.redact {
+        bounded(Some(redact.strength), 2.0, 100.0, "The redact strength")?;
+        if redact.keys.is_empty() {
+            return Err("A redaction needs at least one keyframe.".to_string());
+        }
+        for k in &redact.keys {
+            let inside = [k.t, k.x, k.y, k.w, k.h].iter().all(|v| v.is_finite())
+                && k.t >= 0.0
+                && k.x >= 0.0
+                && k.y >= 0.0
+                && k.w > 0.0
+                && k.h > 0.0
+                && k.x + k.w <= 1.0 + 1e-9
+                && k.y + k.h <= 1.0 + 1e-9;
+            if !inside {
+                return Err("The redacted region has to sit inside the frame.".to_string());
+            }
+        }
+    }
+
+    let k = &fx.keys;
+    for (keys, low, high, name) in [
+        (&k.brightness, 0.2, 2.0, "Brightness"),
+        (&k.contrast, 0.2, 3.0, "Contrast"),
+        (&k.saturation, 0.0, 3.0, "Saturation"),
+        (&k.hue, -180.0, 180.0, "The hue shift"),
+        (&k.blur, 0.5, 50.0, "Blur"),
+        (&k.vignette, 0.0, 1.0, "The vignette"),
+        (&k.text, 0.0, 1.0, "The text opacity"),
+    ] {
+        for key in keys {
+            if !key.t.is_finite() || key.t < 0.0 {
+                return Err("A keyframe has to sit on the clip's timeline.".to_string());
+            }
+            bounded(Some(key.v), low, high, name)?;
+        }
+    }
 
     if let Some(text) = fx.text.as_ref() {
         if text.text.trim().is_empty() {
@@ -1139,6 +1218,53 @@ mod tests {
                 "{name} accepted {refused}"
             );
         }
+    }
+
+    #[test]
+    fn a_filter_graph_past_the_windows_command_line_is_refused() {
+        assert!(fits_command_line(&["-vf".to_string(), "x".repeat(31_000)]));
+        assert!(!fits_command_line(&["-vf".to_string(), "x".repeat(33_000)]));
+    }
+
+    #[test]
+    fn keyframes_outside_the_dial_range_or_off_the_timeline_are_refused() {
+        use crate::ffmpeg::ValueKey;
+        let check = |keys| {
+            let mut fx = Effects::default();
+            fx.keys.blur = keys;
+            validate_effects(&fx)
+        };
+        assert!(check(vec![ValueKey { t: 1.0, v: 50.0, on: true }]).is_ok());
+        assert!(check(vec![ValueKey { t: 1.0, v: 51.0, on: true }]).unwrap_err().starts_with("Blur"));
+        assert!(check(vec![ValueKey { t: -1.0, v: 4.0, on: true }]).is_err());
+        assert!(check(vec![ValueKey { t: f64::NAN, v: 4.0, on: true }]).is_err());
+    }
+
+    #[test]
+    fn a_redact_region_outside_the_frame_or_too_weak_is_refused() {
+        use crate::ffmpeg::{Redact, RedactKey, RedactMode};
+        let k = RedactKey { t: 1.0, x: 0.5, y: 0.5, w: 0.5, h: 0.5, on: true };
+        let good = Redact { mode: RedactMode::Pixelate, strength: 16.0, keys: vec![k] };
+        let check = |list: Vec<Redact>| validate_effects(&Effects { redact: list, ..Effects::default() });
+        assert!(check(vec![good.clone()]).is_ok());
+
+        let mut off = good.clone();
+        off.keys[0].x = 0.6;
+        assert!(check(vec![off]).unwrap_err().contains("inside the frame"));
+
+        let mut nan = good.clone();
+        nan.keys[0].t = f64::NAN;
+        assert!(check(vec![nan]).unwrap_err().contains("inside the frame"));
+
+        let mut none = good.clone();
+        none.keys.clear();
+        assert!(check(vec![none]).unwrap_err().contains("keyframe"));
+
+        let mut weak = good.clone();
+        weak.strength = 1.0;
+        assert!(check(vec![weak]).unwrap_err().contains("redact strength"));
+
+        assert!(check(vec![good; REDACT_MAX_ITEMS + 1]).unwrap_err().contains("at most"));
     }
 
     #[test]

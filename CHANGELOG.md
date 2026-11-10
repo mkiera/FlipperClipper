@@ -15,6 +15,9 @@
 - Lossless trims of WMV, OGV and other formats that MP4 cannot hold are offered only as MKV, so they no longer fail after the save dialog.
 - Changing track volumes with Normalize on no longer leaves several loudness measurements running at once.
 - Install this build on the Alpha channel installs on the first press.
+- Quick Effects has a Redact effect. It hides parts of the frame with a blur, a pixelation or a black box. Add up to 8 boxes, drag each one on the picture to place it, and drag its corners to resize it.
+- Redactions can be keyframed. Each keyframe sets a box's position, size and whether it shows. The box moves smoothly between keyframes. A lane under the timeline shows each redaction's keyframes: click one to jump to it, drag it to move it, and double-click or right-click it to remove it.
+- Brightness, contrast, saturation, hue shift, blur, vignette and text opacity can each be keyframed on their own. Add a keyframe, move the playhead and change the setting, and the effect changes smoothly between keyframes. Untick "On here" to switch the effect off from a keyframe. Each keyframed effect gets its own row in the keyframe lane.
 
 ## 1.2.0 - 2026-10-02
 

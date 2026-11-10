@@ -58,6 +58,7 @@
   --row: 48px;
   --strip: 64px;
   --ramp-lane: 54px;
+  --key-lane: 20px;
 
   color-scheme: dark;
 }
@@ -1055,6 +1056,65 @@ select option:disabled {
   inset: 0;
 }
 
+.fx-redact-box {
+  position: absolute;
+  touch-action: none;
+}
+
+.fx-redact-clip {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+}
+
+.fx-redact-box canvas {
+  position: absolute;
+  image-rendering: pixelated;
+}
+
+.fx-redact-box .ch {
+  display: none;
+}
+
+/* Boxes take the pointer only while the Effects tab is open, so they never catch a click
+   meant for the picture once it is shut. */
+.fx-redact-box.selectable {
+  pointer-events: auto;
+  cursor: pointer;
+  outline: 1px dashed rgba(255, 255, 255, 0.35);
+}
+
+.fx-redact-box.editing {
+  pointer-events: auto;
+  cursor: move;
+  outline: 1px dashed rgba(255, 255, 255, 0.9);
+}
+
+.fx-redact-box.editing .ch {
+  display: block;
+}
+
+/* Hidden at the playhead by a keyframe: drawn as an outline only, so it can still be found
+   and edited, and nothing about it reaches the export at this moment. */
+.fx-redact-box.off {
+  background: transparent !important;
+  backdrop-filter: none !important;
+}
+
+.fx-redact-box.off canvas {
+  display: none;
+}
+
+.fx-modes {
+  align-self: flex-start;
+}
+
+.fx-redact-actions {
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+}
+
 #fx-text {
   display: flex;
 }
@@ -1280,6 +1340,94 @@ select option:disabled {
 
 #timeline.has-ramp #tl-strip {
   bottom: var(--ramp-lane);
+}
+
+/* The keyframe channel sits at the very bottom, under the speed lane when both show. */
+#timeline.has-keys {
+  height: calc(var(--strip) + var(--key-lane));
+}
+
+#timeline.has-ramp.has-keys {
+  height: calc(var(--strip) + var(--ramp-lane) + var(--key-lane));
+}
+
+#timeline.has-keys #tl-strip {
+  bottom: var(--key-lane);
+}
+
+#timeline.has-ramp.has-keys #tl-strip {
+  bottom: calc(var(--ramp-lane) + var(--key-lane));
+}
+
+#timeline.has-keys #tl-ramp {
+  bottom: var(--key-lane);
+}
+
+#tl-keys {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: var(--key-lane);
+  padding-top: 2px;
+  border-top: 1px solid var(--line);
+  background: rgba(8, 16, 26, 0.72);
+}
+
+.tl-key-row {
+  position: relative;
+  height: 16px;
+}
+
+.tl-key-row.selected {
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.tl-key-name {
+  position: absolute;
+  left: 4px;
+  top: 0;
+  font-size: 9px;
+  line-height: 16px;
+  color: var(--fg-dim);
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+.tl-key-span {
+  position: absolute;
+  top: 6px;
+  height: 4px;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.28);
+  pointer-events: none;
+}
+
+.tl-key-row.selected .tl-key-span {
+  background: var(--accent);
+  opacity: 0.6;
+}
+
+.tl-key {
+  position: absolute;
+  top: 3px;
+  width: 10px;
+  height: 10px;
+  margin-left: -5px;
+  padding: 0;
+  border: 2px solid var(--accent);
+  background: var(--accent);
+  transform: rotate(45deg);
+  cursor: grab;
+}
+
+.tl-key.off {
+  background: var(--panel);
+}
+
+.tl-key:hover,
+.tl-key:focus-visible {
+  outline: 1px solid #fff;
 }
 
 #tl-ramp {

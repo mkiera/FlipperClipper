@@ -11,16 +11,44 @@ import {
   EFFECT_IDS,
   EFFECT_LABEL,
   EFFECT_RANGE,
+  REDACT_MODES,
+  REDACT_MODE_LABEL,
   appliesToAudioOnly,
   defaultEffects,
+  dialAt,
+  effectKeys,
   effectSummary,
   enabledIds,
+  isKeyed,
+  withDial,
+  withEffectKeyToggled,
   withSetting,
   withSwitch,
 } from './effects';
+import { onTime } from './player';
+import { REDACT_MAX_ITEMS, keyIndexAt, stateAt, withEdit, withKeyToggled } from './redact';
+import {
+  addRedaction,
+  keyTolerance,
+  playheadTime,
+  redactItems,
+  removeRedaction,
+  selectRedaction,
+  selectedRedaction,
+  updateRedaction,
+} from './redactedit';
 import { edit, patchEdit, patchUi, subscribe, ui } from './state';
 import { isTurned } from './types';
-import type { EffectId, EffectSettings, Orientation, TextAnchorX, TextAnchorY } from './types';
+import type {
+  EffectId,
+  EffectSettings,
+  KeyedEffectId,
+  Orientation,
+  RedactItem,
+  TextAnchorX,
+  TextAnchorY,
+} from './types';
+import { valueKeyIndexAt } from './valuekeys';
 
 const ANCHORS_X: TextAnchorX[] = ['left', 'center', 'right'];
 const ANCHORS_Y: TextAnchorY[] = ['top', 'middle', 'bottom'];
@@ -35,6 +63,9 @@ const expanded = new Set<EffectId>();
 
 /** Every control registers how to refresh itself, so render() never rebuilds the DOM. */
 const updaters: (() => void)[] = [];
+
+/** The controls that show the playhead's moment, refreshed as it moves too. */
+const timeUpdaters: (() => void)[] = [];
 
 function el<T extends HTMLElement>(id: string): T {
   const found = document.getElementById(id);
@@ -56,6 +87,10 @@ export function initEffectsPanel(): void {
   list.replaceChildren(...EFFECT_IDS.map(buildRow));
 
   subscribe(render);
+  onTime(() => {
+    if (!ui.effectsOpen) return;
+    for (const update of timeUpdaters) update();
+  });
   render();
 }
 
@@ -176,6 +211,7 @@ function buildRow(id: EffectId): HTMLElement {
   const body = document.createElement('div');
   body.className = 'fx-body';
   body.append(...buildBody(id));
+  if (isKeyed(id)) body.append(buildKeyLine(id));
 
   const hint = document.createElement('p');
   hint.className = 'fx-hint';
@@ -210,33 +246,13 @@ function buildBody(id: EffectId): HTMLElement[] {
       return [multiplier('Amount', 'saturation')];
     case 'hue':
       return [
-        slider({
-          label: 'Rotation',
-          ...EFFECT_RANGE.hue,
-          read: () => edit.effects.settings.hue.degrees,
-          show: (v) => `${v > 0 ? '+' : ''}${Math.round(v)}°`,
-          write: (v) => setSetting('hue', { degrees: v }),
-        }),
+        dialSlider('hue', 'Rotation', EFFECT_RANGE.hue, (v) => `${v > 0 ? '+' : ''}${Math.round(v)}°`),
       ];
     case 'blur':
-      return [
-        slider({
-          label: 'Strength',
-          ...EFFECT_RANGE.blur,
-          read: () => edit.effects.settings.blur.sigma,
-          show: (v) => `${v} px`,
-          write: (v) => setSetting('blur', { sigma: v }),
-        }),
-      ];
+      return [dialSlider('blur', 'Strength', EFFECT_RANGE.blur, (v) => `${Math.round(v * 10) / 10} px`)];
     case 'vignette':
       return [
-        slider({
-          label: 'Strength',
-          ...EFFECT_RANGE.vignette,
-          read: () => edit.effects.settings.vignette.amount,
-          show: (v) => `${Math.round(v * 100)}%`,
-          write: (v) => setSetting('vignette', { amount: v }),
-        }),
+        dialSlider('vignette', 'Strength', EFFECT_RANGE.vignette, (v) => `${Math.round(v * 100)}%`),
       ];
     case 'fade':
       return [
@@ -255,22 +271,207 @@ function buildBody(id: EffectId): HTMLElement[] {
           write: (v) => setSetting('fade', { outSeconds: v }),
         }),
       ];
+    case 'redact':
+      return buildRedactBody();
     case 'text':
       return buildTextBody();
   }
 }
 
-function multiplier(label: string, id: 'brightness' | 'contrast' | 'saturation'): HTMLElement {
-  return slider({
-    label,
-    ...EFFECT_RANGE[id],
-    read: () => edit.effects.settings[id].amount,
-    show: (v) => {
-      const delta = Math.round((v - 1) * 100);
-      return `${delta > 0 ? '+' : ''}${delta}%`;
-    },
-    write: (v) => setSetting(id, { amount: v }),
+function buildRedactBody(): HTMLElement[] {
+  const regions = document.createElement('div');
+  regions.className = 'chips fx-modes';
+  regions.setAttribute('role', 'group');
+  regions.setAttribute('aria-label', 'Redactions');
+  let regionsKey = '';
+
+  const add = document.createElement('button');
+  add.type = 'button';
+  add.className = 'chip';
+  add.textContent = '+';
+  add.title = 'Add a redaction';
+  add.setAttribute('aria-label', 'Add a redaction');
+  add.addEventListener('click', addRedaction);
+
+  const modes = document.createElement('div');
+  modes.className = 'chips fx-modes';
+  modes.setAttribute('role', 'group');
+  modes.setAttribute('aria-label', 'Redact style');
+  const modeChips = REDACT_MODES.map((mode) => {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'chip';
+    button.textContent = REDACT_MODE_LABEL[mode];
+    button.addEventListener('click', () => editSelected((item) => ({ ...item, mode })));
+    modes.append(button);
+    return { button, mode };
   });
+
+  const strength = slider({
+    label: 'Strength',
+    ...EFFECT_RANGE.redact,
+    read: () => selectedRedaction()?.strength ?? 16,
+    show: (v) => `${Math.round(v)} px`,
+    write: (v) => editSelected((item) => ({ ...item, strength: v })),
+  });
+
+  const visible = document.createElement('label');
+  visible.className = 'fx-check';
+  visible.title = 'Show or hide this redaction from the playhead on. With keyframes, this sets a keyframe here.';
+  const visibleBox = document.createElement('input');
+  visibleBox.type = 'checkbox';
+  const visibleText = document.createElement('span');
+  visibleText.textContent = 'Visible';
+  visible.append(visibleBox, visibleText);
+  visibleBox.addEventListener('change', () => {
+    const t = playheadTime();
+    editSelected((item) => withEdit(item, t, { on: visibleBox.checked }, keyTolerance()));
+  });
+
+  const keyButton = document.createElement('button');
+  keyButton.type = 'button';
+  keyButton.className = 'btn fx-key';
+  keyButton.addEventListener('click', () => {
+    const t = playheadTime();
+    editSelected((item) => withKeyToggled(item, t, keyTolerance()));
+  });
+
+  const remove = document.createElement('button');
+  remove.type = 'button';
+  remove.className = 'btn';
+  remove.textContent = 'Remove';
+  remove.title = 'Remove this redaction';
+  remove.addEventListener('click', () => {
+    const item = selectedRedaction();
+    if (item) removeRedaction(item.id);
+  });
+
+  const actions = document.createElement('div');
+  actions.className = 'fx-line fx-redact-actions';
+  actions.append(visible, keyButton, remove);
+
+  const update = () => {
+    const items = redactItems();
+    const selected = selectedRedaction();
+    const key = items.map((item) => item.id).join(',') + '|' + (selected?.id ?? '');
+    if (key !== regionsKey) {
+      regionsKey = key;
+      const chips = items.map((item, index) => {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'chip';
+        button.textContent = String(index + 1);
+        button.title = `Redaction ${index + 1}`;
+        button.setAttribute('aria-label', `Redaction ${index + 1}`);
+        button.classList.toggle('active', item.id === selected?.id);
+        button.setAttribute('aria-pressed', String(item.id === selected?.id));
+        button.addEventListener('click', () => selectRedaction(item.id));
+        return button;
+      });
+      regions.replaceChildren(...chips, add);
+    }
+    add.disabled = items.length >= REDACT_MAX_ITEMS;
+
+    const has = selected !== null;
+    modes.hidden = !has;
+    actions.hidden = !has;
+    strength.hidden = !has || selected.mode === 'box';
+    if (!selected) return;
+    for (const chip of modeChips) {
+      chip.button.classList.toggle('active', chip.mode === selected.mode);
+      chip.button.setAttribute('aria-pressed', String(chip.mode === selected.mode));
+    }
+    const t = playheadTime();
+    visibleBox.checked = stateAt(selected, t).on;
+    const onKey = keyIndexAt(selected, t, keyTolerance()) >= 0;
+    keyButton.textContent = onKey ? '◆ Remove keyframe' : '◇ Add keyframe';
+    keyButton.title = onKey
+      ? 'Remove the keyframe at the playhead'
+      : 'Add a keyframe at the playhead. Then move the playhead and move the box to animate it.';
+  };
+  updaters.push(update);
+  // The keyframe button and the Visible box describe the playhead, so they follow it.
+  onTime(() => {
+    if (ui.effectsOpen) update();
+  });
+
+  return [regions, modes, strength, actions];
+}
+
+function editSelected(change: (item: RedactItem) => RedactItem): void {
+  const item = selectedRedaction();
+  if (item) updateRedaction(item.id, change);
+}
+
+function multiplier(label: string, id: 'brightness' | 'contrast' | 'saturation'): HTMLElement {
+  return dialSlider(id, label, EFFECT_RANGE[id], (v) => {
+    const delta = Math.round((v - 1) * 100);
+    return `${delta > 0 ? '+' : ''}${delta}%`;
+  });
+}
+
+/** The dial a keyframe holds. It shows the value at the playhead, and moving it with
+ *  keyframes set changes the keyframe there or adds one. */
+function dialSlider(
+  id: KeyedEffectId,
+  label: string,
+  range: { min: number; max: number; step: number },
+  show: (value: number) => string,
+): HTMLElement {
+  return slider(
+    {
+      label,
+      ...range,
+      read: () => dialAt(edit.effects, id, playheadTime()).v,
+      show,
+      write: (v) =>
+        patchEdit({ effects: withDial(edit.effects, id, playheadTime(), { v }, keyTolerance()) }),
+    },
+    true,
+  );
+}
+
+/** The keyframe button, and once there are keyframes, whether the effect is on from here. */
+function buildKeyLine(id: KeyedEffectId): HTMLElement {
+  const active = document.createElement('label');
+  active.className = 'fx-check';
+  active.title = 'Turn this effect on or off from the playhead on. This sets a keyframe here.';
+  const activeBox = document.createElement('input');
+  activeBox.type = 'checkbox';
+  const activeText = document.createElement('span');
+  activeText.textContent = 'On here';
+  active.append(activeBox, activeText);
+  activeBox.addEventListener('change', () => {
+    patchEdit({
+      effects: withDial(edit.effects, id, playheadTime(), { on: activeBox.checked }, keyTolerance()),
+    });
+  });
+
+  const keyButton = document.createElement('button');
+  keyButton.type = 'button';
+  keyButton.className = 'btn fx-key';
+  keyButton.addEventListener('click', () => {
+    patchEdit({ effects: withEffectKeyToggled(edit.effects, id, playheadTime(), keyTolerance()) });
+  });
+
+  const line = document.createElement('div');
+  line.className = 'fx-line fx-redact-actions';
+  line.append(active, keyButton);
+
+  const update = () => {
+    const keys = effectKeys(edit.effects, id);
+    const t = playheadTime();
+    active.hidden = keys.length === 0;
+    activeBox.checked = dialAt(edit.effects, id, t).on;
+    const onKey = valueKeyIndexAt(keys, t, keyTolerance()) >= 0;
+    keyButton.textContent = onKey ? '◆ Remove keyframe' : '◇ Add keyframe';
+    keyButton.title = onKey
+      ? 'Remove the keyframe at the playhead'
+      : 'Add a keyframe at the playhead. Then move the playhead and change the setting to animate it.';
+  };
+  updaters.push(update);
+  timeUpdaters.push(update);
+  return line;
 }
 
 function buildTextBody(): HTMLElement[] {
@@ -344,13 +545,7 @@ function buildTextBody(): HTMLElement[] {
       show: (v) => `${Math.round(v * 100)}% of height`,
       write: (v) => setSetting('text', { size: v }),
     }),
-    slider({
-      label: 'Opacity',
-      ...EFFECT_RANGE.textOpacity,
-      read: () => edit.effects.settings.text.opacity,
-      show: (v) => `${Math.round(v * 100)}%`,
-      write: (v) => setSetting('text', { opacity: v }),
-    }),
+    dialSlider('text', 'Opacity', EFFECT_RANGE.textOpacity, (v) => `${Math.round(v * 100)}%`),
     trailer,
     plate,
   ];
@@ -376,7 +571,7 @@ interface SliderSpec {
   write: (value: number) => void;
 }
 
-function slider(spec: SliderSpec): HTMLElement {
+function slider(spec: SliderSpec, followsPlayhead = false): HTMLElement {
   const row = document.createElement('div');
   row.className = 'fx-slider';
 
@@ -397,11 +592,13 @@ function slider(spec: SliderSpec): HTMLElement {
   input.addEventListener('input', () => spec.write(Number(input.value)));
 
   row.append(label, input, value);
-  updaters.push(() => {
+  const update = () => {
     const current = spec.read();
     if (document.activeElement !== input) input.value = String(current);
     value.textContent = spec.show(current);
-  });
+  };
+  updaters.push(update);
+  if (followsPlayhead) timeUpdaters.push(update);
   return row;
 }
 
