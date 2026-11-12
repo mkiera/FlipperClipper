@@ -18,6 +18,7 @@ import { toggleCrop } from './crop';
 import { enabledIds, toEffectsJob } from './effects';
 import { toggleEffectsPanel } from './effectspanel';
 import { ensureMeasured } from './loudness';
+import { isPlain, timelineKey, toPieces } from './sequence';
 import { recordError } from './devpanel';
 import { initMixerWindowResize, nextFrame, pinWorkspace, type MixerWindowResize } from './mixer-window';
 import {
@@ -31,6 +32,7 @@ import {
   losslessEligible,
   outputDuration,
   shortEdge,
+  type AudioTrackInfo,
   type ExportFormat,
   type ExportJob,
   type QualityPreset,
@@ -91,7 +93,9 @@ let audioTrackStatus!: HTMLElement;
 let audioTracksToggle!: HTMLButtonElement;
 let audioTracksCount!: HTMLElement;
 let audioTracksOpen = false;
-let audioTrackMedia: typeof edit.media = null;
+// The track list rather than the media: a clip edit makes a new timeline with the same tracks,
+// and that must not close the mixer.
+let audioTrackMedia: AudioTrackInfo[] | null = null;
 let mixerWindowResize: MixerWindowResize | null = null;
 let audioTracksTransition = false;
 let audioOnlyBtn!: HTMLButtonElement;
@@ -307,13 +311,21 @@ ${failure.detail}` : failure.message);
   render();
 }
 
+/** The gain normalising would apply, for the preview. Several clips are measured as the one
+ *  timeline they make. */
+function measureTimeline(): void {
+  if (!edit.media) return;
+  const clips = isPlain(edit.clips) ? null : toPieces(edit.clips);
+  void ensureMeasured(edit.media.path, refresh, edit.audioTracks, clips);
+}
+
 /** Exported because N in shortcuts.ts toggles it too. */
 export function toggleNormalize(): void {
   const normalize = !edit.normalize;
   patchEdit({ normalize });
   // The gain is not known until the file has been measured, so the preview reaches its real
   // level a moment after the button lights up.
-  if (normalize && edit.media) void ensureMeasured(edit.media.path, refresh, edit.audioTracks);
+  if (normalize && edit.media) measureTimeline();
 }
 
 export function toggleReverse(): void {
@@ -341,9 +353,9 @@ function toggleAudioOnly(): void {
 }
 
 function renderAudioTracks(): void {
-  if (audioTrackMedia !== edit.media) {
+  if (audioTrackMedia !== (edit.media?.audioTracks ?? null)) {
     const wasOpen = audioTracksOpen;
-    audioTrackMedia = edit.media;
+    audioTrackMedia = edit.media?.audioTracks ?? null;
     audioTracksOpen = false;
     audioTrackLevels.clear();
     if (wasOpen) {
@@ -531,7 +543,7 @@ function updateAudioTrack(index: number, patch: Partial<{ volume: number; mute: 
   patchEdit({
     audioTracks: edit.audioTracks.map((track) => (track.index === index ? next : track)),
   });
-  if (edit.normalize && edit.media) void ensureMeasured(edit.media.path, refresh, edit.audioTracks);
+  if (edit.normalize && edit.media) measureTimeline();
 }
 
 /* --- Rendering --- */
@@ -559,7 +571,7 @@ function render(): void {
   const hasMedia = edit.media !== null;
   const hasAudio = edit.media?.hasAudio ?? false;
 
-  if (edit.normalize && edit.media) void ensureMeasured(edit.media.path, refresh, edit.audioTracks);
+  if (edit.normalize && edit.media) measureTimeline();
 
   // Corrected here, not in the handlers: loadMedia can arrive holding a remembered 'fit'.
   if (edit.quality === 'fit' && !fitAllowed(edit.format)) {
@@ -695,7 +707,7 @@ function formatTime(seconds: number): string {
 function estimateSignature(): string {
   const crop = edit.crop;
   return [
-    edit.media?.path ?? '',
+    timelineKey(edit.clips) || (edit.media?.path ?? ''),
     edit.inPoint,
     edit.outPoint,
     edit.speed,
@@ -804,6 +816,7 @@ function buildJob(input: string, output: string): ExportJob {
     videoKbps: edit.audioOnly || edit.quality === 'fit' ? null : edit.videoKbps,
     lossless: edit.lossless && losslessEligible(edit),
     effects: toEffectsJob(edit.effects, edit.audioOnly),
+    clips: isPlain(edit.clips) ? [] : toPieces(edit.clips),
   };
 }
 

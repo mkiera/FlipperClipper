@@ -7,8 +7,7 @@ export it as a video, a GIF, or just the audio. That is the whole app.
 
 ![The FlipperClipper window before a video is opened.](docs/screenshot.png)
 
-There are no project files, no timeline of multiple clips, and nothing to save.
-Open, edit, export, done.
+There are no project files and nothing to save. Open, edit, export, done.
 
 Built with [Tauri 2](https://tauri.app) — a Rust shell around a WebView2 UI, so
 the download is small and it starts instantly. Preview playback is the browser's
@@ -38,6 +37,11 @@ same builds start updating themselves with no change on their end.
   the command line (`FlipperClipper.exe "C:\clips\holiday.mp4"`).
 - **Trim** — drag the in/out handles on the timeline, or set them with `I` and
   `O` at the playhead.
+- **Clips** — the add-clips button beside the timeline zoom puts more videos on
+  the end of the timeline, and dropping several files at once opens them all in
+  name order. `X` splits the clip under the playhead. Drag a clip in the lane
+  above the filmstrip to move it, and remove it with its cross or `Delete`. The
+  export joins the clips into one file, fitted into the first clip's frame.
 - **Timeline zoom** — scroll the mouse wheel over the timeline, or use the
   zoom in / zoom out / fit buttons beside it.
 - **Speed** — the slider covers 0.25×–8× with notches at the useful stops; type
@@ -81,6 +85,8 @@ You can also install it yourself, any way you like, as long as `ffmpeg` and
 | `←` / `→` | Step one frame |
 | `Shift` + `←` / `→` | Jump one second |
 | `I` / `O` | Set the in / out point at the playhead |
+| `X` | Split the clip at the playhead |
+| `Delete` | Remove the clip under the playhead, when there is more than one |
 | `Home` / `End` | Jump to the in / out point |
 | `M` | Mute (when the clip has audio) |
 | `R` | Reverse |

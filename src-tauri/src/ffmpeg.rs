@@ -13,6 +13,7 @@ use std::sync::{Mutex, OnceLock};
 use serde::{Deserialize, Serialize};
 
 use crate::ramp::{self, SpeedPoint};
+use crate::sequence::{self, Canvas, ClipPiece, PlannedClip};
 use serde_json::Value;
 
 /// A rectangle in *source* pixels, in display orientation.
@@ -321,6 +322,10 @@ pub struct ExportJob {
     pub video_kbps: Option<i64>,
     #[serde(default)]
     pub effects: Effects,
+    /// Empty for one file. Otherwise the clips in order, `input` is the first clip's file, and
+    /// the trim, the speed curve and every keyframe are times on the timeline they make.
+    #[serde(default)]
+    pub clips: Vec<ClipPiece>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -503,6 +508,15 @@ fn active_audio_tracks(job: &ExportJob) -> Vec<&AudioTrackEdit> {
 }
 
 pub fn audio_mix_filter(tracks: &[AudioTrackEdit]) -> Option<(String, String)> {
+    audio_mix_filter_from(tracks, |index| format!("[0:a:{}]", index))
+}
+
+/// The mix, reading each track from the pad `input` names: a file's stream, or a joined
+/// timeline's `[sa<N>]`.
+pub fn audio_mix_filter_from(
+    tracks: &[AudioTrackEdit],
+    input: impl Fn(usize) -> String,
+) -> Option<(String, String)> {
     let active: Vec<&AudioTrackEdit> = tracks.iter().filter(|track| !track.mute).collect();
     if active.is_empty() {
         return None;
@@ -513,8 +527,8 @@ pub fn audio_mix_filter(tracks: &[AudioTrackEdit]) -> Option<(String, String)> {
     for (position, track) in active.iter().enumerate() {
         let label = format!("track{}", position);
         stages.push(format!(
-            "[0:a:{}]aresample=async=1:first_pts=0,aformat=channel_layouts=stereo,volume={}[{}]",
-            track.index,
+            "{}aresample=async=1:first_pts=0,aformat=channel_layouts=stereo,volume={}[{}]",
+            input(track.index),
             fmt_num(track.volume),
             label
         ));
@@ -534,10 +548,14 @@ pub fn audio_mix_filter(tracks: &[AudioTrackEdit]) -> Option<(String, String)> {
 }
 
 fn custom_audio_graph(job: &ExportJob) -> Option<(String, String)> {
+    custom_audio_graph_from(job, |index| format!("[0:a:{}]", index))
+}
+
+fn custom_audio_graph_from(job: &ExportJob, source: impl Fn(usize) -> String) -> Option<(String, String)> {
     if job.audio_tracks.is_empty() || job.mute {
         return None;
     }
-    let (mut graph, input) = audio_mix_filter(&job.audio_tracks)?;
+    let (mut graph, input) = audio_mix_filter_from(&job.audio_tracks, source)?;
     let filters = audio_filters(job);
     if !filters.is_empty() {
         graph.push(';');
@@ -1650,6 +1668,54 @@ pub fn build_args(
     fps: f64,
     font: Option<&Path>,
 ) -> Vec<String> {
+    build_args_with_clips(job, encoder, has_audio, width, height, fps, font, None)
+}
+
+/// The audio tracks a joined timeline has to carry out of its graph: the unmuted ones the
+/// mixer uses, or the first alone when there is no mix.
+fn joined_tracks(job: &ExportJob) -> Vec<usize> {
+    if job.audio_tracks.is_empty() {
+        vec![0]
+    } else {
+        active_audio_tracks(job).iter().map(|track| track.index).collect()
+    }
+}
+
+/// The audio end of a joined timeline's graph: mixed when there is a mix, then the same
+/// filters a single file gets. Returns the label to map.
+fn joined_audio_tail(job: &ExportJob, graph: &mut String) -> String {
+    if let Some((mix, label)) = custom_audio_graph_from(job, |index| format!("[sa{}]", index)) {
+        graph.push(';');
+        graph.push_str(&mix);
+        return label;
+    }
+    let filters = audio_filters(job);
+    graph.push(';');
+    if filters.is_empty() {
+        graph.push_str("[sa0]anull[aout]");
+    } else {
+        graph.push_str(&format!("[sa0]{}[aout]", filters.join(",")));
+    }
+    "[aout]".to_string()
+}
+
+/// build_args for a timeline of several clips. `clips` is the whole timeline with each file's
+/// track count; the job's trim picks the part of it that is exported. width, height and fps
+/// are the canvas every clip is fitted into.
+#[allow(clippy::too_many_arguments)]
+pub fn build_args_with_clips(
+    job: &ExportJob,
+    encoder: &str,
+    has_audio: bool,
+    width: i64,
+    height: i64,
+    fps: f64,
+    font: Option<&Path>,
+    clips: Option<&[PlannedClip]>,
+) -> Vec<String> {
+    let joined: Option<Vec<PlannedClip>> =
+        clips.map(|clips| sequence::window(clips, job.in_point, job.out_point));
+    let canvas = Canvas::new(width, height, fps);
     let mut args: Vec<String> = Vec::new();
     let keep_audio = has_audio
         && !job.mute
@@ -1668,14 +1734,19 @@ pub fn build_args(
     // and still frame-accurate. Its companion is -t and deliberately not -to - an output-side -to
     // is measured on the setpts-scaled timeline, so a 2x export of [10s, 20s] with "-to 20" keeps
     // writing until it has produced 20 seconds. Getting this backwards still exits zero.
-    args.push("-ss".to_string());
-    args.push(fmt_time(job.in_point));
-    args.push("-t".to_string());
-    args.push(fmt_time(source_duration(job)));
-    args.push("-i".to_string());
-    args.push(job.input.clone());
+    if let Some(clips) = joined.as_ref() {
+        args.extend(sequence::input_args(clips));
+    } else {
+        args.push("-ss".to_string());
+        args.push(fmt_time(job.in_point));
+        args.push("-t".to_string());
+        args.push(fmt_time(source_duration(job)));
+        args.push("-i".to_string());
+        args.push(job.input.clone());
+    }
 
-    if job.lossless {
+    // A stream copy cannot cut mid-GOP or join different files, so a timeline never gets one.
+    if job.lossless && joined.is_none() {
         // Only reachable when trim is the sole edit. mkv is the cross-container lossless target -
         // stream copy cannot change codecs, but Matroska holds anything. make_zero rebases the
         // timestamps after the keyframe seek, or the first packet carries a negative PTS.
@@ -1699,7 +1770,11 @@ pub fn build_args(
         // is a video stream) out of the container. job.mute is ignored here: -an beside -vn would ask
         // ffmpeg for a file with no streams at all.
         push_all(&mut args, &["-vn"]);
-        if let Some((graph, output)) = custom_audio.as_ref() {
+        if let Some(clips) = joined.as_ref() {
+            let mut graph = sequence::graph(clips, None, &joined_tracks(job));
+            let output = joined_audio_tail(job, &mut graph);
+            push_all(&mut args, &["-filter_complex", &graph, "-map", &output]);
+        } else if let Some((graph, output)) = custom_audio.as_ref() {
             push_all(&mut args, &["-filter_complex", graph, "-map", output]);
         } else {
             push_all(&mut args, &["-map", "0:a:0"]);
@@ -1758,7 +1833,14 @@ pub fn build_args(
         ));
 
         args.push("-filter_complex".to_string());
-        args.push(chain.join(","));
+        match joined.as_ref() {
+            Some(clips) => args.push(format!(
+                "{};[sv]{}",
+                sequence::graph(clips, Some(canvas), &[]),
+                chain.join(",")
+            )),
+            None => args.push(chain.join(",")),
+        }
         // Loop forever. It is the muxer's default today, but a default is a muxer detail and "a gif
         // that plays once and freezes" takes a day to trace back to a dropped flag.
         push_all(&mut args, &["-loop", "0"]);
@@ -1771,12 +1853,14 @@ pub fn build_args(
     // Explicit maps rather than default stream selection: a phone or GoPro file often carries a
     // timecode or subtitle stream MP4 cannot hold, and the mux fails at the end of a finished
     // encode. The `?` makes the audio map optional, for a file that turns out to have none.
-    push_all(&mut args, &["-map", "0:v:0"]);
-    if keep_audio {
-        if let Some((graph, output)) = custom_audio.as_ref() {
-            push_all(&mut args, &["-filter_complex", graph, "-map", output]);
-        } else {
-            push_all(&mut args, &["-map", "0:a:0?"]);
+    if joined.is_none() {
+        push_all(&mut args, &["-map", "0:v:0"]);
+        if keep_audio {
+            if let Some((graph, output)) = custom_audio.as_ref() {
+                push_all(&mut args, &["-filter_complex", graph, "-map", output]);
+            } else {
+                push_all(&mut args, &["-map", "0:a:0?"]);
+            }
         }
     }
 
@@ -1830,12 +1914,24 @@ pub fn build_args(
     }
     // After reverse, because a fade in belongs at the start of what will be watched.
     vfilters.extend(fade_filters(&job.effects, output_duration(job), true));
-    if !vfilters.is_empty() {
+    if let Some(clips) = joined.as_ref() {
+        // One graph carries the join, the picture's filters and the sound's, since -vf and -af
+        // only reach a stream that comes straight from an input.
+        let tracks = if keep_audio { joined_tracks(job) } else { Vec::new() };
+        let mut graph = sequence::graph(clips, Some(canvas), &tracks);
+        let chain = if vfilters.is_empty() { "null".to_string() } else { vfilters.join(",") };
+        graph.push_str(&format!(";[sv]{}[vout]", chain));
+        let audio = keep_audio.then(|| joined_audio_tail(job, &mut graph));
+        push_all(&mut args, &["-filter_complex", &graph, "-map", "[vout]"]);
+        if let Some(label) = audio {
+            push_all(&mut args, &["-map", &label]);
+        }
+    } else if !vfilters.is_empty() {
         args.push("-vf".to_string());
         args.push(vfilters.join(","));
     }
 
-    if keep_audio && custom_audio.is_none() {
+    if keep_audio && custom_audio.is_none() && joined.is_none() {
         let afilters = audio_filters(job);
         if !afilters.is_empty() {
             args.push("-af".to_string());
@@ -2553,6 +2649,7 @@ mod tests {
             output_height: None,
             video_kbps: None,
             effects: Effects::default(),
+            clips: Vec::new(),
         }
     }
 
@@ -5130,6 +5227,137 @@ mod tests {
         assert!(
             run_version(&found).is_some(),
             "the winner must actually run: a zero-byte WinGet alias must never be accepted"
+        );
+    }
+
+    // --- A timeline of clips ---
+
+    fn planned(path: &str, start: f64, end: f64, tracks: usize) -> PlannedClip {
+        PlannedClip { path: path.to_string(), start, end, audio_tracks: tracks }
+    }
+
+    fn timeline() -> Vec<PlannedClip> {
+        vec![
+            planned("C:\\clips\\a.mp4", 0.0, 10.0, 1),
+            planned("C:\\clips\\b.mp4", 5.0, 8.0, 1),
+        ]
+    }
+
+    fn timeline_job() -> ExportJob {
+        let mut j = job(QualityPreset::Balanced);
+        j.in_point = 0.0;
+        j.out_point = 13.0;
+        j
+    }
+
+    #[test]
+    fn a_timeline_reads_each_clip_and_joins_them_in_one_graph() {
+        let clips = timeline();
+        let args = build_args_with_clips(&timeline_job(), "libx264", true, 1920, 1080, 30.0, None, Some(&clips));
+        let inputs: Vec<&String> = args.iter().filter(|a| a.as_str() == "-i").collect();
+        assert_eq!(inputs.len(), 2);
+        let graph = value_after(&args, "-filter_complex").expect("a timeline needs a filter graph");
+        assert!(graph.contains("concat=n=2:v=1:a=1[sv][sa0]"), "{graph}");
+        assert!(graph.contains(";[sv]null[vout]"), "{graph}");
+        assert!(graph.contains("[sa0]anull[aout]"), "{graph}");
+        assert!(!has(&args, "-vf") && !has(&args, "-af"), "-vf and -af cannot reach a graph output: {args:?}");
+        let maps: Vec<&str> = args.iter().enumerate()
+            .filter(|(_, a)| a.as_str() == "-map")
+            .map(|(i, _)| args[i + 1].as_str())
+            .collect();
+        assert_eq!(maps, ["[vout]", "[aout]"]);
+    }
+
+    #[test]
+    fn a_timeline_trim_drops_the_footage_outside_it() {
+        let mut j = timeline_job();
+        j.in_point = 9.0;
+        j.out_point = 12.0;
+        let args = build_args_with_clips(&j, "libx264", true, 1920, 1080, 30.0, None, Some(&timeline()));
+        let graph = value_after(&args, "-filter_complex").unwrap();
+        assert!(graph.contains("concat=n=2"), "{graph}");
+        // a.mp4 from 9 to 10, then b.mp4 from 5 to 7.
+        assert_eq!(&args[args.iter().position(|a| a == "-ss").unwrap()..][..6], ["-ss", "9.000", "-t", "1.000", "-i", "C:\\clips\\a.mp4"]);
+        assert!(args.windows(6).any(|w| w == ["-ss", "5.000", "-t", "2.000", "-i", "C:\\clips\\b.mp4"]));
+    }
+
+    #[test]
+    fn a_timeline_runs_the_same_picture_and_sound_filters_after_the_join() {
+        let mut j = timeline_job();
+        j.speed = 2.0;
+        j.volume = 1.5;
+        j.reverse = true;
+        let args = build_args_with_clips(&j, "libx264", true, 1920, 1080, 30.0, None, Some(&timeline()));
+        let graph = value_after(&args, "-filter_complex").unwrap();
+        assert!(graph.contains(";[sv]setpts=PTS/2.0,reverse[vout]"), "{graph}");
+        assert!(graph.contains("[sa0]atempo=2.0,volume=1.5,areverse[aout]"), "{graph}");
+    }
+
+    #[test]
+    fn a_timeline_mix_reads_the_joined_tracks() {
+        let mut j = timeline_job();
+        j.audio_tracks = vec![
+            AudioTrackEdit { index: 0, volume: 1.0, mute: false },
+            AudioTrackEdit { index: 1, volume: 1.0, mute: true },
+            AudioTrackEdit { index: 2, volume: 0.5, mute: false },
+        ];
+        let clips = vec![planned("a.mkv", 0.0, 4.0, 3), planned("b.mp4", 0.0, 2.0, 1)];
+        let mut job6 = j.clone();
+        job6.out_point = 6.0;
+        let args = build_args_with_clips(&job6, "libx264", true, 1920, 1080, 30.0, None, Some(&clips));
+        let graph = value_after(&args, "-filter_complex").unwrap();
+        assert!(graph.contains("concat=n=2:v=1:a=2[sv][sa0][sa2]"), "{graph}");
+        assert!(graph.contains("[sa0]aresample=async=1:first_pts=0,aformat=channel_layouts=stereo,volume=1.0[track0]"), "{graph}");
+        assert!(graph.contains("[sa2]aresample"), "{graph}");
+        assert!(!graph.contains("[sa1]"), "a muted track is not carried out of the join: {graph}");
+        assert!(graph.contains("anullsrc"), "b.mp4 has no third track: {graph}");
+    }
+
+    #[test]
+    fn a_muted_timeline_carries_no_sound_out_of_the_join() {
+        let mut j = timeline_job();
+        j.mute = true;
+        let args = build_args_with_clips(&j, "libx264", true, 1920, 1080, 30.0, None, Some(&timeline()));
+        let graph = value_after(&args, "-filter_complex").unwrap();
+        assert!(graph.contains("concat=n=2:v=1:a=0[sv]"), "{graph}");
+        assert!(!args.iter().any(|a| a == "[aout]"));
+    }
+
+    #[test]
+    fn a_timeline_gif_and_audio_export_join_only_what_they_use() {
+        let mut gif = timeline_job();
+        gif.format = ExportFormat::Gif;
+        gif.output = "C:\\clips\\out.gif".to_string();
+        let args = build_args_with_clips(&gif, "libx264", true, 1920, 1080, 30.0, None, Some(&timeline()));
+        let graph = value_after(&args, "-filter_complex").unwrap();
+        assert!(graph.contains("concat=n=2:v=1:a=0[sv];[sv]"), "{graph}");
+        assert!(graph.contains("palettegen"), "{graph}");
+
+        let mut audio = timeline_job();
+        audio.format = ExportFormat::M4a;
+        audio.output = "C:\\clips\\out.m4a".to_string();
+        let args = build_args_with_clips(&audio, "libx264", true, 1920, 1080, 30.0, None, Some(&timeline()));
+        let graph = value_after(&args, "-filter_complex").unwrap();
+        assert!(graph.contains("concat=n=2:v=0:a=1[sa0]"), "{graph}");
+        assert!(!graph.contains("scale="), "{graph}");
+        assert_eq!(value_after(&args, "-map"), Some("[aout]"));
+    }
+
+    #[test]
+    fn a_timeline_is_never_stream_copied() {
+        let mut j = timeline_job();
+        j.lossless = true;
+        let args = build_args_with_clips(&j, "libx264", true, 1920, 1080, 30.0, None, Some(&timeline()));
+        assert!(!args.windows(2).any(|w| w == ["-c", "copy"]));
+        assert!(has(&args, "-filter_complex"));
+    }
+
+    #[test]
+    fn one_file_without_clips_builds_what_it_always_built() {
+        let j = job(QualityPreset::Balanced);
+        assert_eq!(
+            build_args(&j, "libx264", true, 1920, 1080, 30.0, None),
+            build_args_with_clips(&j, "libx264", true, 1920, 1080, 30.0, None, None)
         );
     }
 }

@@ -26,6 +26,23 @@ export interface MediaInfo {
   sizeBytes: number;
 }
 
+/** One stretch of a source file on the timeline. A file opened on its own is one clip that
+ *  covers it; Add clip, Split and the clip lane make more. */
+export interface Clip {
+  id: number;
+  media: MediaInfo;
+  /** Seconds into the file. */
+  start: number;
+  end: number;
+}
+
+/** A clip as the Rust side takes it. */
+export interface ClipPiece {
+  path: string;
+  start: number;
+  end: number;
+}
+
 export interface AudioTrackInfo {
   index: number;
   title: string | null;
@@ -255,10 +272,16 @@ export interface ExportJob {
   videoKbps: number | null;
   lossless: boolean;
   effects: EffectsJob;
+  /** Empty for one file played start to end. Otherwise the clips in order, and every time in
+   *  this job is on the timeline they make. */
+  clips: ClipPiece[];
 }
 
 export interface EditState {
+  /** For several clips this describes the timeline they make: their total length, the first
+   *  clip's frame, and the most audio tracks any of them has. */
   media: MediaInfo | null;
+  clips: Clip[];
   /** Asset-protocol URL, or a proxy when the codec will not play. */
   src: string | null;
   inPoint: number;
@@ -490,9 +513,27 @@ export function isTrimOnly(state: EditState): boolean {
 /** A stream copy cannot change codecs, so the container must be the one the file arrived in. */
 export function losslessEligible(state: EditState): boolean {
   if (!isTrimOnly(state) || state.audioOnly || state.format === 'gif') return false;
+  // Joining clips has to re-encode at every cut.
+  if (!isPlainClips(state.clips ?? [])) return false;
   if (state.media === null) return false;
   if (state.format === 'mkv') return true;
   // defaultFormatFor maps WMV, OGV and the rest to mp4, which cannot hold their codecs.
   const ext = state.media.path.slice(state.media.path.lastIndexOf('.') + 1).toLowerCase();
   return ['mp4', 'm4v', 'mov', 'webm'].includes(ext) && state.format === defaultFormatFor(state.media.path);
+}
+
+/** Seconds two clip edges may differ by and still meet. Well under a frame. */
+export const CLIP_EPSILON = 1e-6;
+
+/** True when the clips play one file from its start to its end in order, which is a file
+ *  opened on its own, split or not. Everything then works on that file exactly as before. */
+export function isPlainClips(clips: Clip[]): boolean {
+  if (clips.length === 0) return true;
+  const media = clips[0].media;
+  let at = 0;
+  for (const clip of clips) {
+    if (clip.media.path !== media.path || Math.abs(clip.start - at) > CLIP_EPSILON) return false;
+    at = clip.end;
+  }
+  return Math.abs(at - media.duration) <= CLIP_EPSILON;
 }

@@ -2,6 +2,8 @@ import { edit, patchUi, refresh, subscribe } from './state';
 import { applyGain, enableBoost } from './audio';
 import { normalizeGain } from './loudness';
 import { speedAt } from './ramp';
+import { isPlain, locate, remapTime, timelineTime, totalDuration } from './sequence';
+import type { Clip } from './types';
 import {
   clearTrackPreviews,
   hasTrackPreview,
@@ -42,6 +44,34 @@ let reverseRaf = 0;
 let reversePos = 0;
 let reverseWall = 0;
 
+// Several clips: the element plays one file at a time, and the playhead is a time on the
+// timeline the clips make. `clipIndex` is the clip the element is showing.
+let loadedUrl: string | null = null;
+let clipIndex = 0;
+let layout: Clip[] = [];
+// While the element loads another file it reports 0, so the playhead holds here meanwhile.
+let heldTime: number | null = null;
+let switchLocal: number | null = null;
+let resumeAfterSwitch = false;
+let urlForPath: (path: string) => string = (path) => path;
+
+/** How a clip's file becomes a URL the element can play, which main.ts owns because it
+ *  knows about preview copies. */
+export function setClipUrl(resolve: (path: string) => string): void {
+  urlForPath = resolve;
+}
+
+function sequenceMode(): boolean {
+  return !isPlain(edit.clips);
+}
+
+/** The file the picture is coming from, for the preview copy offer. */
+export function currentClipPath(): string | null {
+  if (!edit.media) return null;
+  if (!sequenceMode()) return edit.media.path;
+  return edit.clips[clipIndex]?.media.path ?? edit.media.path;
+}
+
 // Chromium throws outside [0.0625, 16] and the throw would abort the notify loop.
 function previewRate(): number {
   // Under a curve the rate is whatever the playhead is standing on, so the preview speeds up
@@ -68,7 +98,7 @@ function playElement(): void {
 
 export function initPlayer(el: HTMLVideoElement): void {
   video = el;
-  initTrackPreview(video);
+  initTrackPreview(video, displayTime);
   useFrameCallback = typeof video.requestVideoFrameCallback === 'function';
   hasFastSeek = typeof video.fastSeek === 'function';
 
@@ -86,20 +116,25 @@ export function initPlayer(el: HTMLVideoElement): void {
     if (!reverseActive) patchUi({ playing: false });
   });
   video.addEventListener('seeked', () => {
+    if (switchLocal !== null) return;
     seekInFlight = false;
+    heldTime = null;
     if (pendingTarget !== null) issueSeek();
     seekTrackPreview(displayTime());
     emitTime(displayTime());
   });
   video.addEventListener('timeupdate', () => emitTime(displayTime()));
-  video.addEventListener('ended', () => rewindToIn());
+  video.addEventListener('ended', () => {
+    if (!advanceClip()) rewindToIn();
+  });
 
   video.addEventListener('loadedmetadata', () => {
     // preservesPitch survives a src swap, but the proxy path replaces the source mid-session.
     video.preservesPitch = true;
     video.playbackRate = previewRate();
+    if (switchLocal !== null) finishSwitch();
     syncTrackPreview();
-    emitTime(video.currentTime);
+    emitTime(displayTime());
   });
 
   video.addEventListener('loadeddata', () => {
@@ -111,6 +146,9 @@ export function initPlayer(el: HTMLVideoElement): void {
     // A dead element never fires 'seeked', and every later seek would queue behind it.
     seekInFlight = false;
     pendingTarget = null;
+    heldTime = null;
+    switchLocal = null;
+    resumeAfterSwitch = false;
     pauseTrackPreview();
     reportPreviewTrouble();
   });
@@ -132,20 +170,79 @@ export function loadSource(url: string): void {
   window.clearTimeout(previewTimer);
   troubleReported = false;
   resetSeekMachinery();
+  clipIndex = 0;
+  layout = edit.clips;
 
   video.pause();
   syncTrackPreview();
+  loadedUrl = url;
   video.src = url;
   video.load();
+  armPreviewTimer();
+}
 
+function armPreviewTimer(): void {
+  window.clearTimeout(previewTimer);
   previewTimer = window.setTimeout(() => {
     if (video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) reportPreviewTrouble();
   }, PREVIEW_TIMEOUT_MS);
 }
 
+/** Puts another clip's file in the element and seeks it once it knows its length. */
+function switchTo(url: string, index: number, local: number, timeline: number): void {
+  resumeAfterSwitch = resumeAfterSwitch || (!video.paused && !reverseActive);
+  seekInFlight = true;
+  heldTime = timeline;
+  switchLocal = local;
+  clipIndex = index;
+  loadedUrl = url;
+  troubleReported = false;
+  video.src = url;
+  video.load();
+  armPreviewTimer();
+}
+
+function finishSwitch(): void {
+  const local = switchLocal ?? 0;
+  switchLocal = null;
+  if (Math.abs(video.currentTime - local) < 0.0001) {
+    seekInFlight = false;
+    heldTime = null;
+  } else {
+    // 'seeked' clears the hold and runs anything queued meanwhile.
+    video.currentTime = local;
+  }
+  if (resumeAfterSwitch) {
+    resumeAfterSwitch = false;
+    playElement();
+  }
+  if (!seekInFlight && pendingTarget !== null) issueSeek();
+}
+
+/** At the end of a clip, carries playback on into the next one. False at the end of the
+ *  timeline, or with one file, where the caller loops back to the in point. */
+function advanceClip(): boolean {
+  if (!sequenceMode() || reverseActive || !edit.media) return false;
+  const next = clipIndex + 1;
+  if (next >= edit.clips.length) return false;
+  const start = timelineTime(edit.clips, next, edit.clips[next].start);
+  if (start >= edit.outPoint - halfFrame()) return false;
+  const resume = !video.paused || video.ended;
+  resumeAfterSwitch = resumeAfterSwitch || resume;
+  requestSeek(start);
+  // The next clip may be in the same file, where nothing reloads to resume it: an ended file
+  // has paused itself.
+  if (switchLocal === null) {
+    resumeAfterSwitch = false;
+    if (resume && video.paused) playElement();
+  }
+  return true;
+}
+
 export function clearSource(): void {
   window.clearTimeout(previewTimer);
   resetSeekMachinery();
+  loadedUrl = null;
   video.pause();
   clearTrackPreviews();
   video.removeAttribute('src');
@@ -236,19 +333,36 @@ function issueSeek(): void {
   const target = pendingTarget;
   pendingTarget = null;
 
+  let local = target;
+  if (sequenceMode()) {
+    const hit = locate(edit.clips, target);
+    if (!hit) return;
+    const url = urlForPath(edit.clips[hit.index].media.path);
+    if (url !== loadedUrl) {
+      switchTo(url, hit.index, hit.local, target);
+      return;
+    }
+    clipIndex = hit.index;
+    local = hit.local;
+  }
+
   // A zero-length seek still runs the seek algorithm, and may never fire 'seeked'.
-  if (!video.seeking && Math.abs(video.currentTime - target) < 0.0001) {
+  if (!video.seeking && Math.abs(video.currentTime - local) < 0.0001) {
     emitTime(target);
     return;
   }
 
   seekInFlight = true;
-  if (scrubbing && hasFastSeek) video.fastSeek(target);
-  else video.currentTime = target;
+  if (scrubbing && hasFastSeek) video.fastSeek(local);
+  else video.currentTime = local;
 }
 
 function displayTime(): number {
-  return pendingTarget ?? video.currentTime;
+  if (pendingTarget !== null) return pendingTarget;
+  if (heldTime !== null) return heldTime;
+  if (!video) return 0;
+  if (!sequenceMode()) return video.currentTime;
+  return timelineTime(edit.clips, clipIndex, video.currentTime);
 }
 
 function resetSeekMachinery(): void {
@@ -257,6 +371,9 @@ function resetSeekMachinery(): void {
   pendingTarget = null;
   lastTarget = null;
   scrubbing = false;
+  heldTime = null;
+  switchLocal = null;
+  resumeAfterSwitch = false;
 }
 
 function startReverse(): void {
@@ -331,6 +448,7 @@ function pump(): void {
   const t = displayTime();
 
   if (edit.media && !video.paused && t >= edit.outPoint - halfFrame()) rewindToIn();
+  else if (edit.media && !video.paused && !seekInFlight && clipEnded()) advanceClip();
   else emitTime(t);
 
   followRamp();
@@ -339,11 +457,40 @@ function pump(): void {
   if (useFrameCallback || !video.paused) schedulePump();
 }
 
+function clipEnded(): boolean {
+  if (!sequenceMode()) return false;
+  const clip = edit.clips[clipIndex];
+  return clip !== undefined && video.currentTime >= clip.end - halfFrame();
+}
+
 function schedulePump(): void {
   if (pumpPending) return;
   pumpPending = true;
   if (useFrameCallback) video.requestVideoFrameCallback(pump);
   else requestAnimationFrame(pump);
+}
+
+/** The clips changed under the playhead: keep it on the same footage where that is still on
+ *  the timeline, and put the right file in the element. */
+function followClips(): void {
+  const before = layout;
+  layout = edit.clips;
+  if (before.length === 0) return;
+  const was = displayTime();
+  const total = totalDuration(edit.clips);
+  const moved = remapTime(before, edit.clips, was) ?? Math.min(was, total);
+  // One file played whole again, which may not be the file that opened the session: removing
+  // the first of two clips leaves the second.
+  const wanted = sequenceMode() || !edit.clips[0] ? null : urlForPath(edit.clips[0].media.path);
+  if (wanted !== null && wanted !== loadedUrl) {
+    const playing = !video.paused;
+    resetSeekMachinery();
+    switchTo(wanted, 0, moved, moved);
+    resumeAfterSwitch = playing;
+    return;
+  }
+  pendingTarget = null;
+  requestSeek(Math.min(Math.max(moved, edit.inPoint), edit.outPoint));
 }
 
 function syncFromState(): void {
@@ -368,6 +515,8 @@ function syncFromState(): void {
     stopReverse();
     return;
   }
+
+  if (edit.clips !== layout) followClips();
 
   if (edit.reverse && !video.paused) startReverse();
   else if (!edit.reverse && reverseActive) {

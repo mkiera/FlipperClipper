@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Join several videos into one. Add clips with the new button beside the timeline zoom, or drop several files at once, and they line up on one timeline in name order. Split the clip under the playhead with X or the scissors button. Drag a clip in the clip lane above the filmstrip to move it, and press its cross or Delete to remove it. Playback runs straight through the clips, and the export joins them into one file. Trim, speed, effects, crop and the audio tracks apply to the joined video. Clips of another size are fitted inside the first clip's frame with black bars.
+
 ## 1.3.0 - 2026-11-10
 
 - Cancel now stops an export even when it is clicked in the first moments after Export, so the existing file is left alone.

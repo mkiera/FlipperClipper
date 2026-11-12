@@ -101,6 +101,7 @@ async function harness() {
   const attachments = [];
   const edit = {
     media: null,
+    clips: [],
     mute: false,
     reverse: false,
     normalize: false,
@@ -141,6 +142,11 @@ async function harness() {
       },
     },
     './loudness': { normalizeGain: () => 2 },
+    './sequence': {
+      isPlain: () => true,
+      timelineKey: () => '',
+      toPieces: () => [],
+    },
     './state': { edit, refresh: () => {} },
   };
   const linked = new Map();

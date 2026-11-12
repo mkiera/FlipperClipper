@@ -1,5 +1,5 @@
 import { measureLoudness } from './ipc';
-import type { AudioTrackSettings, Loudness } from './types';
+import type { AudioTrackSettings, ClipPiece, Loudness } from './types';
 
 let requestedKey: string | null = null;
 let measured: Loudness | null = null;
@@ -14,13 +14,15 @@ export function loudness(): Loudness | null {
   return measured;
 }
 
+/** `clips` measures the timeline the clips make instead of the file at `path`. */
 export async function ensureMeasured(
   path: string,
   onSettled: () => void,
   audioTracks: AudioTrackSettings[] = [],
+  clips: ClipPiece[] | null = null,
 ): Promise<void> {
   const tracks = audioTracks.length > 1 ? audioTracks : [];
-  const key = JSON.stringify([path, tracks]);
+  const key = JSON.stringify([path, tracks, clips]);
   if (requestedKey === key) return;
   requestedKey = key;
   measured = measurements.get(key) ?? null;
@@ -32,7 +34,7 @@ export async function ensureMeasured(
     if (token !== generation) return;
   }
   try {
-    const result = await measureLoudness(path, tracks);
+    const result = await measureLoudness(path, tracks, clips);
     if (token !== generation) return;
     measurements.set(key, result);
     measured = result;
