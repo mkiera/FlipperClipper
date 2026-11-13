@@ -634,12 +634,15 @@ $form.Add_MouseDown({
 [System.Windows.Forms.Application]::Run($form)
 '@
     $shell = (Get-Process -Id $PID).Path
-    $proc = Start-Process -FilePath $shell -ArgumentList @('-NoProfile', '-STA', '-ExecutionPolicy', 'Bypass', '-File', "`"$source`"", '-List', "`"$list`"") -PassThru
+    # In this console: a console window of its own opens over the app and takes the drop (seen
+    # on GitHub's runner).
+    $proc = Start-Process -FilePath $shell -NoNewWindow -ArgumentList @('-NoProfile', '-STA', '-ExecutionPolicy', 'Bypass', '-File', "`"$source`"", '-List', "`"$list`"") -PassThru
     try {
         $byName = New-Object System.Windows.Automation.PropertyCondition($AE::NameProperty, 'fc-drag-source')
         $win = Wait-Fc -TimeoutSeconds 20 -What 'the drag source window' { $AE::RootElement.FindFirst($Children, $byName) }
         $r = $win.Current.BoundingRectangle
         Write-FcLog "drag source at $($r.Left), $($r.Top), $($r.Width) x $($r.Height)"
+        Set-FcForeground
         $fromX = [int]($r.Left + $r.Width / 2)
         $fromY = [int]($r.Top + $r.Height / 2)
         [FcWin32]::SetCursorPos($fromX, $fromY) | Out-Null

@@ -67,8 +67,8 @@ function Get-LaneGeometry {
 }
 
 function Invoke-Drop([string]$Path, [int]$X, [int]$Y, [string]$ShotName, [string]$What, [scriptblock]$Done) {
-    # A synthetic OLE drag now and then never starts (seen once in about five on KIERA-VM), so a
-    # drop that changed nothing is tried once more.
+    # A window that pops up over the target point takes the drop instead, so a drop that changed
+    # nothing is tried once more.
     for ($try = 1; $try -le 2; $try++) {
         Invoke-FcFileDrop -Paths @($Path) -X $X -Y $Y -ShotName $ShotName | Out-Null
         try { return (Wait-Fc -TimeoutSeconds 10 -What $What $Done) } catch { if ($try -eq 2) { throw } }
