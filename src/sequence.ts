@@ -175,7 +175,8 @@ export function remapTime(before: Clip[], after: Clip[], t: number, atEnd = fals
   const known = new Set(before.map((clip) => clip.id));
   const same = (clip: Clip) => clip.id === source.id
     || (!known.has(clip.id) && clip.origin === source.id)
-    || (source.origin !== undefined && clip.id === source.origin);
+    // Only when it grew back over the tail: at its old edge it is just the head.
+    || (source.origin !== undefined && clip.id === source.origin && strictly(clip));
   const candidates = after
     .map((clip, index) => ({ clip, index }))
     .filter(({ clip }) => same(clip) && contains(clip));

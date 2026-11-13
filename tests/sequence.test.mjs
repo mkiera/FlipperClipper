@@ -216,3 +216,10 @@ test('a second copy keeps its own place at its edges and goes with its removal',
   const split = s.splitAt([whole(A, 1)], 4);
   assert.equal(s.remapTime(split, [whole(A, 1)], 7), 7);
 });
+
+test('removing a split tail drops its first moment instead of handing it to the head', async () => {
+  const s = await sequence();
+  const split = s.splitAt([whole(A, 1)], 4);
+  assert.equal(s.remapTime(split, s.removeClip(split, 1), 4), null);
+  assert.equal(s.remapTime(split, [whole(A, 1)], 4), 4, 'undoing the split keeps it');
+});
