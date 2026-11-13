@@ -475,8 +475,8 @@ pub fn probe_media(path: &str) -> Result<MediaInfo, String> {
     ffmpeg::parse_probe(&String::from_utf8_lossy(&output.stdout), path, size_bytes)
 }
 
-/// Probes every file on a timeline once, and describes the timeline as one source: the first
-/// clip's frame (made even), its frame rate, the most audio tracks any clip has, and whether any
+/// Probes every file on a timeline once, and describes the timeline as one source: the largest
+/// clip's frame (made even) and frame rate, so the order of the clips does not change the size, the most audio tracks any clip has, and whether any
 /// has sound.
 pub fn plan_clips(pieces: &[ClipPiece]) -> Result<(Vec<PlannedClip>, MediaInfo), String> {
     if pieces.is_empty() {
@@ -497,7 +497,12 @@ pub fn plan_clips(pieces: &[ClipPiece]) -> Result<(Vec<PlannedClip>, MediaInfo),
             audio_tracks: info.audio_tracks.len(),
         });
     }
-    let first = &probed[&pieces[0].path];
+    let first = pieces
+        .iter()
+        .map(|piece| &probed[&piece.path])
+        .fold(&probed[&pieces[0].path], |best, info| {
+            if info.width * info.height > best.width * best.height { info } else { best }
+        });
     let canvas = Canvas::new(first.width, first.height, first.fps);
     let richest = pieces
         .iter()

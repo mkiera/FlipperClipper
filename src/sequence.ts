@@ -78,22 +78,28 @@ export function timelineTime(clips: Clip[], index: number, local: number): numbe
 }
 
 /** What the timeline as a whole looks like, as far as the rest of the app asks: its length,
- *  the first clip's frame, which the export fits every other clip into, and the most audio
- *  tracks any clip has, since a clip without one of them plays silence there. */
+ *  the largest clip's frame, which the export fits every other clip into, and the most audio
+ *  tracks any clip has, since a clip without one of them plays silence there. The largest
+ *  rather than the first, so moving a clip to the front does not change the export's size. */
 export function timelineMedia(clips: Clip[]): MediaInfo | null {
   if (clips.length === 0) return null;
   if (isPlain(clips)) return clips[0].media;
-  const first = clips[0].media;
+  const frame = clips.reduce(
+    (best, clip) => (clip.media.width * clip.media.height > best.width * best.height ? clip.media : best),
+    clips[0].media,
+  );
   const richest = clips.reduce(
     (best, clip) => (clip.media.audioTracks.length > best.audioTracks.length ? clip.media : best),
-    first,
+    frame,
   );
   const sizeBytes = clips.reduce((sum, clip) => {
     const share = clip.media.duration > 0 ? clipLength(clip) / clip.media.duration : 0;
     return sum + clip.media.sizeBytes * share;
   }, 0);
   return {
-    ...first,
+    ...frame,
+    // The first clip names the export and picks its default format.
+    path: clips[0].media.path,
     duration: totalDuration(clips),
     hasAudio: clips.some((clip) => clip.media.hasAudio),
     audioCodec: richest.audioCodec,

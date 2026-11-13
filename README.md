@@ -41,7 +41,7 @@ same builds start updating themselves with no change on their end.
   the end of the timeline, and dropping several files at once opens them all in
   name order. `X` splits the clip under the playhead. Drag a clip in the lane
   above the filmstrip to move it, and remove it with its cross or `Delete`. The
-  export joins the clips into one file, fitted into the first clip's frame.
+  export joins the clips into one file at the size of the largest clip.
 - **Timeline zoom** — scroll the mouse wheel over the timeline, or use the
   zoom in / zoom out / fit buttons beside it.
 - **Speed** — the slider covers 0.25×–8× with notches at the useful stops; type

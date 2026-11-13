@@ -43,7 +43,7 @@ impl PlannedClip {
     }
 }
 
-/// The frame every clip is fitted into: the first clip's, made even for yuv420p.
+/// The frame every clip is fitted into: the largest clip's, made even for yuv420p.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Canvas {
     pub width: i64,

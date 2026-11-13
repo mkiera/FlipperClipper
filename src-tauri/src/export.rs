@@ -236,7 +236,7 @@ pub fn start_export(app: AppHandle, job: ExportJob, job_id: u64) -> Result<(), S
 
     // The job carries what the user asked for, not what is in the file. Without this probe a
     // clip recorded with the mic off fails on "Stream map '0:a:0' matches no streams".
-    // A timeline of clips is described as one source: the first clip's frame, and the most
+    // A timeline of clips is described as one source: the largest clip's frame, and the most
     // audio tracks any clip has.
     let (clips, info) = if job.clips.is_empty() {
         (None, crate::sysutil::probe_media(&job.input)?)

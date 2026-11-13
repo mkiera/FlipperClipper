@@ -280,7 +280,7 @@ export interface ExportJob {
 }
 
 export interface EditState {
-  /** For several clips this describes the timeline they make: their total length, the first
+  /** For several clips this describes the timeline they make: their total length, the largest
    *  clip's frame, and the most audio tracks any of them has. */
   media: MediaInfo | null;
   clips: Clip[];

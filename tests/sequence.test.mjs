@@ -223,3 +223,13 @@ test('removing a split tail drops its first moment instead of handing it to the 
   assert.equal(s.remapTime(split, s.removeClip(split, 1), 4), null);
   assert.equal(s.remapTime(split, [whole(A, 1)], 4), 4, 'undoing the split keeps it');
 });
+
+test('the timeline keeps the largest frame whatever clip comes first', async () => {
+  const s = await sequence();
+  const small = { ...media('C:\\clips\\small.mp4', 5), width: 1280, height: 720, fps: 30 };
+  const clips = [{ id: 1, media: small, start: 0, end: 5 }, whole(A, 2)];
+  const timeline = s.timelineMedia(clips);
+  assert.equal(timeline.width, 1920);
+  assert.equal(timeline.fps, 60);
+  assert.equal(s.timelineMedia(s.moveClip(clips, 1, 0)).width, 1920);
+});
