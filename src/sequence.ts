@@ -132,7 +132,7 @@ export function splitAt(clips: Clip[], t: number): Clip[] | null {
   if (hit.local - clip.start < MIN_CLIP_SECONDS || clip.end - hit.local < MIN_CLIP_SECONDS) return null;
   const id = nextClipId(clips);
   const head: Clip = { ...clip, end: hit.local };
-  const tail: Clip = { ...clip, id, start: hit.local };
+  const tail: Clip = { ...clip, id, origin: clip.id, start: hit.local };
   return [...clips.slice(0, hit.index), head, tail, ...clips.slice(hit.index + 1)];
 }
 
@@ -169,17 +169,18 @@ export function remapTime(before: Clip[], after: Clip[], t: number, atEnd = fals
     && local >= clip.start - CLIP_EPSILON && local <= clip.end + CLIP_EPSILON;
   // On a shared edge the earlier clip owns an end and the later one owns a start.
   const strictly = (clip: Clip) => (atEnd ? local > clip.start + CLIP_EPSILON : local < clip.end - CLIP_EPSILON);
-  const candidates = after.map((clip, index) => ({ clip, index })).filter(({ clip }) => contains(clip));
-  if (candidates.length === 0) return null;
   // The same file can be on the timeline more than once, so the clip itself is followed: by
-  // its id, or after a split by the new clip its tail became.
+  // its id, the tail a split just cut from it, or the clip an undone split had cut it from.
+  // Anything else showing that file is other footage, and a removed clip's moments are gone.
   const known = new Set(before.map((clip) => clip.id));
-  const ranked = [
-    ...candidates.filter(({ clip }) => clip.id === source.id),
-    ...candidates.filter(({ clip }) => !known.has(clip.id)),
-    ...candidates,
-  ];
-  const { index } = ranked.find(({ clip }) => strictly(clip)) ?? ranked[0];
+  const same = (clip: Clip) => clip.id === source.id
+    || (!known.has(clip.id) && clip.origin === source.id)
+    || (source.origin !== undefined && clip.id === source.origin);
+  const candidates = after
+    .map((clip, index) => ({ clip, index }))
+    .filter(({ clip }) => same(clip) && contains(clip));
+  if (candidates.length === 0) return null;
+  const { index } = candidates.find(({ clip }) => strictly(clip)) ?? candidates[0];
   return timelineTime(after, index, local);
 }
 

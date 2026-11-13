@@ -205,3 +205,14 @@ test('a file on the timeline twice keeps each copy apart', async () => {
   // Moving the second copy first carries its keyframes along.
   assert.equal(s.remapTime(twice, s.moveClip(twice, 1, 0), 12), 2);
 });
+
+test('a second copy keeps its own place at its edges and goes with its removal', async () => {
+  const s = await sequence();
+  const twice = [whole(A, 1), { id: 2, media: A, start: 0, end: 5 }];
+  // 15 is the end of the short copy; moved first, that end is at 5.
+  assert.equal(s.remapTime(twice, s.moveClip(twice, 1, 0), 15, true), 5);
+  assert.equal(s.remapTime(twice, s.removeClip(twice, 1), 12), null);
+  // Undoing a split hands the tail's moments back to the clip it came from.
+  const split = s.splitAt([whole(A, 1)], 4);
+  assert.equal(s.remapTime(split, [whole(A, 1)], 7), 7);
+});

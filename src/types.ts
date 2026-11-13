@@ -30,6 +30,8 @@ export interface MediaInfo {
  *  covers it; Add clip, Split and the clip lane make more. */
 export interface Clip {
   id: number;
+  /** The clip a split cut this one from, so its keyframes can follow it. */
+  origin?: number;
   media: MediaInfo;
   /** Seconds into the file. */
   start: number;
