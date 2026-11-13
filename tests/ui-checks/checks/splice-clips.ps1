@@ -48,11 +48,19 @@ function Get-ClipNames {
         Sort-Object { [int](($_ -split ' ')[2].TrimEnd(',')) } | ForEach-Object { ($_ -split ', ', 2)[1] })
 }
 
+function Get-Rect([string]$Name) {
+    # Right after the lane redraws, UI Automation can report an empty rectangle for a moment.
+    Wait-Fc -TimeoutSeconds 5 -What "a laid-out '$Name'" {
+        $r = (Find-FcElement -Name $Name -ControlType Button -TimeoutSeconds 1).Current.BoundingRectangle
+        if (-not $r.IsEmpty -and $r.Width -gt 0) { $r }
+    }
+}
+
 function Get-LaneGeometry {
     # Where the timeline starts and how wide it is, from the right edges of the first two clip
     # blocks (their crosses sit at the right edge): r1 ends at 8 s and r2 at 14 s of 26.
-    $one = (Find-FcElement -Name 'Remove clip 1, r1.mp4' -ControlType Button).Current.BoundingRectangle
-    $two = (Find-FcElement -Name 'Remove clip 2, r2.mp4' -ControlType Button).Current.BoundingRectangle
+    $one = Get-Rect 'Remove clip 1, r1.mp4'
+    $two = Get-Rect 'Remove clip 2, r2.mp4'
     $width = ($two.Right - $one.Right) * 26 / 6
     [pscustomobject]@{ Left = $one.Right + 3 - $width * 8 / 26; Width = $width; Y = [int]($one.Top + $one.Height / 2) }
 }
@@ -131,7 +139,7 @@ Invoke-FcCheck 'splice-clips' {
     Save-FcScreenshot -Name 'split' | Out-Null
 
     # Drag r3 by its label to the start of the lane.
-    $cross = (Find-FcElement -Name 'Remove clip 4, r3.mp4' -ControlType Button).Current.BoundingRectangle
+    $cross = Get-Rect 'Remove clip 4, r3.mp4'
     $y = [int]($cross.Top + $cross.Height / 2)
     Invoke-Drag ([int]($cross.Left - 30)) $y ([int]($lane.Left + 4))
     Wait-Fc -TimeoutSeconds 5 -What 'r3 to move first' { ((Get-ClipNames) -join ',') -eq 'r3.mp4,r1.mp4,r1.mp4,r2.mp4,r4.mp4' }
