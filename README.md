@@ -38,8 +38,8 @@ same builds start updating themselves with no change on their end.
 - **Trim** — drag the in/out handles on the timeline, or set them with `I` and
   `O` at the playhead.
 - **Clips** — the add-clips button beside the timeline zoom puts more videos on
-  the end of the timeline, and dropping several files at once opens them all in
-  name order. `X` splits the clip under the playhead. Drag a clip in the lane
+  the end of the timeline, and so does dropping files onto the timeline.
+  Dropping several files on the video opens them all in name order. `X` splits the clip under the playhead. Drag a clip in the lane
   above the filmstrip to move it, and remove it with its cross or `Delete`. The
   export joins the clips into one file at the size of the largest clip.
 - **Timeline zoom** — scroll the mouse wheel over the timeline, or use the

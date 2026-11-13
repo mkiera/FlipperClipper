@@ -1,5 +1,6 @@
 # Several files on one timeline: add them, split one, drag a clip to the front, remove one, play
-# across the cuts, export the joined video, then undo a removal and remove with Delete.
+# across the cuts, export the joined video, undo a removal and remove with Delete, then drop a
+# file on the timeline to add it and one on the video to open it alone.
 $ErrorActionPreference = 'Stop'
 Import-Module $env:FC_UI_MODULE
 
@@ -199,5 +200,22 @@ Invoke-FcCheck 'splice-clips' {
     } else {
         Write-FcLog 'skipped: Ctrl+Z did not reach the page in this session, so undo and Delete were not driven'
     }
+
+    # A file dropped on the timeline joins the end of it.
+    $win = (Get-FcWindow).Current.BoundingRectangle
+    $addBtn = (Find-FcElement -Id 'tl-add-clip' -Name 'Add clips' -ControlType Button).Current.BoundingRectangle
+    $count = (Get-ClipNames).Count
+    $midX = [int]($win.Left + $win.Width / 2)
+    Invoke-FcFileDrop -Paths @((Join-Path $work 'r2.mp4')) -X $midX -Y ([int]($addBtn.Top + $addBtn.Height / 2)) -ShotName 'dragging-over-timeline' | Out-Null
+    Wait-Fc -TimeoutSeconds 15 -What 'the dropped file to join the timeline' { (Get-ClipNames).Count -eq $count + 1 } | Out-Null
+    $names = @(Get-ClipNames)
+    Assert-Fc ($names[-1] -eq 'r2.mp4') "a file dropped on the timeline is added at its end ($($names -join ','))"
+    Save-FcScreenshot -Name 'dropped-on-timeline' | Out-Null
+
+    # A file dropped on the video opens on its own, as before.
+    Invoke-FcFileDrop -Paths @((Join-Path $work 'r3.mp4')) -X $midX -Y ([int]($win.Top + $win.Height * 0.3)) -ShotName 'dragging-over-video' | Out-Null
+    Wait-Fc -TimeoutSeconds 15 -What 'the dropped file to open alone' { (Get-ClipNames).Count -eq 0 -and (Get-OutputLength) -eq '0:05.0' } | Out-Null
+    Assert-Fc $true "a file dropped on the video replaces the timeline ($(Get-FcTimeLabel))"
+    Save-FcScreenshot -Name 'dropped-on-video' | Out-Null
     Close-Fc | Out-Null
 }

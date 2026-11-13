@@ -58,6 +58,8 @@ const REBUILD_DELAY_MS = 250;
 
 let emptyState!: HTMLElement;
 let dropHint!: HTMLElement;
+let dropOpen!: HTMLElement;
+let dropAdd!: HTMLElement;
 let about!: HTMLElement;
 
 function el<T extends HTMLElement>(id: string): T {
@@ -72,6 +74,8 @@ function boot(): void {
 
   emptyState = el('empty');
   dropHint = el('drop-hint');
+  dropOpen = el('drop-open');
+  dropAdd = el('drop-add');
   about = el('about');
 
   // Player first: crop.ts measures the <video> on init, controls.ts reads its position.
@@ -230,17 +234,39 @@ async function loadFilmstrip(): Promise<void> {
   }
 }
 
+/** With a video open, the timeline is a second drop zone that adds the files as clips. The
+ *  rest of the window opens a dropped file in place of the video, as it always has. */
+function dropAddsClips(position: { x: number; y: number }): boolean {
+  if (!edit.media) return false;
+  // Tauri reports physical pixels; the page lays out in CSS pixels.
+  const y = position.y / window.devicePixelRatio;
+  return y >= el('timeline').getBoundingClientRect().top;
+}
+
+function showDropHint(position: { x: number; y: number }): void {
+  const top = edit.media ? el('timeline').getBoundingClientRect().top : null;
+  dropHint.style.setProperty('--add-top', top === null ? '100%' : `${top}px`);
+  dropAdd.hidden = top === null;
+  const adding = dropAddsClips(position);
+  dropAdd.classList.toggle('active', adding);
+  dropOpen.classList.toggle('active', !adding);
+  dropHint.hidden = false;
+}
+
 async function watchDrops(): Promise<void> {
   await onDragDrop((event) => {
     if (event.type === 'enter' || event.type === 'over') {
-      dropHint.hidden = false;
+      showDropHint(event.position);
       return;
     }
 
     dropHint.hidden = true;
+    if (event.type !== 'drop' || event.paths.length === 0) return;
+    const sorted = [...event.paths].sort(byFileName);
+    if (dropAddsClips(event.position)) void addClips(sorted);
     // One file replaces what is open, as it always has. Several make a timeline of clips.
-    if (event.type === 'drop' && event.paths.length === 1) void openPath(event.paths[0]);
-    else if (event.type === 'drop' && event.paths.length > 1) void openPaths([...event.paths].sort(byFileName));
+    else if (sorted.length === 1) void openPath(sorted[0]);
+    else void openPaths(sorted);
   });
 }
 

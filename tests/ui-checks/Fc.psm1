@@ -601,6 +601,73 @@ function Test-FcDecodes {
     return ($LASTEXITCODE -eq 0 -and -not $out)
 }
 
+function Invoke-FcFileDrop {
+    # Drags files from Explorer's side of an OLE drag onto the screen point X, Y, the way a
+    # drop from a folder window arrives. The source is a small window in its own STA process,
+    # which starts the drag when it is pressed. Returns the screenshot taken while hovering.
+    param([Parameter(Mandatory)][string[]]$Paths, [Parameter(Mandatory)][int]$X, [Parameter(Mandatory)][int]$Y, [string]$ShotName = 'dragging-files')
+
+    $work = Get-FcWorkDir
+    $source = Join-Path $work 'drag-source.ps1'
+    $list = Join-Path $work 'drag-source.txt'
+    Set-Content -LiteralPath $list -Value $Paths -Encoding UTF8
+    Set-Content -LiteralPath $source -Encoding UTF8 -Value @'
+param([string]$List)
+Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+$files = New-Object System.Collections.Specialized.StringCollection
+Get-Content -LiteralPath $List -Encoding UTF8 | Where-Object { $_ } | ForEach-Object { [void]$files.Add($_) }
+$form = New-Object System.Windows.Forms.Form
+$form.Text = 'fc-drag-source'
+$form.FormBorderStyle = 'None'
+$form.StartPosition = 'Manual'
+$form.Location = New-Object System.Drawing.Point(0, 0)
+$form.Size = New-Object System.Drawing.Size(120, 120)
+$form.TopMost = $true
+$form.ShowInTaskbar = $false
+$form.BackColor = [System.Drawing.Color]::Orange
+$form.Add_MouseDown({
+    $data = New-Object System.Windows.Forms.DataObject
+    $data.SetFileDropList($files)
+    [void]$form.DoDragDrop($data, [System.Windows.Forms.DragDropEffects]::Copy)
+    $form.Close()
+})
+[System.Windows.Forms.Application]::Run($form)
+'@
+    $shell = (Get-Process -Id $PID).Path
+    $proc = Start-Process -FilePath $shell -ArgumentList @('-NoProfile', '-STA', '-ExecutionPolicy', 'Bypass', '-File', "`"$source`"", '-List', "`"$list`"") -PassThru
+    try {
+        $byName = New-Object System.Windows.Automation.PropertyCondition($AE::NameProperty, 'fc-drag-source')
+        $win = Wait-Fc -TimeoutSeconds 20 -What 'the drag source window' { $AE::RootElement.FindFirst($Children, $byName) }
+        $r = $win.Current.BoundingRectangle
+        $fromX = [int]($r.Left + $r.Width / 2)
+        $fromY = [int]($r.Top + $r.Height / 2)
+        [FcWin32]::SetCursorPos($fromX, $fromY) | Out-Null
+        Start-Sleep -Milliseconds 200
+        [FcWin32]::mouse_event(0x0002, 0, 0, 0, [UIntPtr]::Zero)
+        # DoDragDrop starts from the press and then follows the cursor.
+        Start-Sleep -Milliseconds 400
+        $steps = 25
+        for ($i = 1; $i -le $steps; $i++) {
+            [FcWin32]::SetCursorPos([int]($fromX + ($X - $fromX) * $i / $steps), [int]($fromY + ($Y - $fromY) * $i / $steps)) | Out-Null
+            Start-Sleep -Milliseconds 40
+        }
+        # Small moves on the target, so the drop target sees it hover rather than pass through.
+        for ($i = 0; $i -lt 5; $i++) {
+            [FcWin32]::SetCursorPos($X + ($i % 2), $Y) | Out-Null
+            Start-Sleep -Milliseconds 100
+        }
+        $shot = Save-FcScreenshot -Name $ShotName
+        [FcWin32]::SetCursorPos($X, $Y) | Out-Null
+        [FcWin32]::mouse_event(0x0004, 0, 0, 0, [UIntPtr]::Zero)
+        Write-FcLog "dropped $($Paths.Count) file(s) at $X, $Y"
+        Wait-Fc -TimeoutSeconds 10 -What 'the drag source to close' { $proc.HasExited } | Out-Null
+        return $shot
+    } finally {
+        if (-not $proc.HasExited) { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue }
+        Remove-Item -LiteralPath $source, $list -Force -ErrorAction SilentlyContinue
+    }
+}
+
 function Get-FcHash([string]$Path) { (Get-FileHash -Algorithm SHA256 $Path).Hash }
 
 function Get-FcExportTemps([string]$Folder) { @(Get-ChildItem -Force -LiteralPath $Folder -Filter '.flipperclipper-export-*' -ErrorAction SilentlyContinue) }
