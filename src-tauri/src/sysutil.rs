@@ -500,9 +500,7 @@ pub fn plan_clips(pieces: &[ClipPiece]) -> Result<(Vec<PlannedClip>, MediaInfo),
     let first = pieces
         .iter()
         .map(|piece| &probed[&piece.path])
-        .fold(&probed[&pieces[0].path], |best, info| {
-            if info.width * info.height > best.width * best.height { info } else { best }
-        });
+        .fold(&probed[&pieces[0].path], |best, info| if bigger_frame(info, best) { info } else { best });
     let canvas = Canvas::new(first.width, first.height, first.fps);
     let richest = pieces
         .iter()
@@ -520,6 +518,19 @@ pub fn plan_clips(pieces: &[ClipPiece]) -> Result<(Vec<PlannedClip>, MediaInfo),
         ..first.clone()
     };
     Ok((clips, timeline))
+}
+
+/// Larger area wins, then the wider frame, the higher rate and the path, so the choice does not
+/// depend on the order of the clips. sequence.ts timelineMedia makes the same choice.
+fn bigger_frame(a: &MediaInfo, b: &MediaInfo) -> bool {
+    let key = |m: &MediaInfo| (m.width * m.height, m.width);
+    match key(a).cmp(&key(b)) {
+        std::cmp::Ordering::Equal => match a.fps.partial_cmp(&b.fps) {
+            Some(std::cmp::Ordering::Equal) | None => a.path < b.path,
+            Some(order) => order == std::cmp::Ordering::Greater,
+        },
+        order => order == std::cmp::Ordering::Greater,
+    }
 }
 
 #[tauri::command(async)]
@@ -1514,5 +1525,32 @@ frame=  600 fps=0.0
             "{}",
             first.display()
         );
+    }
+
+    fn frame(path: &str, width: i64, height: i64, fps: f64) -> MediaInfo {
+        MediaInfo {
+            path: path.to_string(),
+            duration: 5.0,
+            width,
+            height,
+            fps,
+            rotation: 0,
+            has_audio: true,
+            video_codec: "h264".to_string(),
+            audio_codec: None,
+            audio_tracks: Vec::new(),
+            size_bytes: 0,
+        }
+    }
+
+    #[test]
+    fn the_timeline_frame_does_not_depend_on_clip_order() {
+        let wide = frame("a.mp4", 1920, 1080, 60.0);
+        let tall = frame("b.mp4", 1080, 1920, 30.0);
+        let small = frame("c.mp4", 1280, 720, 30.0);
+        assert!(bigger_frame(&wide, &tall) && !bigger_frame(&tall, &wide));
+        assert!(bigger_frame(&tall, &small) && !bigger_frame(&small, &tall));
+        let slower = frame("d.mp4", 1920, 1080, 30.0);
+        assert!(bigger_frame(&wide, &slower) && !bigger_frame(&slower, &wide));
     }
 }

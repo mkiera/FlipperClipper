@@ -84,10 +84,7 @@ export function timelineTime(clips: Clip[], index: number, local: number): numbe
 export function timelineMedia(clips: Clip[]): MediaInfo | null {
   if (clips.length === 0) return null;
   if (isPlain(clips)) return clips[0].media;
-  const frame = clips.reduce(
-    (best, clip) => (clip.media.width * clip.media.height > best.width * best.height ? clip.media : best),
-    clips[0].media,
-  );
+  const frame = clips.reduce((best, clip) => (biggerFrame(clip.media, best) ? clip.media : best), clips[0].media);
   const richest = clips.reduce(
     (best, clip) => (clip.media.audioTracks.length > best.audioTracks.length ? clip.media : best),
     frame,
@@ -106,6 +103,15 @@ export function timelineMedia(clips: Clip[]): MediaInfo | null {
     audioTracks: richest.audioTracks,
     sizeBytes: Math.round(sizeBytes),
   };
+}
+
+/** Larger area wins, then the wider frame, the higher rate and the path, so the choice does
+ *  not depend on the order of the clips. sysutil.rs plan_clips makes the same choice. */
+function biggerFrame(a: MediaInfo, b: MediaInfo): boolean {
+  const keys = (m: MediaInfo): [number, number, number] => [m.width * m.height, m.width, m.fps];
+  const [ka, kb] = [keys(a), keys(b)];
+  for (let i = 0; i < ka.length; i += 1) if (ka[i] !== kb[i]) return ka[i] > kb[i];
+  return a.path < b.path;
 }
 
 export function toPieces(clips: Clip[]): ClipPiece[] {

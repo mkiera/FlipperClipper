@@ -233,3 +233,13 @@ test('the timeline keeps the largest frame whatever clip comes first', async () 
   assert.equal(timeline.fps, 60);
   assert.equal(s.timelineMedia(s.moveClip(clips, 1, 0)).width, 1920);
 });
+
+test('two frames of the same area pick the same one in either order', async () => {
+  const s = await sequence();
+  const tall = { ...media('C:\\clips\\tall.mp4', 5), width: 1080, height: 1920, fps: 30 };
+  const clips = [{ id: 1, media: tall, start: 0, end: 5 }, whole(A, 2)];
+  const one = s.timelineMedia(clips);
+  const other = s.timelineMedia(s.moveClip(clips, 1, 0));
+  assert.deepEqual([one.width, one.height, one.fps], [1920, 1080, 60]);
+  assert.deepEqual([other.width, other.height, other.fps], [1920, 1080, 60]);
+});
