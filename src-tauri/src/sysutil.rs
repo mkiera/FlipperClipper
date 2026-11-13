@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
@@ -11,6 +11,7 @@ use serde::Serialize;
 use tauri::{AppHandle, Manager};
 
 use crate::ffmpeg::{self, MediaInfo};
+use crate::sequence::{self, Canvas, ClipPiece, PlannedClip};
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -297,7 +298,11 @@ pub struct Loudness {
 /// Measures the whole file rather than the trim: it is one pass either way, and the difference
 /// a trim makes is a fraction of a LU, which is under what anyone can hear on a preview.
 #[tauri::command(async)]
-pub fn measure_loudness(path: String, audio_tracks: Option<Vec<ffmpeg::AudioTrackEdit>>) -> Result<Loudness, String> {
+pub fn measure_loudness(
+    path: String,
+    audio_tracks: Option<Vec<ffmpeg::AudioTrackEdit>>,
+    clips: Option<Vec<ClipPiece>>,
+) -> Result<Loudness, String> {
     let tracks = audio_tracks.unwrap_or_default();
     let mut indices = HashSet::new();
     if tracks.len() > 6 || tracks.iter().any(|track| track.index >= 6
@@ -306,13 +311,40 @@ pub fn measure_loudness(path: String, audio_tracks: Option<Vec<ffmpeg::AudioTrac
         return Err("The audio track settings are invalid.".to_string());
     }
     let mut command = ffmpeg::hidden_command("ffmpeg");
-    command.args(["-hide_banner", "-nostats", "-i"]).arg(&path);
-    if tracks.len() > 1 {
+    let clips = clips.unwrap_or_default();
+    if !clips.is_empty() {
+        // The timeline the clips make, measured as the one thing the export will be.
+        let (planned, timeline) = plan_clips(&clips)?;
+        if !timeline.has_audio {
+            return Err("None of these clips has any audio to measure.".to_string());
+        }
+        let needed: Vec<usize> = if tracks.len() > 1 {
+            tracks.iter().filter(|track| !track.mute).map(|track| track.index).collect()
+        } else {
+            vec![0]
+        };
+        let mut graph = sequence::graph(&planned, None, &needed);
+        let label = if tracks.len() > 1 {
+            let (mix, label) = ffmpeg::audio_mix_filter_from(&tracks, |index| format!("[sa{index}]"))
+                .ok_or_else(|| "That mix has no audible tracks.".to_string())?;
+            graph.push(';');
+            graph.push_str(&mix);
+            label
+        } else {
+            "[sa0]".to_string()
+        };
+        graph.push_str(&format!(";{label}{}:print_format=json[measured]", ffmpeg::LOUDNORM));
+        command.args(["-hide_banner", "-nostats"]);
+        command.args(sequence::input_args(&planned));
+        command.args(["-filter_complex", &graph, "-map", "[measured]"]);
+    } else if tracks.len() > 1 {
+        command.args(["-hide_banner", "-nostats", "-i"]).arg(&path);
         let (graph, label) = ffmpeg::audio_mix_filter(&tracks)
             .ok_or_else(|| "That mix has no audible tracks.".to_string())?;
         command.args(["-filter_complex", &format!("{graph};{label}{}:print_format=json[measured]", ffmpeg::LOUDNORM),
             "-map", "[measured]"]);
     } else {
+        command.args(["-hide_banner", "-nostats", "-i"]).arg(&path);
         command.args([
             "-af",
             &format!("{}:print_format=json", ffmpeg::LOUDNORM),
@@ -443,6 +475,64 @@ pub fn probe_media(path: &str) -> Result<MediaInfo, String> {
     ffmpeg::parse_probe(&String::from_utf8_lossy(&output.stdout), path, size_bytes)
 }
 
+/// Probes every file on a timeline once, and describes the timeline as one source: the largest
+/// clip's frame (made even) and frame rate, so the order of the clips does not change the size, the most audio tracks any clip has, and whether any
+/// has sound.
+pub fn plan_clips(pieces: &[ClipPiece]) -> Result<(Vec<PlannedClip>, MediaInfo), String> {
+    if pieces.is_empty() {
+        return Err("The timeline has no clips.".to_string());
+    }
+    sequence::validate_clips(pieces)?;
+    let mut probed: HashMap<String, MediaInfo> = HashMap::new();
+    let mut clips = Vec::with_capacity(pieces.len());
+    for piece in pieces {
+        if !probed.contains_key(&piece.path) {
+            probed.insert(piece.path.clone(), probe_media(&piece.path)?);
+        }
+        let info = &probed[&piece.path];
+        clips.push(PlannedClip {
+            path: piece.path.clone(),
+            start: piece.start.min(info.duration.max(0.0)),
+            end: piece.end.min(info.duration.max(0.0)),
+            audio_tracks: info.audio_tracks.len(),
+        });
+    }
+    let first = pieces
+        .iter()
+        .map(|piece| &probed[&piece.path])
+        .fold(&probed[&pieces[0].path], |best, info| if bigger_frame(info, best) { info } else { best });
+    let canvas = Canvas::new(first.width, first.height, first.fps);
+    let richest = pieces
+        .iter()
+        .map(|piece| &probed[&piece.path])
+        .max_by_key(|info| info.audio_tracks.len())
+        .unwrap_or(first);
+    let timeline = MediaInfo {
+        duration: sequence::total_duration(&clips),
+        width: canvas.width,
+        height: canvas.height,
+        fps: canvas.fps,
+        has_audio: probed.values().any(|info| info.has_audio),
+        audio_codec: richest.audio_codec.clone(),
+        audio_tracks: richest.audio_tracks.clone(),
+        ..first.clone()
+    };
+    Ok((clips, timeline))
+}
+
+/// Larger area wins, then the wider frame, the higher rate and the path, so the choice does not
+/// depend on the order of the clips. sequence.ts timelineMedia makes the same choice.
+fn bigger_frame(a: &MediaInfo, b: &MediaInfo) -> bool {
+    let key = |m: &MediaInfo| (m.width * m.height, m.width);
+    match key(a).cmp(&key(b)) {
+        std::cmp::Ordering::Equal => match a.fps.partial_cmp(&b.fps) {
+            Some(std::cmp::Ordering::Equal) | None => a.path < b.path,
+            Some(order) => order == std::cmp::Ordering::Greater,
+        },
+        order => order == std::cmp::Ordering::Greater,
+    }
+}
+
 #[tauri::command(async)]
 pub fn make_filmstrip(path: String, count: u32, height: u32) -> Result<Vec<String>, String> {
     let count = count.clamp(1, 64);
@@ -457,6 +547,88 @@ pub fn make_filmstrip(path: String, count: u32, height: u32) -> Result<Vec<Strin
     let frames = render_filmstrip(&path, &dir, count, height, info.duration);
     let _ = std::fs::remove_dir_all(&dir);
     frames
+}
+
+/// The filmstrip of a timeline of clips: a frame from the middle of each even step along it,
+/// each pulled with its own seek, so a 20-minute file costs a seek rather than a decode.
+#[tauri::command(async)]
+pub fn make_clips_filmstrip(clips: Vec<ClipPiece>, count: u32, height: u32) -> Result<Vec<String>, String> {
+    let count = count.clamp(1, 64);
+    let height = height.clamp(16, 240);
+    let (planned, timeline) = plan_clips(&clips)?;
+    if timeline.duration <= 0.0 || !timeline.duration.is_finite() {
+        return Err("Those clips have no duration to draw a filmstrip from.".to_string());
+    }
+    let dir = temp_subdir("filmstrip")?;
+    let args = clips_filmstrip_args(&planned, count, height, &dir);
+    let frames = render_frames(&args, &dir);
+    let _ = std::fs::remove_dir_all(&dir);
+    frames
+}
+
+fn clips_filmstrip_args(clips: &[PlannedClip], count: u32, height: u32, dir: &Path) -> Vec<String> {
+    let total = sequence::total_duration(clips);
+    let mut inputs: Vec<String> = Vec::new();
+    let mut outputs: Vec<String> = Vec::new();
+    for i in 0..count {
+        let t = (f64::from(i) + 0.5) / f64::from(count) * total;
+        let piece = sequence::window(clips, t, total);
+        let Some(clip) = piece.first() else { continue };
+        inputs.extend([
+            "-ss".to_string(),
+            format!("{:.3}", clip.start),
+            "-i".to_string(),
+            clip.path.clone(),
+        ]);
+        let index = outputs.iter().filter(|a| a.as_str() == "-map").count();
+        outputs.extend([
+            "-map".to_string(),
+            format!("{index}:v:0"),
+            "-frames:v".to_string(),
+            "1".to_string(),
+            "-vf".to_string(),
+            format!("scale=-2:{height}"),
+            "-q:v".to_string(),
+            "6".to_string(),
+            dir.join(format!("frame{i:04}.jpg")).to_string_lossy().into_owned(),
+        ]);
+    }
+    let mut args: Vec<String> = ["-hide_banner", "-loglevel", "error", "-y"].map(str::to_string).to_vec();
+    args.extend(inputs);
+    args.extend(outputs);
+    args
+}
+
+fn render_frames(args: &[String], dir: &Path) -> Result<Vec<String>, String> {
+    let status = ffmpeg::hidden_command("ffmpeg")
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map_err(|_| "FFmpeg is not installed, so FlipperClipper cannot draw the filmstrip.".to_string())?;
+    if !status.success() {
+        return Err("FFmpeg could not read frames from those clips.".to_string());
+    }
+    read_frames(dir)
+}
+
+fn read_frames(dir: &Path) -> Result<Vec<String>, String> {
+    let entries = std::fs::read_dir(dir)
+        .map_err(|_| "The filmstrip frames could not be read back.".to_string())?;
+    let mut files: Vec<PathBuf> = entries
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .filter(|file| file.extension().and_then(|ext| ext.to_str()) == Some("jpg"))
+        .collect();
+    files.sort();
+    let mut strip = Vec::with_capacity(files.len());
+    for file in files {
+        let bytes = std::fs::read(&file)
+            .map_err(|_| "The filmstrip frames could not be read back.".to_string())?;
+        strip.push(format!("data:image/jpeg;base64,{}", base64_encode(&bytes)));
+    }
+    Ok(strip)
 }
 
 fn render_filmstrip(
@@ -597,10 +769,25 @@ pub fn make_audio_previews(
     app: AppHandle,
     path: String,
     start: f64,
+    clips: Option<Vec<ClipPiece>>,
 ) -> Result<AudioPreviewWindow, String> {
     static CACHE: std::sync::OnceLock<std::sync::Mutex<AudioPreviewCache>> = std::sync::OnceLock::new();
     if !start.is_finite() || start < 0.0 {
         return Err("The audio preview position is invalid.".to_string());
+    }
+    let clips = clips.unwrap_or_default();
+    if !clips.is_empty() {
+        let pieces = serde_json::to_string(&clips).unwrap_or_default();
+        let key = format!("clips:{}:{start}", path_key(&pieces));
+        let window = cached_audio_preview(CACHE.get_or_init(Default::default), key, || {
+            render_clip_audio_previews(&clips, start)
+        })?;
+        for output in &window.paths {
+            app.asset_protocol_scope()
+                .allow_file(output)
+                .map_err(|_| "The audio preview could not be opened for playback.".to_string())?;
+        }
+        return Ok(window);
     }
     let canonical = std::fs::canonicalize(&path)
         .map_err(|_| "That file is no longer there.".to_string())?;
@@ -646,6 +833,62 @@ pub fn make_audio_previews(
             .map_err(|_| "The audio preview could not be opened for playback.".to_string())?;
     }
     Ok(window)
+}
+
+/// The same window across a timeline of clips: every track joined over the clips the window
+/// covers, with silence where a clip lacks a track.
+fn render_clip_audio_previews(clips: &[ClipPiece], start: f64) -> Result<AudioPreviewWindow, String> {
+    let (planned, timeline) = plan_clips(clips)?;
+    let start = start.min(timeline.duration.max(0.0));
+    let duration = (timeline.duration - start).clamp(0.0, 60.0);
+    let tracks = sequence::track_count(&planned).min(6);
+    if tracks < 2 || duration == 0.0 {
+        return Ok(AudioPreviewWindow { paths: Vec::new(), start, duration });
+    }
+    let windowed = sequence::window(&planned, start, start + duration);
+    let dir = temp_subdir("audio")?;
+    let outputs: Vec<PathBuf> = (0..tracks).map(|index| dir.join(format!("track-{index}.m4a"))).collect();
+    let args = clip_audio_preview_args(&windowed, &outputs);
+    let result = ffmpeg::hidden_command("ffmpeg")
+        .args(&args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .output()
+        .map_err(|_| "FFmpeg could not be started to prepare the audio tracks.".to_string());
+    match result {
+        Ok(out) if out.status.success() => {}
+        _ => {
+            let _ = std::fs::remove_dir_all(&dir);
+            return Err("FFmpeg could not prepare the audio tracks for playback.".to_string());
+        }
+    }
+    Ok(AudioPreviewWindow {
+        paths: outputs.iter().map(|p| p.to_string_lossy().into_owned()).collect(),
+        start,
+        duration,
+    })
+}
+
+fn clip_audio_preview_args(clips: &[PlannedClip], outputs: &[PathBuf]) -> Vec<String> {
+    let tracks: Vec<usize> = (0..outputs.len()).collect();
+    let mut args: Vec<String> = ["-hide_banner", "-loglevel", "error", "-y"].map(str::to_string).to_vec();
+    args.extend(sequence::input_args(clips));
+    args.push("-filter_complex".to_string());
+    args.push(sequence::graph(clips, None, &tracks));
+    for (index, output) in outputs.iter().enumerate() {
+        args.extend([
+            "-map".to_string(),
+            format!("[sa{index}]"),
+            "-c:a".to_string(),
+            "aac".to_string(),
+            "-b:a".to_string(),
+            "192k".to_string(),
+            "-movflags".to_string(),
+            "+faststart".to_string(),
+        ]);
+        args.push(output.to_string_lossy().into_owned());
+    }
+    args
 }
 
 fn remove_audio_previews(paths: &[String]) {
@@ -1282,5 +1525,32 @@ frame=  600 fps=0.0
             "{}",
             first.display()
         );
+    }
+
+    fn frame(path: &str, width: i64, height: i64, fps: f64) -> MediaInfo {
+        MediaInfo {
+            path: path.to_string(),
+            duration: 5.0,
+            width,
+            height,
+            fps,
+            rotation: 0,
+            has_audio: true,
+            video_codec: "h264".to_string(),
+            audio_codec: None,
+            audio_tracks: Vec::new(),
+            size_bytes: 0,
+        }
+    }
+
+    #[test]
+    fn the_timeline_frame_does_not_depend_on_clip_order() {
+        let wide = frame("a.mp4", 1920, 1080, 60.0);
+        let tall = frame("b.mp4", 1080, 1920, 30.0);
+        let small = frame("c.mp4", 1280, 720, 30.0);
+        assert!(bigger_frame(&wide, &tall) && !bigger_frame(&tall, &wide));
+        assert!(bigger_frame(&tall, &small) && !bigger_frame(&small, &tall));
+        let slower = frame("d.mp4", 1920, 1080, 30.0);
+        assert!(bigger_frame(&wide, &slower) && !bigger_frame(&slower, &wide));
     }
 }

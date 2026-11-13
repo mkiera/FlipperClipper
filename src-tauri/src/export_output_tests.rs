@@ -128,7 +128,7 @@ fn export_fixture() -> Option<(tempfile::TempDir, ExportJob)> {
 
 fn prepare(j: &mut ExportJob, encoder: &str) -> (Command, PendingOutput) {
     let info = crate::sysutil::probe_media(&j.input).unwrap();
-    prepare_export(j, encoder, &info, None, None).unwrap()
+    prepare_export(j, encoder, &info, None, None, None).unwrap()
 }
 
 fn tail(output: &std::process::Output) -> VecDeque<String> {

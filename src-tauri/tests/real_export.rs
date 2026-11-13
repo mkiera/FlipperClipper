@@ -8,10 +8,11 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use flipperclipper_lib::ffmpeg::{
-    build_args, output_duration, AudioTrackEdit, Effects, ExportFormat, ExportJob, QualityPreset, Rect, TextAnchorX,
+    build_args, build_args_with_clips, output_duration, AudioTrackEdit, Effects, ExportFormat, ExportJob, QualityPreset, Rect, TextAnchorX,
     TextAnchorY, TextOverlay, Orientation, OVERLAY_TEXT_FILE, surely_has_filter,
 };
 use flipperclipper_lib::ramp::{SpeedPoint, RAMP_MAX, RAMP_MIN};
+use flipperclipper_lib::sequence::{ClipPiece, PlannedClip};
 
 // --- Fixtures ---
 
@@ -311,6 +312,7 @@ fn job(input: &Path, name: &str) -> ExportJob {
         video_kbps: None,
         effects: Effects::default(),
         lossless: false,
+        clips: Vec::new(),
     }
 }
 
@@ -1251,3 +1253,169 @@ fn the_size_estimate_follows_the_turn() {
     );
 }
 
+
+// --- A timeline of clips ---
+
+fn planned(path: &Path, start: f64, end: f64, tracks: usize) -> PlannedClip {
+    PlannedClip { path: path.to_string_lossy().into_owned(), start, end, audio_tracks: tracks }
+}
+
+fn clips_job(clips: &[PlannedClip], name: &str) -> ExportJob {
+    let total: f64 = clips.iter().map(PlannedClip::duration).sum();
+    let mut j = job(Path::new(&clips[0].path), name);
+    j.in_point = 0.0;
+    j.out_point = total;
+    j.clips = clips
+        .iter()
+        .map(|c| ClipPiece { path: c.path.clone(), start: c.start, end: c.end })
+        .collect();
+    j
+}
+
+fn run_clips_export(job: &ExportJob, clips: &[PlannedClip], width: i64, height: i64, fps: f64) -> PathBuf {
+    let args = build_args_with_clips(job, "libx264", true, width, height, fps, None, Some(clips));
+    let out = Command::new("ffmpeg").args(&args).output().expect("could not run ffmpeg");
+    assert!(
+        out.status.success(),
+        "ffmpeg refused the arguments the app built.\nargs: {args:?}\nstderr:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    PathBuf::from(&job.output)
+}
+
+/// A small grey frame at `t`, for telling two moments of testsrc2 apart.
+fn frame_at(path: &Path, t: f64) -> Vec<u8> {
+    let out = Command::new("ffmpeg")
+        .args(["-hide_banner", "-loglevel", "error", "-ss", &format!("{t:.3}"), "-i"])
+        .arg(path)
+        .args(["-frames:v", "1", "-vf", "scale=64:36,format=gray", "-f", "rawvideo", "-"])
+        .output()
+        .expect("could not run ffmpeg");
+    assert!(out.status.success(), "could not read a frame at {t}");
+    out.stdout
+}
+
+fn difference(a: &[u8], b: &[u8]) -> f64 {
+    let n = a.len().min(b.len()).max(1);
+    a.iter().zip(b).map(|(x, y)| (f64::from(*x) - f64::from(*y)).abs()).sum::<f64>() / n as f64
+}
+
+#[test]
+fn clips_of_different_sizes_and_sound_join_into_one_file() {
+    if ffmpeg_missing() {
+        return;
+    }
+    // 3 s of 1080p with sound, 2 s of 720p with none, then 2 s of the first file again.
+    let clips = [
+        planned(&landscape(), 2.0, 5.0, 1),
+        planned(&silent(), 0.0, 2.0, 0),
+        planned(&landscape(), 10.0, 12.0, 1),
+    ];
+    let out = run_clips_export(&clips_job(&clips, "clips-joined.mp4"), &clips, 1920, 1080, 30.0);
+    assert!((duration_of(&out) - 7.0).abs() < 0.15, "length {}", duration_of(&out));
+    assert!((stream_duration(&out, "v:0") - 7.0).abs() < 0.15);
+    assert!((stream_duration(&out, "a:0") - 7.0).abs() < 0.15, "the silent clip must still take its 2 s of the sound");
+    assert_eq!(dimensions_of(&out), (1920, 1080), "every clip is fitted into the first clip's frame");
+    assert_eq!(stream_count_of(&out), 2);
+}
+
+#[test]
+fn a_trim_across_clips_keeps_exactly_the_requested_span() {
+    if ffmpeg_missing() {
+        return;
+    }
+    let clips = [planned(&landscape(), 0.0, 4.0, 1), planned(&quiet(), 0.0, 4.0, 1)];
+    let mut j = clips_job(&clips, "clips-trimmed.mp4");
+    j.in_point = 3.0;
+    j.out_point = 6.5;
+    let out = run_clips_export(&j, &clips, 1920, 1080, 30.0);
+    assert!((duration_of(&out) - 3.5).abs() < 0.12, "length {}", duration_of(&out));
+}
+
+#[test]
+fn reordered_pieces_of_one_file_play_in_their_new_order() {
+    if ffmpeg_missing() {
+        return;
+    }
+    let source = landscape();
+    // The second half first: the export opens on the picture from 10 s into the file.
+    let clips = [planned(&source, 10.0, 13.0, 1), planned(&source, 0.0, 3.0, 1)];
+    let out = run_clips_export(&clips_job(&clips, "clips-reordered.mp4"), &clips, 1920, 1080, 30.0);
+    assert!((duration_of(&out) - 6.0).abs() < 0.12);
+    let opening = frame_at(&out, 0.5);
+    let near_ten = difference(&opening, &frame_at(&source, 10.5));
+    let near_zero = difference(&opening, &frame_at(&source, 0.5));
+    assert!(near_ten < near_zero, "the export opened on the wrong footage: {near_ten} vs {near_zero}");
+    let later = frame_at(&out, 3.5);
+    assert!(difference(&later, &frame_at(&source, 0.5)) < difference(&later, &frame_at(&source, 10.5)));
+}
+
+#[test]
+fn a_clip_without_a_track_plays_silence_on_it_in_a_multitrack_join() {
+    if ffmpeg_missing() {
+        return;
+    }
+    let clips = [planned(&six_audio_tracks(), 0.0, 2.0, 6), planned(&landscape(), 0.0, 2.0, 1)];
+    let mut j = clips_job(&clips, "clips-multitrack.mp4");
+    j.audio_tracks = (0..6).map(|index| AudioTrackEdit { index, volume: 1.0, mute: index == 2 }).collect();
+    let out = run_clips_export(&j, &clips, 320, 180, 10.0);
+    assert!((duration_of(&out) - 4.0).abs() < 0.2, "length {}", duration_of(&out));
+    assert!((stream_duration(&out, "a:0") - 4.0).abs() < 0.2);
+    assert_eq!(dimensions_of(&out), (320, 180));
+}
+
+#[test]
+fn clips_export_as_audio_and_as_a_gif() {
+    if ffmpeg_missing() {
+        return;
+    }
+    let clips = [planned(&landscape(), 0.0, 1.5, 1), planned(&silent(), 0.0, 1.0, 0)];
+    let mut audio = clips_job(&clips, "clips-audio.m4a");
+    audio.format = ExportFormat::M4a;
+    let out = run_clips_export(&audio, &clips, 1920, 1080, 30.0);
+    assert!(!has_video(&out) && has_audio(&out));
+    assert!((duration_of(&out) - 2.5).abs() < 0.15, "length {}", duration_of(&out));
+
+    let mut gif = clips_job(&clips, "clips.gif");
+    gif.format = ExportFormat::Gif;
+    let out = run_clips_export(&gif, &clips, 1920, 1080, 30.0);
+    assert!(has_video(&out));
+    assert!((duration_of(&out) - 2.5).abs() < 0.3, "length {}", duration_of(&out));
+}
+
+#[test]
+fn a_clip_whose_sound_starts_late_stays_in_sync_after_the_join() {
+    if ffmpeg_missing() {
+        return;
+    }
+    // 4 s of picture whose tone only starts 1.5 s in, joined after 2 s of the landscape clip.
+    let late = ensure_fixture(
+        "late-sound.mp4",
+        &[
+            "-f", "lavfi", "-i", "testsrc2=size=1920x1080:rate=30:duration=4",
+            "-f", "lavfi", "-i", "sine=frequency=880:duration=2.5",
+            "-af", "adelay=1500:all=1",
+            "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p",
+            "-c:a", "aac", "-b:a", "128k",
+        ],
+    );
+    let clips = [planned(&landscape(), 0.0, 2.0, 1), planned(&late, 0.0, 4.0, 1)];
+    let out = run_clips_export(&clips_job(&clips, "clips-late-sound.mp4"), &clips, 1920, 1080, 30.0);
+    assert!((duration_of(&out) - 6.0).abs() < 0.15, "length {}", duration_of(&out));
+    assert!((stream_duration(&out, "a:0") - 6.0).abs() < 0.15, "the silence is kept, not dropped");
+    // 2.2 to 3.3 s is the late clip's silent opening; 3.7 to 5.8 s is its tone.
+    let level = |from: f64, to: f64| {
+        let part = fixture_dir().join(format!("late-part-{from}.wav"));
+        let status = Command::new("ffmpeg")
+            .args(["-hide_banner", "-loglevel", "error", "-y", "-ss", &from.to_string(), "-t", &(to - from).to_string(), "-i"])
+            .arg(&out)
+            .args(["-vn"])
+            .arg(&part)
+            .status()
+            .expect("could not run ffmpeg");
+        assert!(status.success());
+        mean_volume(&part)
+    };
+    assert!(level(2.2, 3.3) < -60.0, "the late clip opens silent");
+    assert!(level(3.7, 5.8) > -30.0, "its tone arrives on time");
+}

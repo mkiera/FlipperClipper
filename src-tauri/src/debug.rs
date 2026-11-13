@@ -188,6 +188,7 @@ fn diagnose(encoder: &str) -> (bool, String, String) {
         output_height: None,
         video_kbps: None,
         effects: ffmpeg::Effects::default(),
+        clips: Vec::new(),
     };
     job.effects.contrast = Some(1.1);
 

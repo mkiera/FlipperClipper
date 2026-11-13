@@ -6,6 +6,7 @@ mod export;
 mod export_output;
 mod ffmpeg_install;
 pub mod ramp;
+pub mod sequence;
 mod settings;
 mod sysutil;
 mod updater;
@@ -89,6 +90,7 @@ pub fn run() {
             sysutil::probe,
             sysutil::measure_loudness,
             sysutil::make_filmstrip,
+            sysutil::make_clips_filmstrip,
             sysutil::make_preview_proxy,
             sysutil::make_audio_previews,
             sysutil::copy_file_to_clipboard,

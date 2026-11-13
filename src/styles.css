@@ -59,6 +59,7 @@
   --strip: 64px;
   --ramp-lane: 54px;
   --key-lane: 20px;
+  --clip-lane: 22px;
 
   color-scheme: dark;
 }
@@ -628,18 +629,46 @@ select option:disabled {
 }
 
 #drop-hint {
+  /* Where the timeline starts. 100% leaves the whole window to the open zone. */
+  --add-top: 100%;
   position: fixed;
   inset: 0;
+  pointer-events: none;
+  z-index: 40;
+}
+
+.drop-zone {
+  position: absolute;
+  left: 0;
+  right: 0;
   display: flex;
   align-items: center;
   justify-content: center;
+  border: 2px dashed rgba(255, 255, 255, 0.3);
+  color: var(--fg-dim);
+  font-size: 15px;
+  letter-spacing: 0.5px;
+}
+
+.drop-zone.active {
   background: rgba(107, 197, 210, 0.1);
   border: 2px solid var(--accent-glow);
   color: var(--fg);
-  font-size: 15px;
-  letter-spacing: 0.5px;
-  pointer-events: none;
-  z-index: 40;
+}
+
+#drop-open {
+  top: 0;
+  bottom: calc(100% - var(--add-top));
+}
+
+#drop-add {
+  top: var(--add-top);
+  bottom: 0;
+  background: var(--float);
+}
+
+#drop-add.active {
+  background: rgba(107, 197, 210, 0.18);
 }
 
 /* ------------------------------------------------------------------- crop */
@@ -1275,11 +1304,13 @@ select option:disabled {
 /* --------------------------------------------------------------- timeline */
 
 #timeline {
+  /* The clip lane sits on top of whatever else is open, so every height below adds it. */
+  --clips-open: 0px;
   display: flex;
   align-items: stretch;
   gap: 8px;
   flex: none;
-  height: var(--strip);
+  height: calc(var(--strip) + var(--clips-open));
   padding: 6px 10px 8px;
   border-top: 1px solid var(--line);
   background: var(--panel);
@@ -1334,8 +1365,12 @@ select option:disabled {
 /* The speed channel. Inside #tl-track, so it inherits the zoom width, the scroll, the trim
    shades and the playhead. The timeline grows by the lane's height rather than splitting what
    it had: measured at 64px closed and 118px open, with the filmstrip keeping its 49px. */
+#timeline.has-clips {
+  --clips-open: var(--clip-lane);
+}
+
 #timeline.has-ramp {
-  height: calc(var(--strip) + var(--ramp-lane));
+  height: calc(var(--strip) + var(--ramp-lane) + var(--clips-open));
 }
 
 #timeline.has-ramp #tl-strip {
@@ -1344,11 +1379,11 @@ select option:disabled {
 
 /* The keyframe channel sits at the very bottom, under the speed lane when both show. */
 #timeline.has-keys {
-  height: calc(var(--strip) + var(--key-lane));
+  height: calc(var(--strip) + var(--key-lane) + var(--clips-open));
 }
 
 #timeline.has-ramp.has-keys {
-  height: calc(var(--strip) + var(--ramp-lane) + var(--key-lane));
+  height: calc(var(--strip) + var(--ramp-lane) + var(--key-lane) + var(--clips-open));
 }
 
 #timeline.has-keys #tl-strip {
@@ -1528,6 +1563,101 @@ select option:disabled {
   position: absolute;
   inset: 0;
   display: flex;
+}
+
+#timeline.has-clips #tl-strip {
+  top: var(--clip-lane);
+}
+
+#tl-clips {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  height: var(--clip-lane);
+  border-bottom: 1px solid var(--line);
+  background: rgba(8, 16, 26, 0.72);
+  touch-action: none;
+}
+
+.tl-clip {
+  position: absolute;
+  top: 2px;
+  bottom: 2px;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  min-width: 2px;
+  padding-left: 6px;
+  border: 1px solid rgba(107, 197, 210, 0.55);
+  border-radius: 5px;
+  background: rgba(74, 144, 164, 0.32);
+  overflow: hidden;
+  cursor: grab;
+}
+
+.tl-clip:nth-child(even) {
+  background: rgba(157, 78, 221, 0.28);
+  border-color: rgba(157, 78, 221, 0.6);
+}
+
+.tl-clip:hover {
+  border-color: #fff;
+}
+
+.tl-clip.dragging {
+  z-index: 5;
+  cursor: grabbing;
+  box-shadow: 0 0 0 1px #fff, 0 2px 10px rgba(0, 0, 0, 0.5);
+}
+
+.tl-clip-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  font-size: 10px;
+  line-height: 16px;
+  color: var(--fg);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  pointer-events: none;
+}
+
+.tl-clip-remove {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--fg-dim);
+  cursor: pointer;
+}
+
+.tl-clip-remove svg {
+  width: 9px;
+  height: 9px;
+  fill: currentColor;
+}
+
+.tl-clip-remove:hover {
+  background: rgba(255, 107, 107, 0.25);
+  color: var(--fg);
+}
+
+.tl-clip-marker {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  margin-left: -1px;
+  background: #fff;
+  z-index: 6;
+  pointer-events: none;
 }
 
 #tl-strip img {

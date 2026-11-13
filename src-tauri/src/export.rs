@@ -236,7 +236,14 @@ pub fn start_export(app: AppHandle, job: ExportJob, job_id: u64) -> Result<(), S
 
     // The job carries what the user asked for, not what is in the file. Without this probe a
     // clip recorded with the mic off fails on "Stream map '0:a:0' matches no streams".
-    let info = crate::sysutil::probe_media(&job.input)?;
+    // A timeline of clips is described as one source: the largest clip's frame, and the most
+    // audio tracks any clip has.
+    let (clips, info) = if job.clips.is_empty() {
+        (None, crate::sysutil::probe_media(&job.input)?)
+    } else {
+        let (clips, info) = crate::sysutil::plan_clips(&job.clips)?;
+        (Some(clips), info)
+    };
     validate_audio_tracks(&job, info.audio_tracks.len())?;
     if is_audio_format(&job.format) && !info.has_audio {
         return Err("This video has no audio track to export.".to_string());
@@ -280,6 +287,7 @@ pub fn start_export(app: AppHandle, job: ExportJob, job_id: u64) -> Result<(), S
         &info,
         overlay.as_ref(),
         commands.as_deref(),
+        clips.as_deref(),
     )?;
 
     // The probe and the encoder test runs above can take seconds, and Cancel is live throughout.
@@ -350,9 +358,10 @@ fn prepare_export(
     info: &ffmpeg::MediaInfo,
     overlay: Option<&(PathBuf, PathBuf)>,
     work_dir: Option<&Path>,
+    clips: Option<&[crate::sequence::PlannedClip]>,
 ) -> Result<(Command, PendingOutput), String> {
     let pending_output = PendingOutput::new(job)?;
-    let args = ffmpeg::build_args(
+    let args = ffmpeg::build_args_with_clips(
         job,
         encoder,
         info.has_audio,
@@ -360,9 +369,14 @@ fn prepare_export(
         info.height,
         info.fps,
         overlay.map(|(_, font)| font.as_path()),
+        clips,
     );
     if !fits_command_line(&args) {
-        return Err("This edit has too many keyframes to export. Remove some and try again.".to_string());
+        return Err(if clips.is_some() {
+            "This edit is too long to export in one go. Remove some clips or keyframes and try again.".to_string()
+        } else {
+            "This edit has too many keyframes to export. Remove some and try again.".to_string()
+        });
     }
     let mut command = ffmpeg::hidden_command("ffmpeg");
     command.args(&args);
@@ -591,6 +605,16 @@ fn validate(job: &ExportJob) -> Result<(), String> {
     }
 
     validate_destination(Path::new(&job.input), Path::new(&job.output))?;
+
+    if !job.clips.is_empty() {
+        crate::sequence::validate_clips(&job.clips)?;
+        if job.lossless {
+            return Err("Joining clips re-encodes them, so a timeline of clips cannot be exported losslessly.".to_string());
+        }
+        for clip in &job.clips {
+            validate_destination(Path::new(&clip.path), Path::new(&job.output))?;
+        }
+    }
 
     match Path::new(&job.output).parent() {
         None => return Err("The export path is not a file path.".to_string()),
@@ -946,6 +970,7 @@ mod tests {
             output_height: None,
             video_kbps: None,
             effects: Effects::default(),
+            clips: Vec::new(),
         }
     }
 

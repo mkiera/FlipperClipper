@@ -9,6 +9,7 @@ import {
 import { cancelCrop, confirmCrop, enterCrop, isCropping } from './crop';
 import { closeEffectsPanel, toggleEffectsPanel } from './effectspanel';
 import { closeRampLane, toggleRampLane } from './ramplane';
+import { removeClipAtPlayhead, splitAtPlayhead } from './cliplane';
 import { closeDevPanel } from './devpanel';
 import { releaseNow } from './focus';
 import { redo, undo } from './history';
@@ -168,6 +169,16 @@ function handleKey(e: KeyboardEvent, deps: ShortcutDeps): void {
       e.preventDefault();
       if (isCropping()) confirmCrop();
       else enterCrop();
+      break;
+
+    case 'x':
+    case 'X':
+      e.preventDefault();
+      splitAtPlayhead();
+      break;
+
+    case 'Delete':
+      if (removeClipAtPlayhead()) e.preventDefault();
       break;
 
     default:

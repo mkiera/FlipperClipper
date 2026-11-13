@@ -4,6 +4,7 @@
 import { defaultEffects } from './effects';
 import { afterPatch, beforePatch, clearHistory } from './history';
 import { forgetLoudness } from './loudness';
+import { remapEdit, timelineMedia, wholeClip } from './sequence';
 import {
   AUDIO_FORMATS,
   NO_ORIENTATION,
@@ -11,6 +12,7 @@ import {
   defaultFormatFor,
   type AppSettings,
   type AudioTrackSettings,
+  type Clip,
   type EditState,
   type ExportFormat,
   type MediaInfo,
@@ -49,6 +51,7 @@ export const settings: AppSettings = { ...DEFAULT_SETTINGS };
 
 export const edit: EditState = {
   media: null,
+  clips: [],
   src: null,
   inPoint: 0,
   outPoint: 0,
@@ -158,6 +161,7 @@ export function loadMedia(media: MediaInfo, src: string): void {
 
   Object.assign(edit, {
     media,
+    clips: [wholeClip(media, 1)],
     src,
     inPoint: 0,
     outPoint: media.duration,
@@ -186,6 +190,30 @@ export function loadMedia(media: MediaInfo, src: string): void {
     filmstrip: [],
   } satisfies Partial<UiState>);
   notify();
+}
+
+/** A new clip order, recorded for undo like any other edit. The trim, the speed curve and the
+ *  keyframes move with the footage they were set on. */
+export function setClips(clips: Clip[]): void {
+  if (clips.length === 0 || !edit.media) return;
+  const media = timelineMedia(clips);
+  if (!media) return;
+  const audioTracks = mergedAudioTracks(media, edit.audioTracks);
+  patchEdit({
+    ...remapEdit(edit, clips),
+    clips,
+    media,
+    audioTracks,
+  });
+}
+
+/** Keeps the mixer settings of tracks that are still there. */
+function mergedAudioTracks(media: MediaInfo, current: AudioTrackSettings[]): AudioTrackSettings[] {
+  const fresh = defaultAudioTracks(media);
+  if (fresh.length === current.length && fresh.every((track, i) => track.index === current[i].index)) {
+    return current;
+  }
+  return fresh.map((track) => current.find((old) => old.index === track.index) ?? track);
 }
 
 function defaultAudioTracks(media: MediaInfo): AudioTrackSettings[] {

@@ -1,8 +1,9 @@
 import { applyElementGain, disposeElementGain, elementLevel, enableElementBoost } from './audio';
 import { assetUrl, makeAudioPreviews } from './ipc';
 import { normalizeGain } from './loudness';
+import { isPlain, timelineKey, toPieces } from './sequence';
 import { edit, refresh } from './state';
-import type { AudioTrackInfo } from './types';
+import type { AudioTrackInfo, ClipPiece } from './types';
 
 const LOAD_TIMEOUT_MS = 15_000;
 const PREPARING_DELAY_MS = 5000;
@@ -22,7 +23,10 @@ interface PreviewWindow {
 }
 
 interface WindowRequest {
+  /** timelineKey() of what the window was cut from. */
   path: string;
+  file: string;
+  pieces: ClipPiece[] | null;
   start: number;
   generation: number;
   expected: AudioTrackInfo[];
@@ -30,6 +34,7 @@ interface WindowRequest {
 }
 
 let video: HTMLVideoElement | null = null;
+let now: () => number = () => video?.currentTime ?? 0;
 let active: PreviewWindow | null = null;
 let standby: PreviewWindow | null = null;
 let status: string | null = null;
@@ -49,8 +54,14 @@ function mediaTracks(): AudioTrackInfo[] {
   return edit.media?.audioTracks ?? [];
 }
 
-export function initTrackPreview(element: HTMLVideoElement): void {
+export function initTrackPreview(element: HTMLVideoElement, playhead?: () => number): void {
   video = element;
+  if (playhead) now = playhead;
+}
+
+/** What the windows are cut from: one file, or the clips in order. */
+function sourceKey(): string {
+  return timelineKey(edit.clips) || (edit.media?.path ?? '');
 }
 
 export function hasTrackPreview(): boolean {
@@ -71,18 +82,18 @@ export function onTrackLevels(listener: (levels: ReadonlyMap<number, number>) =>
   };
 }
 
-export async function loadTrackPreviews(path: string): Promise<void> {
+export async function loadTrackPreviews(): Promise<void> {
   generation += 1;
   wanted = null;
   disposeWindows();
   failedStart = null;
-  desiredTime = video?.currentTime ?? 0;
+  desiredTime = now();
   if (!hasTrackPreview()) {
     setStatus(null);
     syncTrackPreview();
     return;
   }
-  loadedPath = path;
+  loadedPath = sourceKey();
   setStatus(null);
   syncTrackPreview();
   await requestWindow(windowStart(desiredTime));
@@ -101,7 +112,7 @@ export function syncTrackPreview(): void {
   if (!video) return;
   const multitrack = hasTrackPreview();
   video.muted = multitrack || edit.mute;
-  if (!multitrack || loadedPath !== edit.media?.path) {
+  if (!multitrack || loadedPath !== sourceKey()) {
     clearPreparingStatus();
     pauseTrackPreview();
     return;
@@ -116,8 +127,8 @@ export function syncTrackPreview(): void {
 }
 
 export function playTrackPreview(): void {
-  if (!hasTrackPreview() || loadedPath !== edit.media?.path || edit.reverse) return;
-  desiredTime = video?.currentTime ?? 0;
+  if (!hasTrackPreview() || loadedPath !== sourceKey() || edit.reverse) return;
+  desiredTime = now();
   failedStart = null;
   ensureWindow(desiredTime);
   if (!contains(active, desiredTime)) return;
@@ -172,7 +183,7 @@ function contains(window: PreviewWindow | null, time: number): boolean {
 }
 
 function ensureWindow(time: number): void {
-  if (!hasTrackPreview() || loadedPath !== edit.media?.path) return;
+  if (!hasTrackPreview() || loadedPath !== sourceKey()) return;
   if (contains(standby, time)) activateStandby();
   if (!contains(active, time)) {
     pauseTrackPreview();
@@ -197,11 +208,19 @@ function requestWindow(start: number): Promise<void> {
   if (wanted?.path !== path || wanted.start !== start || wanted.generation !== generation) {
     clearPreparingStatus();
     setStatus(null);
-    const request = { path, start, generation, expected: [...mediaTracks()], slow: false };
+    const request: WindowRequest = {
+      path,
+      file: edit.media?.path ?? '',
+      pieces: isPlain(edit.clips) ? null : toPieces(edit.clips),
+      start,
+      generation,
+      expected: [...mediaTracks()],
+      slow: false,
+    };
     wanted = request;
     preparingTimer = window.setTimeout(() => {
       preparingTimer = 0;
-      if (wanted !== request || request.generation !== generation || edit.media?.path !== request.path) return;
+      if (wanted !== request || request.generation !== generation || sourceKey() !== request.path) return;
       request.slow = true;
       updatePreparingStatus();
     }, PREPARING_DELAY_MS);
@@ -215,7 +234,7 @@ async function drainRequests(): Promise<void> {
     const request = wanted;
     let created: TrackState[] = [];
     try {
-      const result = await makeAudioPreviews(request.path, request.start);
+      const result = await makeAudioPreviews(request.file, request.start, request.pieces);
       if (request !== wanted || request.generation !== generation) continue;
       if (result.paths.length < request.expected.length || result.duration <= 0) {
         throw new Error('Audio preview returned incomplete tracks');
@@ -359,7 +378,7 @@ function clearPreparingStatus(): void {
 
 function updatePreparingStatus(): void {
   const needed = wanted?.slow && wanted.generation === generation
-    && wanted.path === edit.media?.path && !contains(active, desiredTime) && !contains(standby, desiredTime);
+    && wanted.path === sourceKey() && !contains(active, desiredTime) && !contains(standby, desiredTime);
   if (needed && status !== 'Audio preview unavailable') setStatus(PREPARING_STATUS);
   else if (status === PREPARING_STATUS) setStatus(null);
 }

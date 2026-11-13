@@ -5,14 +5,29 @@ import {
   ffmpegCheckLog,
   ffmpegStatus,
   launchFilePath,
+  makeClipsFilmstrip,
   makeFilmstrip,
   makePreviewProxy,
   onDragDrop,
   pickVideo,
+  pickVideos,
   probe,
 } from './ipc';
-import { edit, loadMedia, patchEdit, patchUi, subscribe, ui } from './state';
-import { initPlayer, loadSource, loadTrackPreviews, onPreviewTrouble, videoElement } from './player';
+import { edit, loadMedia, patchEdit, patchUi, setClips, subscribe, ui } from './state';
+import {
+  currentClipPath,
+  currentTime,
+  initPlayer,
+  loadSource,
+  loadTrackPreviews,
+  onPreviewTrouble,
+  seek,
+  setClipUrl,
+  videoElement,
+} from './player';
+import { initClipLane } from './cliplane';
+import { appendClips, byFileName, isPlain, MAX_CLIPS, timelineKey, toPieces } from './sequence';
+import type { MediaInfo } from './types';
 import { initTimeline } from './timeline';
 import { initCrop } from './crop';
 import { initKeyLane } from './keylane';
@@ -33,8 +48,18 @@ const FILMSTRIP_HEIGHT = 64;
 // Three attempts across about five seconds before the banner is raised.
 const FFMPEG_RETRY_MS = [1500, 3500];
 
+/** Preview copies made this session, by the file they stand in for. */
+const proxies = new Map<string, string>();
+
+/** The timeline the filmstrip and the audio preview were last built for. */
+let builtKey = '';
+let rebuildTimer = 0;
+const REBUILD_DELAY_MS = 250;
+
 let emptyState!: HTMLElement;
 let dropHint!: HTMLElement;
+let dropOpen!: HTMLElement;
+let dropAdd!: HTMLElement;
 let about!: HTMLElement;
 
 function el<T extends HTMLElement>(id: string): T {
@@ -49,11 +74,15 @@ function boot(): void {
 
   emptyState = el('empty');
   dropHint = el('drop-hint');
+  dropOpen = el('drop-open');
+  dropAdd = el('drop-add');
   about = el('about');
 
   // Player first: crop.ts measures the <video> on init, controls.ts reads its position.
   initPlayer(el<HTMLVideoElement>('video'));
+  setClipUrl((path) => proxies.get(path) ?? assetUrl(path));
   initTimeline();
+  initClipLane({ addClips: () => void addViaDialog() });
   initCrop();
   initRampLane();
   initKeyLane();
@@ -70,6 +99,7 @@ function boot(): void {
 
   onPreviewTrouble(offerPreviewProxy);
   subscribe(renderStage);
+  subscribe(followTimeline);
   renderStage();
 
   // Losing focus mid-drag never produces a 'leave', so the hint would stay up.
@@ -109,20 +139,81 @@ async function openViaDialog(): Promise<void> {
   if (picked) await openPath(picked);
 }
 
-async function openPath(path: string): Promise<void> {
+async function openPath(path: string): Promise<boolean> {
   try {
     // probe() is what puts the path into the asset-protocol scope; the URL is only safe after it.
     const media = await probe(path);
     const src = assetUrl(path);
     hideBanner('preview');
+    proxies.clear();
     loadMedia(media, src);
     loadSource(src);
-    void loadTrackPreviews(path);
-    void loadFilmstrip(path);
+    builtKey = timelineKey(edit.clips);
+    window.clearTimeout(rebuildTimer);
+    void loadTrackPreviews();
+    void loadFilmstrip();
+    return true;
   } catch (error) {
     recordError(describe(error));
     showToast(describe(error), [], true);
+    return false;
   }
+}
+
+/** Several files at once: the first opens, the rest follow it as clips. */
+async function openPaths(paths: string[]): Promise<void> {
+  if (paths.length === 0) return;
+  const [first, ...rest] = paths;
+  if (!(await openPath(first))) return;
+  await addClips(rest);
+}
+
+async function addViaDialog(): Promise<void> {
+  const picked = await pickVideos();
+  if (picked.length === 0) return;
+  // The dialog hands files back in whatever order Windows chose, so name order is the one
+  // the user can predict. The lane reorders them from there.
+  const sorted = [...picked].sort(byFileName);
+  if (!edit.media) await openPaths(sorted);
+  else await addClips(sorted);
+}
+
+async function addClips(paths: string[]): Promise<void> {
+  if (paths.length === 0 || !edit.media) return;
+  const added: MediaInfo[] = [];
+  const failed: string[] = [];
+  for (const path of paths) {
+    try {
+      added.push(await probe(path));
+    } catch (error) {
+      recordError(describe(error));
+      failed.push(path);
+    }
+  }
+  if (!edit.media) return;
+  const room = MAX_CLIPS - edit.clips.length;
+  if (added.length > 0) setClips(appendClips(edit.clips, added));
+  if (failed.length > 0) {
+    showToast(`${failed.length === 1 ? 'One file' : `${failed.length} files`} could not be added: not a video FlipperClipper can read.`, [], true);
+  } else if (added.length > room) {
+    showToast(`The timeline holds up to ${MAX_CLIPS} clips, so ${added.length - room} were left out.`, [], true);
+  }
+}
+
+/** The filmstrip and the audio preview are built for one timeline, so a new clip order needs
+ *  them again. A short wait lets a run of undos settle first. */
+function followTimeline(): void {
+  if (!edit.media) return;
+  const key = timelineKey(edit.clips);
+  if (key === builtKey) return;
+  builtKey = key;
+  patchUi({ filmstrip: [] });
+  window.clearTimeout(rebuildTimer);
+  rebuildTimer = window.setTimeout(() => {
+    if (timelineKey(edit.clips) !== key) return;
+    void loadTrackPreviews();
+    void loadFilmstrip();
+  }, REBUILD_DELAY_MS);
 }
 
 async function openLaunchFile(): Promise<void> {
@@ -130,25 +221,52 @@ async function openLaunchFile(): Promise<void> {
   if (path) await openPath(path);
 }
 
-async function loadFilmstrip(path: string): Promise<void> {
-  if (!appSettings().showFilmstrip) return;
+async function loadFilmstrip(): Promise<void> {
+  if (!appSettings().showFilmstrip || !edit.media) return;
+  const key = timelineKey(edit.clips);
   try {
-    const frames = await makeFilmstrip(path, FILMSTRIP_FRAMES, FILMSTRIP_HEIGHT);
-    if (edit.media?.path === path) patchUi({ filmstrip: frames });
+    const frames = isPlain(edit.clips)
+      ? await makeFilmstrip(edit.media.path, FILMSTRIP_FRAMES, FILMSTRIP_HEIGHT)
+      : await makeClipsFilmstrip(toPieces(edit.clips), FILMSTRIP_FRAMES, FILMSTRIP_HEIGHT);
+    if (timelineKey(edit.clips) === key) patchUi({ filmstrip: frames });
   } catch {
     /* decoration over a timeline that already works */
   }
 }
 
+/** With a video open, the timeline is a second drop zone that adds the files as clips. The
+ *  rest of the window opens a dropped file in place of the video, as it always has. */
+function dropAddsClips(position: { x: number; y: number }): boolean {
+  if (!edit.media) return false;
+  // Tauri reports physical pixels; the page lays out in CSS pixels.
+  const y = position.y / window.devicePixelRatio;
+  return y >= el('timeline').getBoundingClientRect().top;
+}
+
+function showDropHint(position: { x: number; y: number }): void {
+  const top = edit.media ? el('timeline').getBoundingClientRect().top : null;
+  dropHint.style.setProperty('--add-top', top === null ? '100%' : `${top}px`);
+  dropAdd.hidden = top === null;
+  const adding = dropAddsClips(position);
+  dropAdd.classList.toggle('active', adding);
+  dropOpen.classList.toggle('active', !adding);
+  dropHint.hidden = false;
+}
+
 async function watchDrops(): Promise<void> {
   await onDragDrop((event) => {
     if (event.type === 'enter' || event.type === 'over') {
-      dropHint.hidden = false;
+      showDropHint(event.position);
       return;
     }
 
     dropHint.hidden = true;
-    if (event.type === 'drop' && event.paths.length > 0) void openPath(event.paths[0]);
+    if (event.type !== 'drop' || event.paths.length === 0) return;
+    const sorted = [...event.paths].sort(byFileName);
+    if (dropAddsClips(event.position)) void addClips(sorted);
+    // One file replaces what is open, as it always has. Several make a timeline of clips.
+    else if (sorted.length === 1) void openPath(sorted[0]);
+    else void openPaths(sorted);
   });
 }
 
@@ -247,19 +365,27 @@ async function warmEncoder(): Promise<void> {
 
 function offerPreviewProxy(): void {
   const media = edit.media;
-  if (!media || !appSettings().autoPreviewProxy) return;
+  const path = currentClipPath();
+  if (!media || !path || !appSettings().autoPreviewProxy) return;
 
   showBanner('preview', {
     message: 'This video will not play here. A quick preview copy fixes the preview only - the export still uses the original file.',
     actionLabel: 'Make a quick preview',
     onAction: async () => {
       try {
-        const proxy = await makePreviewProxy(media.path);
-        if (edit.media !== media) return;
+        const proxy = await makePreviewProxy(path);
+        if (!edit.clips.some((clip) => clip.media.path === path)) return;
         const src = assetUrl(proxy);
-        patchEdit({ src });
-        loadSource(src);
-        void loadTrackPreviews(media.path);
+        proxies.set(path, src);
+        if (isPlain(edit.clips)) {
+          patchEdit({ src });
+          loadSource(src);
+          void loadTrackPreviews();
+        } else {
+          if (path === edit.clips[0].media.path) patchEdit({ src });
+          // The player loads whichever file the playhead needs, and now finds the copy.
+          seek(currentTime());
+        }
         hideBanner('preview');
       } catch (error) {
         recordError(describe(error));

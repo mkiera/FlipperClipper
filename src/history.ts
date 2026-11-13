@@ -30,6 +30,9 @@ const MAX_STEPS = 200;
 /** What undo restores. Everything else on EditState is either the file itself or an output
  *  setting, and neither belongs in an edit history. */
 const TRACKED = [
+  // The clips and the timeline they make change together, and an undo has to put back both.
+  'clips',
+  'media',
   'inPoint',
   'outPoint',
   'speed',

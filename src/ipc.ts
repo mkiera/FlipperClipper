@@ -11,6 +11,7 @@ import {
   type AlphaBuild,
   type AppSettings,
   type AudioTrackSettings,
+  type ClipPiece,
   type DebugReport,
   type DiagnosticResult,
   type ExportFailure,
@@ -51,8 +52,12 @@ export function ffmpegCheckLog(): Promise<string | null> {
 }
 
 /** loudnorm's analysis pass, so the preview can stand in for the filter with one gain. */
-export function measureLoudness(path: string, audioTracks: AudioTrackSettings[] = []): Promise<Loudness> {
-  return invoke<Loudness>('measure_loudness', { path, audioTracks });
+export function measureLoudness(
+  path: string,
+  audioTracks: AudioTrackSettings[] = [],
+  clips: ClipPiece[] | null = null,
+): Promise<Loudness> {
+  return invoke<Loudness>('measure_loudness', { path, audioTracks, clips });
 }
 
 /** Also adds the path to the asset-protocol scope; assetUrl() 403s without it. */
@@ -97,6 +102,11 @@ export function makeFilmstrip(path: string, count: number, height: number): Prom
   return invoke<string[]>('make_filmstrip', { path, count, height });
 }
 
+/** The same strip across several clips, a frame per even step along the timeline. */
+export function makeClipsFilmstrip(clips: ClipPiece[], count: number, height: number): Promise<string[]> {
+  return invoke<string[]>('make_clips_filmstrip', { clips, count, height });
+}
+
 /** Returns a disk path, which the caller still runs through assetUrl(). */
 export function makePreviewProxy(path: string): Promise<string> {
   return invoke<string>('make_preview_proxy', { path });
@@ -108,8 +118,13 @@ export interface AudioPreviewWindow {
   duration: number;
 }
 
-export function makeAudioPreviews(path: string, start: number): Promise<AudioPreviewWindow> {
-  return invoke<AudioPreviewWindow>('make_audio_previews', { path, start });
+/** With clips, `start` is on the timeline they make and the window runs across them. */
+export function makeAudioPreviews(
+  path: string,
+  start: number,
+  clips: ClipPiece[] | null = null,
+): Promise<AudioPreviewWindow> {
+  return invoke<AudioPreviewWindow>('make_audio_previews', { path, start, clips });
 }
 
 export function copyFileToClipboard(path: string): Promise<void> {
@@ -238,6 +253,21 @@ export async function pickVideo(): Promise<string | null> {
     ],
   });
   return typeof picked === 'string' ? picked : null;
+}
+
+/** Several files at once, for Add clips. */
+export async function pickVideos(): Promise<string[]> {
+  const picked = await openFileDialog({
+    multiple: true,
+    directory: false,
+    title: 'Add clips',
+    filters: [
+      { name: 'Video', extensions: VIDEO_EXTENSIONS },
+      { name: 'All files', extensions: ['*'] },
+    ],
+  });
+  if (picked === null) return [];
+  return Array.isArray(picked) ? picked : [picked];
 }
 
 export async function pickExportTarget(defaultPath: string): Promise<string | null> {
