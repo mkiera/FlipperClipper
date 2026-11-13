@@ -1382,3 +1382,40 @@ fn clips_export_as_audio_and_as_a_gif() {
     assert!(has_video(&out));
     assert!((duration_of(&out) - 2.5).abs() < 0.3, "length {}", duration_of(&out));
 }
+
+#[test]
+fn a_clip_whose_sound_starts_late_stays_in_sync_after_the_join() {
+    if ffmpeg_missing() {
+        return;
+    }
+    // 4 s of picture whose tone only starts 1.5 s in, joined after 2 s of the landscape clip.
+    let late = ensure_fixture(
+        "late-sound.mp4",
+        &[
+            "-f", "lavfi", "-i", "testsrc2=size=1920x1080:rate=30:duration=4",
+            "-f", "lavfi", "-i", "sine=frequency=880:duration=2.5",
+            "-af", "adelay=1500:all=1",
+            "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p",
+            "-c:a", "aac", "-b:a", "128k",
+        ],
+    );
+    let clips = [planned(&landscape(), 0.0, 2.0, 1), planned(&late, 0.0, 4.0, 1)];
+    let out = run_clips_export(&clips_job(&clips, "clips-late-sound.mp4"), &clips, 1920, 1080, 30.0);
+    assert!((duration_of(&out) - 6.0).abs() < 0.15, "length {}", duration_of(&out));
+    assert!((stream_duration(&out, "a:0") - 6.0).abs() < 0.15, "the silence is kept, not dropped");
+    // 2.2 to 3.3 s is the late clip's silent opening; 3.7 to 5.8 s is its tone.
+    let level = |from: f64, to: f64| {
+        let part = fixture_dir().join(format!("late-part-{from}.wav"));
+        let status = Command::new("ffmpeg")
+            .args(["-hide_banner", "-loglevel", "error", "-y", "-ss", &from.to_string(), "-t", &(to - from).to_string(), "-i"])
+            .arg(&out)
+            .args(["-vn"])
+            .arg(&part)
+            .status()
+            .expect("could not run ffmpeg");
+        assert!(status.success());
+        mean_volume(&part)
+    };
+    assert!(level(2.2, 3.3) < -60.0, "the late clip opens silent");
+    assert!(level(3.7, 5.8) > -30.0, "its tone arrives on time");
+}
