@@ -273,6 +273,7 @@ export function play(): void {
 }
 
 export function pause(): void {
+  resumeAfterSwitch = false;
   stopReverse();
   video.pause();
 }
@@ -476,7 +477,12 @@ function followClips(): void {
   const before = layout;
   layout = edit.clips;
   if (before.length === 0) return;
-  const was = displayTime();
+  // Read through the order the element was playing, not the new one.
+  let was: number;
+  if (pendingTarget !== null) was = pendingTarget;
+  else if (heldTime !== null) was = heldTime;
+  else if (isPlain(before)) was = video.currentTime;
+  else was = timelineTime(before, clipIndex, video.currentTime);
   const total = totalDuration(edit.clips);
   const moved = remapTime(before, edit.clips, was) ?? Math.min(was, total);
   // One file played whole again, which may not be the file that opened the session: removing

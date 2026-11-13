@@ -192,3 +192,16 @@ test('the timeline key names the clips, or the file when there is one', async ()
   assert.notEqual(key, A.path);
   assert.notEqual(key, s.timelineKey([whole(B, 2), whole(A, 1)]));
 });
+
+test('a file on the timeline twice keeps each copy apart', async () => {
+  const s = await sequence();
+  const twice = [whole(A, 1), whole(A, 2)];
+  assert.equal(s.remapTime(twice, twice, 12), 12);
+  // Splitting the second copy at 15 leaves a keyframe at 17 where it was.
+  const split = s.splitAt(twice, 15);
+  assert.equal(s.remapTime(twice, split, 17), 17);
+  assert.equal(s.remapTime(twice, split, 12), 12);
+  assert.equal(s.remapTime(twice, split, 5), 5);
+  // Moving the second copy first carries its keyframes along.
+  assert.equal(s.remapTime(twice, s.moveClip(twice, 1, 0), 12), 2);
+});

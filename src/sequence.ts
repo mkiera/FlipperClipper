@@ -163,16 +163,23 @@ export function appendClips(clips: Clip[], media: MediaInfo[]): Clip[] {
 export function remapTime(before: Clip[], after: Clip[], t: number, atEnd = false): number | null {
   const hit = locate(before, t, atEnd);
   if (!hit) return null;
-  const path = before[hit.index].media.path;
+  const source = before[hit.index];
   const local = hit.local;
-  const candidates = after
-    .map((clip, index) => ({ clip, index }))
-    .filter(({ clip }) => clip.media.path === path
-      && local >= clip.start - CLIP_EPSILON && local <= clip.end + CLIP_EPSILON);
-  if (candidates.length === 0) return null;
+  const contains = (clip: Clip) => clip.media.path === source.media.path
+    && local >= clip.start - CLIP_EPSILON && local <= clip.end + CLIP_EPSILON;
   // On a shared edge the earlier clip owns an end and the later one owns a start.
-  const strict = candidates.find(({ clip }) => (atEnd ? local > clip.start + CLIP_EPSILON : local < clip.end - CLIP_EPSILON));
-  const { index } = strict ?? candidates[0];
+  const strictly = (clip: Clip) => (atEnd ? local > clip.start + CLIP_EPSILON : local < clip.end - CLIP_EPSILON);
+  const candidates = after.map((clip, index) => ({ clip, index })).filter(({ clip }) => contains(clip));
+  if (candidates.length === 0) return null;
+  // The same file can be on the timeline more than once, so the clip itself is followed: by
+  // its id, or after a split by the new clip its tail became.
+  const known = new Set(before.map((clip) => clip.id));
+  const ranked = [
+    ...candidates.filter(({ clip }) => clip.id === source.id),
+    ...candidates.filter(({ clip }) => !known.has(clip.id)),
+    ...candidates,
+  ];
+  const { index } = ranked.find(({ clip }) => strictly(clip)) ?? ranked[0];
   return timelineTime(after, index, local);
 }
 
