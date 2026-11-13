@@ -66,6 +66,16 @@ function Get-LaneGeometry {
     [pscustomobject]@{ Left = $one.Right + 3 - $width * 8 / 26; Width = $width; Y = [int]($one.Top + $one.Height / 2) }
 }
 
+function Invoke-Drop([string]$Path, [int]$X, [int]$Y, [string]$ShotName, [string]$What, [scriptblock]$Done) {
+    # A synthetic OLE drag now and then never starts (seen once in about five on KIERA-VM), so a
+    # drop that changed nothing is tried once more.
+    for ($try = 1; $try -le 2; $try++) {
+        Invoke-FcFileDrop -Paths @($Path) -X $X -Y $Y -ShotName $ShotName | Out-Null
+        try { return (Wait-Fc -TimeoutSeconds 10 -What $What $Done) } catch { if ($try -eq 2) { throw } }
+        Write-FcLog "nothing happened after the drop; dragging $Path again"
+    }
+}
+
 function Get-OutputLength { ((Get-FcTimeLabel) -split ' / ')[1] }
 
 function Move-Mouse([int]$X, [int]$Y) { [FcWin32]::SetCursorPos($X, $Y) | Out-Null; Start-Sleep -Milliseconds 30 }
@@ -206,15 +216,13 @@ Invoke-FcCheck 'splice-clips' {
     $addBtn = (Find-FcElement -Id 'tl-add-clip' -Name 'Add clips' -ControlType Button).Current.BoundingRectangle
     $count = (Get-ClipNames).Count
     $midX = [int]($win.Left + $win.Width / 2)
-    Invoke-FcFileDrop -Paths @((Join-Path $work 'r2.mp4')) -X $midX -Y ([int]($addBtn.Top + $addBtn.Height / 2)) -ShotName 'dragging-over-timeline' | Out-Null
-    Wait-Fc -TimeoutSeconds 15 -What 'the dropped file to join the timeline' { (Get-ClipNames).Count -eq $count + 1 } | Out-Null
+    Invoke-Drop (Join-Path $work 'r2.mp4') $midX ([int]($addBtn.Top + $addBtn.Height / 2)) 'dragging-over-timeline' 'the dropped file to join the timeline' { (Get-ClipNames).Count -eq $count + 1 } | Out-Null
     $names = @(Get-ClipNames)
     Assert-Fc ($names[-1] -eq 'r2.mp4') "a file dropped on the timeline is added at its end ($($names -join ','))"
     Save-FcScreenshot -Name 'dropped-on-timeline' | Out-Null
 
     # A file dropped on the video opens on its own, as before.
-    Invoke-FcFileDrop -Paths @((Join-Path $work 'r3.mp4')) -X $midX -Y ([int]($win.Top + $win.Height * 0.3)) -ShotName 'dragging-over-video' | Out-Null
-    Wait-Fc -TimeoutSeconds 15 -What 'the dropped file to open alone' { (Get-ClipNames).Count -eq 0 -and (Get-OutputLength) -eq '0:05.0' } | Out-Null
+    Invoke-Drop (Join-Path $work 'r3.mp4') $midX ([int]($win.Top + $win.Height * 0.3)) 'dragging-over-video' 'the dropped file to open alone' { (Get-ClipNames).Count -eq 0 -and (Get-OutputLength) -eq '0:05.0' } | Out-Null
     Assert-Fc $true "a file dropped on the video replaces the timeline ($(Get-FcTimeLabel))"
     Save-FcScreenshot -Name 'dropped-on-video' | Out-Null
     Close-Fc | Out-Null

@@ -639,6 +639,7 @@ $form.Add_MouseDown({
         $byName = New-Object System.Windows.Automation.PropertyCondition($AE::NameProperty, 'fc-drag-source')
         $win = Wait-Fc -TimeoutSeconds 20 -What 'the drag source window' { $AE::RootElement.FindFirst($Children, $byName) }
         $r = $win.Current.BoundingRectangle
+        Write-FcLog "drag source at $($r.Left), $($r.Top), $($r.Width) x $($r.Height)"
         $fromX = [int]($r.Left + $r.Width / 2)
         $fromY = [int]($r.Top + $r.Height / 2)
         [FcWin32]::SetCursorPos($fromX, $fromY) | Out-Null
@@ -656,7 +657,9 @@ $form.Add_MouseDown({
             [FcWin32]::SetCursorPos($X + ($i % 2), $Y) | Out-Null
             Start-Sleep -Milliseconds 100
         }
+        if ($proc.HasExited) { Write-FcLog 'warning: the drag source closed before the drop, so no drag ran' }
         $shot = Save-FcScreenshot -Name $ShotName
+        Save-FcDesktopScreenshot -Name "$ShotName-desktop" | Out-Null
         [FcWin32]::SetCursorPos($X, $Y) | Out-Null
         [FcWin32]::mouse_event(0x0004, 0, 0, 0, [UIntPtr]::Zero)
         Write-FcLog "dropped $($Paths.Count) file(s) at $X, $Y"
