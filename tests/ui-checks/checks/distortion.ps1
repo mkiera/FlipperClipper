@@ -39,9 +39,9 @@ Invoke-FcCheck 'distortion' {
     $crop = Find-FcElement -Id 'crop-btn' -ControlType Button
     Assert-Fc (-not $crop.Current.IsEnabled) 'Crop is off while Distortion is on'
 
-    Invoke-FcElement (Find-FcElement -Name 'Fit lens circle' -ControlType Button)
+    Switch-FcElement (Find-FcElement -Name 'Fit lens circle' -ControlType Button)
     Save-FcScreenshot -Name 'fit-circle' | Out-Null
-    Invoke-FcElement (Find-FcElement -Name 'Fit lens circle' -ControlType Button)
+    Switch-FcElement (Find-FcElement -Name 'Fit lens circle' -ControlType Button)
 
     # The picture sits left of the effects panel: aim from a point in it.
     $win = (Get-FcWindow).Current.BoundingRectangle

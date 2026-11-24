@@ -392,7 +392,7 @@ function buildDistortionBody(): HTMLElement[] {
     fit.setAttribute('aria-pressed', String(on));
   });
   const fisheyeLine = document.createElement('div');
-  fisheyeLine.className = 'fx-line';
+  fisheyeLine.className = 'fx-line fx-fill';
   fisheyeLine.append(projection, facing);
   const lensField = slider({
     label: 'Lens field',
@@ -428,6 +428,7 @@ function buildDistortionBody(): HTMLElement[] {
     () => lens().to,
   );
   const toLine = labelled('Into', to);
+  to.classList.add('fx-wide');
 
   const field = slider({
     label: 'Field',
@@ -469,8 +470,9 @@ function buildDistortionBody(): HTMLElement[] {
   size.replaceChildren(detail, ...LENS_SIZES.map((s) => new Option(`${s}p`, String(s))));
   size.addEventListener('change', () => setLens({ size: size.value === '' ? null : Number(size.value) }));
   const outLine = document.createElement('div');
-  outLine.className = 'fx-line';
-  outLine.append(aspect, size);
+  outLine.className = 'fx-line fx-fill';
+  size.classList.add('fx-wide');
+  outLine.append(aspect);
 
   updaters.push(() => {
     const l = lens();
@@ -492,7 +494,7 @@ function buildDistortionBody(): HTMLElement[] {
     if (size.value !== value) size.value = value;
   });
 
-  return [from, fisheyeLine, lensField, fitLine, sourceField, toLine, field, turn, rise, outLine];
+  return [from, fisheyeLine, lensField, fitLine, sourceField, toLine, field, turn, rise, outLine, size];
 }
 
 function buildRedactBody(): HTMLElement[] {

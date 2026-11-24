@@ -1058,6 +1058,21 @@ select option:disabled {
   align-items: flex-end;
 }
 
+.fx-line.fx-fill {
+  gap: 8px;
+  align-items: center;
+}
+
+/* The Distortion row's selects share the panel's width instead of pushing past it. */
+.fx-line.fx-fill > select {
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+.fx-wide {
+  width: 100%;
+}
+
 .fx-labelled {
   display: flex;
   flex-direction: column;
