@@ -44,16 +44,18 @@ Invoke-FcCheck 'distortion' {
     Switch-FcElement (Find-FcElement -Name 'Fit lens circle' -ControlType Button)
 
     # The picture sits left of the effects panel: aim from a point in it.
+    $before = Save-FcScreenshot -Name 'before-aim'
     $win = (Get-FcWindow).Current.BoundingRectangle
     $cx = [int]($win.X + $win.Width * 0.3)
     $cy = [int]($win.Y + $win.Height * 0.3)
     Set-FcForeground
     Invoke-FcDrag -X $cx -Y $cy -DX 0 -DY -200
-    Save-FcScreenshot -Name 'aimed' | Out-Null
+    $after = Save-FcScreenshot -Name 'aimed'
+    Assert-Fc ((Get-FcHash $before) -ne (Get-FcHash $after)) 'dragging the picture moves the view'
 
     $rise = Find-FcElement -Name 'Rise' -ControlType Slider
-    $rise.SetFocus()
-    Send-FcKeys '{RIGHT 30}'
+    (Get-FcPattern $rise ([System.Windows.Automation.RangeValuePattern]::Pattern)).SetValue(0.3)
+    Wait-Fc -TimeoutSeconds 5 -What 'the Rise slider to read +30%' { Find-FcText -Like '+30%' } | Out-Null
     Save-FcScreenshot -Name 'risen' | Out-Null
 
     Select-FcOption -Combo (Find-FcElement -Name 'Output size' -ControlType ComboBox) -Option '720p' -TypeKeys '7'
