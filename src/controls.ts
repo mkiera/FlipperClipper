@@ -685,7 +685,8 @@ function render(): void {
   scheduleEstimate();
 
   exportBtn.hidden = ui.exporting;
-  exportBtn.disabled = !hasMedia || !ui.ffmpegAvailable;
+  // The open fisheye controls show a view the export would not use until Done.
+  exportBtn.disabled = !hasMedia || !ui.ffmpegAvailable || ui.lensEditing;
   exportRunning.hidden = !ui.exporting;
 
   const percent = Math.round(ui.exportPercent * 100);
@@ -782,7 +783,7 @@ function approximateSize(bytes: number): string {
 /* --- Export --- */
 
 export function beginExport(): void {
-  if (!edit.media || ui.exporting || !ui.ffmpegAvailable) return;
+  if (!edit.media || ui.exporting || !ui.ffmpegAvailable || ui.lensEditing) return;
 
   if (losslessEligible(edit)) {
     losslessBox.checked = edit.lossless;

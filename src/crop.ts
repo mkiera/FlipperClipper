@@ -91,7 +91,7 @@ export function isCropping(): boolean {
 }
 
 export function enterCrop(): void {
-  if (!edit.media || ui.cropping) return;
+  if (!edit.media || ui.cropping || edit.lens || ui.lensEditing) return;
   working = edit.crop ? { ...edit.crop } : fullFrame();
   aspect = null;
   markActiveChip();

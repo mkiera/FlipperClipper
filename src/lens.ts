@@ -181,6 +181,35 @@ export function lensJob(lens: LensState): LensJob {
 }
 
 /**
+ * A sky view dragged by (dx, dy) screen pixels on a view `width` pixels wide. The picture follows
+ * the pointer as a sky viewer's does: up and down change the tilt, sideways turns round the
+ * zenith. With the sky kept up the zenith can never sit below the view's centre, so an exact
+ * grab has no answer there and the aim works in angles instead.
+ */
+export function dragSky(lens: LensState, dx: number, dy: number, width: number): { pan: number; tilt: number } {
+  const perPixel = lens.fov / Math.max(1, width);
+  const ring = Math.max(Math.sin(lens.tilt * RAD), 0.1);
+  const pan = lens.pan + (dx * perPixel) / ring;
+  const tilt = lens.tilt - dy * perPixel;
+  return {
+    pan: ((((pan + 180) % 360) + 360) % 360) - 180,
+    tilt: Math.max(0, Math.min(lens.lensFov / 2 + 30, tilt)),
+  };
+}
+
+/** Where a lens ray appears in the view, both coordinates 0 to 1, or null behind it. */
+export function viewPoint(lens: LensState, d: Vec3): [number, number] | null {
+  const m = viewRotation(lens);
+  const x = m[0][0] * d[0] + m[1][0] * d[1] + m[2][0] * d[2];
+  const y = m[0][1] * d[0] + m[1][1] * d[1] + m[2][1] * d[2];
+  const z = m[0][2] * d[0] + m[1][2] * d[1] + m[2][2] * d[2];
+  if (z <= 0) return null;
+  const tx = Math.tan((lens.fov * RAD) / 2);
+  const ty = Math.tan((verticalFov(lens.fov, lens.aspect) * RAD) / 2);
+  return [(x / z / tx + 1) / 2, (y / z / ty + 1) / 2];
+}
+
+/**
  * The aim that puts lens ray `target` under the output point (u, v), starting from `lens`.
  * A few Newton steps on pan and tilt: the grab-drag of the preview, with no sign conventions
  * to keep in step with viewRotation.

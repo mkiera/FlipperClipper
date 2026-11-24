@@ -338,15 +338,17 @@ fn lens_size(lens: &LensJob) -> (i64, i64) {
 fn lens_filters(lens: &LensJob, width: i64, height: i64) -> Vec<String> {
     let side = ((lens.r * 2.0).round() as i64).max(2);
     let side = side + side % 2;
-    let left = (lens.cx - side as f64 / 2.0).round() as i64;
-    let top = (lens.cy - side as f64 / 2.0).round() as i64;
-    let x0 = left.clamp(0, width);
-    let y0 = top.clamp(0, height);
-    let x1 = (left + side).clamp(0, width);
-    let y1 = (top + side).clamp(0, height);
+    // Every edge on an even pixel: 4:2:0 chroma cannot be cut or padded at an odd one.
+    let even = |v: i64| v - v.rem_euclid(2);
+    let left = even((lens.cx - side as f64 / 2.0).round() as i64);
+    let top = even((lens.cy - side as f64 / 2.0).round() as i64);
+    let x0 = left.clamp(0, even(width));
+    let y0 = top.clamp(0, even(height));
+    let x1 = (left + side).clamp(0, even(width));
+    let y1 = (top + side).clamp(0, even(height));
     let (out_w, out_h) = lens_size(lens);
     let mut parts = Vec::new();
-    if x1 - x0 >= 1 && y1 - y0 >= 1 {
+    if x1 - x0 >= 2 && y1 - y0 >= 2 {
         if x0 != 0 || y0 != 0 || x1 != width || y1 != height {
             parts.push(format!("crop={}:{}:{}:{}", x1 - x0, y1 - y0, x0, y0));
         }
@@ -3866,7 +3868,7 @@ mod tests {
         let args = build_args(&j, "libx264", true, 3840, 2160, 30.0, None);
         assert_eq!(
             value_after(&args, "-vf"),
-            Some("crop=1610:1610:1115:260,v360=input=fisheye:ih_fov=180:iv_fov=180:output=flat:h_fov=70:v_fov=42.5:yaw=0:pitch=35.5:roll=-180:w=722:h=406:interp=cubic,setsar=1")
+            Some("crop=1610:1610:1114:260,v360=input=fisheye:ih_fov=180:iv_fov=180:output=flat:h_fov=70:v_fov=42.5:yaw=0:pitch=35.5:roll=-180:w=722:h=406:interp=cubic,setsar=1")
         );
     }
 
@@ -3911,6 +3913,25 @@ mod tests {
     }
 
     #[test]
+    fn a_circle_barely_on_the_frame_cuts_on_even_pixels_only() {
+        let mut j = job(QualityPreset::Balanced);
+        let mut lens = sky_lens();
+        lens.cx = -804.0;
+        lens.cy = 1065.5;
+        lens.r = 805.0;
+        j.lens = Some(lens);
+        let args = build_args(&j, "libx264", true, 1921, 1081, 30.0, None);
+        let vf = value_after(&args, "-vf").unwrap();
+        assert!(vf.starts_with("crop=2:2:0:0,scale=1610:1610,drawbox"), "{vf}");
+        lens.cx = -803.0;
+        lens.cy = 1065.0;
+        j.lens = Some(lens);
+        let args = build_args(&j, "libx264", true, 1921, 1081, 30.0, None);
+        let vf = value_after(&args, "-vf").unwrap();
+        assert!(vf.starts_with("crop=2:820:0:260,pad=1610:1610:1608:0:black,v360="), "{vf}");
+    }
+
+    #[test]
     fn each_lens_projection_has_its_v360_name() {
         let mut j = job(QualityPreset::Balanced);
         for (projection, name) in [
@@ -3934,7 +3955,7 @@ mod tests {
         j.lens = Some(sky_lens());
         let args = build_args(&j, "libx264", true, 3840, 2160, 30.0, None);
         let graph = value_after(&args, "-filter_complex").unwrap();
-        assert!(graph.starts_with("crop=1610:1610:1115:260,v360="), "{graph}");
+        assert!(graph.starts_with("crop=1610:1610:1114:260,v360="), "{graph}");
     }
 
     #[test]

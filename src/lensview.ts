@@ -11,6 +11,7 @@ import {
   VIEW_FOV_MIN,
   aimAt,
   defaultLens,
+  dragSky,
   lensOutputSize,
   rayToFrame,
   verticalFov,
@@ -18,7 +19,7 @@ import {
   viewRotation,
 } from './lens';
 import { onTime, videoElement } from './player';
-import { edit, patchEdit, patchUi, subscribe, ui } from './state';
+import { edit, patchEdit, patchUi, refresh, subscribe, ui } from './state';
 import { frameHeight, frameWidth } from './types';
 import type { LensProjection, LensState } from './types';
 
@@ -184,7 +185,8 @@ function turnOff(): void {
 function setWorking(patch: Partial<LensState>): void {
   if (!working) return;
   working = { ...working, ...patch };
-  sync();
+  // Through the state's listeners, so the effect overlays follow the new framing too.
+  refresh();
 }
 
 /* --- Layout --- */
@@ -426,7 +428,7 @@ function drawRing(): void {
 
 /* --- Aiming the flat view --- */
 
-let aim: { target: [number, number, number]; pointer: number } | null = null;
+let aim: { target: [number, number, number]; pointer: number; x: number; y: number } | null = null;
 
 function pointerUv(e: PointerEvent | WheelEvent): [number, number] {
   const rect = canvas.getBoundingClientRect();
@@ -436,13 +438,21 @@ function pointerUv(e: PointerEvent | WheelEvent): [number, number] {
 function onAimDown(e: PointerEvent): void {
   if (!ui.lensEditing || !working) return;
   const [u, v] = pointerUv(e);
-  aim = { target: viewRay(working, u, v), pointer: e.pointerId };
+  aim = { target: viewRay(working, u, v), pointer: e.pointerId, x: e.clientX, y: e.clientY };
   canvas.setPointerCapture(e.pointerId);
   e.preventDefault();
 }
 
 function onAimMove(e: PointerEvent): void {
   if (!aim || !working || e.pointerId !== aim.pointer) return;
+  if (working.facing === 'up') {
+    const width = canvas.getBoundingClientRect().width;
+    const step = dragSky(working, e.clientX - aim.x, e.clientY - aim.y, width);
+    aim.x = e.clientX;
+    aim.y = e.clientY;
+    setWorking(step);
+    return;
+  }
   const [u, v] = pointerUv(e);
   setWorking(aimAt(working, aim.target, u, v));
 }
@@ -459,7 +469,12 @@ function onWheel(e: WheelEvent): void {
   const [u, v] = pointerUv(e);
   const target = viewRay(working, u, v);
   const fov = Math.min(VIEW_FOV_MAX, Math.max(VIEW_FOV_MIN, working.fov * Math.pow(1.1, Math.sign(e.deltaY))));
-  // Zooms about the pointer: the point under it stays there.
+  // Zooms about the pointer: the point under it stays there. A sky view zooms about its centre,
+  // since the zenith cannot always be held under the pointer with the sky kept up.
+  if (working.facing === 'up') {
+    setWorking({ fov });
+    return;
+  }
   const zoomed = { ...working, fov };
   setWorking({ fov, ...aimAt(zoomed, target, u, v) });
 }
