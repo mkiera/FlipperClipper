@@ -115,7 +115,8 @@ test('a sky view follows the pointer in every direction, and leaves the zenith b
   assert.equal(L.dragSky(start, 0, 100, 1000).tilt, 0);
   assert.notEqual(L.dragSky(start, 100, 0, 1000).pan, start.pan);
   // Away from the zenith, what was at the centre moves with the pointer.
-  const tilted = sky(L, { pan: 30, tilt: 45 });
+  for (const roll of [0, 30, 180]) {
+  const tilted = sky(L, { pan: 30, tilt: 45, roll });
   const centre = L.viewRay(tilted, 0.5, 0.5);
   for (const [dx, dy] of [[40, 0], [-40, 0], [0, 40], [0, -40]]) {
     const moved = { ...tilted, ...L.dragSky(tilted, dx, dy, 1000) };
@@ -124,5 +125,6 @@ test('a sky view follows the pointer in every direction, and leaves the zenith b
     if (dy) assert.ok(Math.sign(v - 0.5) === Math.sign(dy), `dy ${dy}: v ${v}`);
     close(u, 0.5 + dx / 1000, 0.01);
     close(v, 0.5 + dy / 1000 * (16 / 9), 0.02);
+  }
   }
 });

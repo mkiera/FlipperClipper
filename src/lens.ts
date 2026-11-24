@@ -188,6 +188,9 @@ export function lensJob(lens: LensState): LensJob {
  */
 export function dragSky(lens: LensState, dx: number, dy: number, width: number): { pan: number; tilt: number } {
   const perPixel = lens.fov / Math.max(1, width);
+  // The turn is the view's last rotation, so the pointer's move is turned back first.
+  const c = Math.cos(lens.roll * RAD), s = Math.sin(lens.roll * RAD);
+  [dx, dy] = [dx * c - dy * s, dx * s + dy * c];
   const ring = Math.max(Math.sin(lens.tilt * RAD), 0.1);
   const pan = lens.pan + (dx * perPixel) / ring;
   const tilt = lens.tilt - dy * perPixel;

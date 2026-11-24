@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use flipperclipper_lib::ffmpeg::{
-    build_args, build_args_with_clips, output_duration, AudioTrackEdit, Effects, ExportFormat, ExportJob, QualityPreset, Rect, TextAnchorX,
+    build_args, build_args_with_clips, output_duration, AudioTrackEdit, Effects, ExportFormat, ExportJob, LensJob, LensProjection, QualityPreset, Rect, TextAnchorX,
     TextAnchorY, TextOverlay, Orientation, OVERLAY_TEXT_FILE, surely_has_filter,
 };
 use flipperclipper_lib::ramp::{SpeedPoint, RAMP_MAX, RAMP_MIN};
@@ -300,6 +300,7 @@ fn job(input: &Path, name: &str) -> ExportJob {
         ramp: Vec::new(),
         orientation: Orientation::default(),
         crop: None,
+        lens: None,
         mute: false,
         reverse: false,
         normalize: false,
@@ -393,6 +394,36 @@ fn six_tracks_apply_gain_and_mute_to_the_selected_ordinal() {
 }
 
 // --- The tests ---
+
+#[test]
+fn a_fisheye_view_exports_at_its_size_even_with_a_circle_hanging_off_the_frame() {
+    if ffmpeg_missing() {
+        return;
+    }
+    let src = landscape();
+    // Centred, and then one odd pixel from leaving the frame on the left.
+    for (name, cx) in [("out-lens.mp4", 960.0), ("out-lens-edge.mp4", -537.0)] {
+        let mut j = job(&src, name);
+        j.out_point = 1.0;
+        j.lens = Some(LensJob {
+            cx,
+            cy: 541.0,
+            r: 539.0,
+            lens_fov: 180.0,
+            projection: LensProjection::Equidistant,
+            yaw: 20.0,
+            pitch: -30.0,
+            roll: 10.0,
+            h_fov: 70.0,
+            v_fov: 42.0,
+            width: 640,
+            height: 360,
+        });
+        let out = run_export(&j, 1920, 1080, 30.0, true);
+        assert_eq!(dimensions_of(&out), (640, 360), "{name}");
+        assert!(has_video(&out), "{name}");
+    }
+}
 
 #[test]
 fn a_plain_trim_produces_exactly_the_requested_span() {

@@ -842,7 +842,7 @@ let currentJobId: number | null = null;
 
 async function runExport(retryTarget?: string): Promise<void> {
   const media = edit.media;
-  if (!media || ui.exporting) return;
+  if (!media || ui.exporting || ui.lensEditing) return;
 
   if (!(await ffmpegReady())) return;
 

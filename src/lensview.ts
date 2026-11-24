@@ -263,7 +263,7 @@ function buildControls(): void {
       chip.dataset.tab = t.value;
       chip.addEventListener('click', () => {
         tab = t.value;
-        sync();
+        refresh();
       });
       return chip;
     }),
