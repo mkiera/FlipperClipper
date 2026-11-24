@@ -7,7 +7,6 @@ import {
   showToast,
 } from './controls';
 import { cancelCrop, confirmCrop, enterCrop, isCropping } from './crop';
-import { cancelLens, confirmLens, isEditingLens } from './lensview';
 import { closeEffectsPanel, toggleEffectsPanel } from './effectspanel';
 import { closeRampLane, toggleRampLane } from './ramplane';
 import { removeClipAtPlayhead, splitAtPlayhead } from './cliplane';
@@ -91,9 +90,6 @@ function handleKey(e: KeyboardEvent, deps: ShortcutDeps): void {
       if (isCropping()) {
         e.preventDefault();
         confirmCrop();
-      } else if (isEditingLens()) {
-        e.preventDefault();
-        confirmLens();
       }
       break;
 
@@ -200,10 +196,6 @@ function step(move: () => boolean, empty: string): void {
 function escape(): void {
   if (isCropping()) {
     cancelCrop();
-    return;
-  }
-  if (isEditingLens()) {
-    cancelLens();
     return;
   }
   if (closeDevPanel()) return;

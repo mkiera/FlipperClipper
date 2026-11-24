@@ -74,32 +74,6 @@
         </div>
 
         <div id="lens-layer" hidden>
-          <div id="lens-bar">
-            <div class="lens-row" id="lens-row-lens">
-              <label class="lens-field">Lens field <input id="lens-fov" type="number" step="1" aria-label="Lens field of view in degrees" />°</label>
-              <select id="lens-projection" title="How the lens maps angles onto the picture. Most fisheye and all-sky lenses are equidistant." aria-label="Lens projection"></select>
-              <select id="lens-facing" title="Which way the camera points. Up keeps the sky above the horizon, for an all-sky camera." aria-label="Camera direction">
-                <option value="up">Camera faces up</option>
-                <option value="forward">Camera faces forward</option>
-              </select>
-              <span class="lens-hint">Drag the ring onto the edge of the lens picture</span>
-            </div>
-            <div class="lens-row" id="lens-row-view">
-              <div class="chips" id="lens-aspects"></div>
-              <label class="lens-field">Field <input id="lens-view-fov" type="number" step="1" aria-label="View field of view in degrees" />°</label>
-              <label class="lens-field">Turn <input id="lens-roll" type="number" step="1" aria-label="View turn in degrees" />°</label>
-              <select id="lens-size" title="Output size" aria-label="Output size"></select>
-              <span class="lens-hint">Drag to aim, scroll to zoom</span>
-            </div>
-            <div class="lens-row">
-              <div class="chips" id="lens-tabs"></div>
-              <span class="crop-size" id="lens-out"></span>
-              <button id="lens-reset" class="btn" type="button">Reset</button>
-              <button id="lens-off" class="btn" type="button">Turn off</button>
-              <button id="lens-cancel" class="btn" type="button">Cancel</button>
-              <button id="lens-done" class="btn primary" type="button">Done</button>
-            </div>
-          </div>
         </div>
 
         <div id="toast" hidden>
@@ -191,11 +165,6 @@
           <button id="crop-btn" class="btn" type="button" title="Crop (C)">
             <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4.5 1v10.5H15v1.5H4.5V15H3v-2h-2v-1.5h2V1zM6 3h6.5v8.5H11V4.5H6z" /></svg>
             <span class="btn-label">Crop</span>
-          </button>
-
-          <button id="lens-btn" class="btn" type="button" title="Fisheye view: a flat, narrower view out of a fisheye clip">
-            <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 1.5a6.5 6.5 0 1 1 0 13 6.5 6.5 0 0 1 0-13zm0 1.5a5 5 0 1 0 0 10A5 5 0 0 0 8 3zm-2.2 2.3h4.4l1 1v3.4l-1 1H5.8l-1-1V6.3z" /></svg>
-            <span class="btn-label">Fisheye</span>
           </button>
 
           <button id="effects-btn" class="btn" type="button" title="Quick effects (F)">

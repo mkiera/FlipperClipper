@@ -1,9 +1,10 @@
-// The fisheye view's camera model, shared by the preview shader and the export job.
-// Directions are x right, y down, z along the lens axis. FFmpeg's v360 samples the fisheye at
-// Ry(yaw) * Rx(pitch) * Rz(roll) applied to each output ray, measured against v360 6.1.
+// The Distortion effect's camera model, shared by the preview shader and the export job.
+// Directions are x right, y down, z forward. FFmpeg's v360 samples the source along
+// Ry(yaw) * Rx(pitch) * Rz(roll) applied to each output ray. Every input and output formula
+// here was measured against v360 in FFmpeg 6.1.
 
 import { lensOutputSize } from './types';
-import type { LensJob, LensProjection, LensState } from './types';
+import type { DistortFrom, DistortTo, LensJob, LensProjection, LensState } from './types';
 
 export { lensOutputSize };
 
@@ -19,25 +20,55 @@ export const LENS_PROJECTIONS: { value: LensProjection; label: string }[] = [
   { value: 'orthographic', label: 'Orthographic' },
 ];
 
-export const VIEW_FOV_MIN = 5;
-export const VIEW_FOV_MAX = 150;
+export const DISTORT_FROM: { value: DistortFrom; label: string }[] = [
+  { value: 'fisheye', label: 'Fisheye' },
+  { value: 'normal', label: 'Normal' },
+  { value: 'equirect', label: '360' },
+];
+
+export const DISTORT_TO: { value: DistortTo; label: string }[] = [
+  { value: 'normal', label: 'Normal' },
+  { value: 'panorama', label: 'Panorama' },
+  { value: 'equirect', label: '360 panorama' },
+  { value: 'fisheye', label: 'Fisheye' },
+  { value: 'planet', label: 'Little planet' },
+];
+
+/** The view's horizontal field, per output. A normal view cannot reach 180. */
+export function fovRange(to: DistortTo): { min: number; max: number } {
+  switch (to) {
+    case 'normal':
+      return { min: 5, max: 150 };
+    case 'planet':
+      return { min: 10, max: 330 };
+    default:
+      return { min: 10, max: 360 };
+  }
+}
+
 export const LENS_FOV_MIN = 60;
 export const LENS_FOV_MAX = 360;
-/** Output short edges offered besides the lens's own resolution. */
+export const SOURCE_FOV_MIN = 10;
+export const SOURCE_FOV_MAX = 170;
+/** Output short edges offered besides the source's own detail. */
 export const LENS_SIZES = [720, 1080, 1440, 2160];
 
 export function defaultLens(width: number, height: number): LensState {
   return {
+    from: 'fisheye',
     cx: width / 2,
     cy: height / 2,
     r: Math.min(width, height) / 2,
     lensFov: 180,
     projection: 'equidistant',
     facing: 'up',
+    sourceFov: 90,
+    to: 'normal',
     pan: 0,
     tilt: 0,
     roll: 0,
     fov: 70,
+    rise: 0,
     aspect: 16 / 9,
     size: null,
   };
@@ -66,14 +97,19 @@ export function apply(m: Mat3, v: Vec3): Vec3 {
   ];
 }
 
+/** A fisheye pointed at the sky: framed with the sky kept above the horizon. */
+export function isSky(lens: Pick<LensState, 'from' | 'facing'>): boolean {
+  return lens.from === 'fisheye' && lens.facing === 'up';
+}
+
 /**
- * The rotation from view rays to lens rays.
- * Facing up (a sky camera): pan turns clockwise from the picture's top, tilt leans away from the
- * lens centre, and the view's top points back toward the centre, so the horizon sits level below.
- * Facing forward: pan right, tilt up, as v360's own yaw and pitch.
+ * The rotation from view rays to source rays.
+ * Sky: pan turns clockwise from the picture's top, tilt leans away from the lens centre, and
+ * the view's top points back toward the centre, so the horizon sits level below.
+ * Otherwise: pan right, tilt up, as v360's own yaw and pitch.
  */
-export function viewRotation(lens: Pick<LensState, 'facing' | 'pan' | 'tilt' | 'roll'>): Mat3 {
-  if (lens.facing === 'forward') return mul(mul(ry(lens.pan * RAD), rx(lens.tilt * RAD)), rz(lens.roll * RAD));
+export function viewRotation(lens: Pick<LensState, 'from' | 'facing' | 'pan' | 'tilt' | 'roll'>): Mat3 {
+  if (!isSky(lens)) return mul(mul(ry(lens.pan * RAD), rx(lens.tilt * RAD)), rz(lens.roll * RAD));
   return mul(mul(mul(rz(lens.pan * RAD), rx(lens.tilt * RAD)), rz(Math.PI)), rz(lens.roll * RAD));
 }
 
@@ -125,8 +161,29 @@ export function lensTheta(projection: LensProjection, m: number, lensFov: number
   }
 }
 
-/** Where a lens ray lands in the frame, in frame pixels, or null outside the lens circle. */
-export function rayToFrame(lens: LensState, d: Vec3): [number, number] | null {
+/** A normal source's vertical field from its horizontal one and the frame's shape. */
+export function sourceVerticalFov(lens: LensState, width: number, height: number): number {
+  return (2 * Math.atan((Math.tan((lens.sourceFov * RAD) / 2) * height) / width)) / RAD;
+}
+
+/**
+ * Where a source ray lands in the turned frame, in frame pixels, or null where the source has
+ * no picture: past a fisheye's field, behind or beside a normal camera.
+ */
+export function rayToFrame(lens: LensState, d: Vec3, width: number, height: number): [number, number] | null {
+  if (lens.from === 'equirect') {
+    const lon = Math.atan2(d[0], d[2]);
+    const lat = Math.asin(Math.max(-1, Math.min(1, d[1] / Math.hypot(d[0], d[1], d[2]))));
+    return [((lon / Math.PI + 1) / 2) * width, ((lat / (Math.PI / 2) + 1) / 2) * height];
+  }
+  if (lens.from === 'normal') {
+    if (d[2] <= 1e-9) return null;
+    const tx = Math.tan((lens.sourceFov * RAD) / 2);
+    const ty = Math.tan((sourceVerticalFov(lens, width, height) * RAD) / 2);
+    const u = (d[0] / d[2] / tx + 1) / 2, v = (d[1] / d[2] / ty + 1) / 2;
+    if (u < 0 || u > 1 || v < 0 || v > 1) return null;
+    return [u * width, v * height];
+  }
   const h = Math.hypot(d[0], d[1]);
   const theta = Math.atan2(h, d[2]);
   if (theta > (lens.lensFov * RAD) / 2 + 1e-9) return null;
@@ -135,7 +192,7 @@ export function rayToFrame(lens: LensState, d: Vec3): [number, number] | null {
   return [lens.cx + (lens.r * m * d[0]) / h, lens.cy + (lens.r * m * d[1]) / h];
 }
 
-/** The lens ray through a frame pixel, or null outside the circle. */
+/** The fisheye ray through a frame pixel, or null outside the circle. */
 export function frameToRay(lens: LensState, x: number, y: number): Vec3 | null {
   const dx = (x - lens.cx) / lens.r, dy = (y - lens.cy) / lens.r;
   const m = Math.hypot(dx, dy);
@@ -147,34 +204,102 @@ export function frameToRay(lens: LensState, x: number, y: number): Vec3 | null {
   return [(s * dx) / m, (s * dy) / m, Math.cos(theta)];
 }
 
-export function verticalFov(fov: number, aspect: number): number {
-  return (2 * Math.atan(Math.tan((fov * RAD) / 2) / aspect)) / RAD;
+/** The output's vertical field, degrees, from its horizontal field and shape. */
+export function verticalFov(lens: Pick<LensState, 'to' | 'fov' | 'aspect'>): number {
+  const h = lens.fov * RAD, a = lens.aspect;
+  switch (lens.to) {
+    case 'normal':
+      return (2 * Math.atan(Math.tan(h / 2) / a)) / RAD;
+    case 'panorama':
+      return (2 * Math.atan(h / (2 * a))) / RAD;
+    case 'equirect':
+      return Math.min(180, h / a / RAD);
+    case 'fisheye':
+      return Math.min(360, h / a / RAD);
+    case 'planet':
+      return (4 * Math.atan(Math.tan(h / 4) / a)) / RAD;
+  }
 }
 
-/** The view ray through a point of the output, both coordinates 0 to 1. */
+/** v360's v_offset for the rise: half-heights in the tangent plane, up negative. */
+export function viewOffset(lens: Pick<LensState, 'to' | 'fov' | 'aspect' | 'rise'>): number {
+  if (lens.to !== 'normal' || lens.rise === 0) return 0;
+  const t = Math.tan((verticalFov(lens) * RAD) / 2);
+  return Math.max(-1, Math.min(1, -lens.rise * t));
+}
+
+/** The output's own ray through a point, both coordinates 0 to 1, before the aim turns it. */
+export function outputRay(lens: LensState, u: number, v: number): Vec3 {
+  const U = 2 * u - 1, V = 2 * v - 1;
+  const h = (lens.fov * RAD) / 2, vv = (verticalFov(lens) * RAD) / 2;
+  const unit = (x: number, y: number, z: number): Vec3 => {
+    const n = Math.hypot(x, y, z);
+    return [x / n, y / n, z / n];
+  };
+  const polar = (theta: number, phi: number): Vec3 => [
+    Math.sin(theta) * Math.cos(phi),
+    Math.sin(theta) * Math.sin(phi),
+    Math.cos(theta),
+  ];
+  switch (lens.to) {
+    case 'normal':
+      return unit(Math.tan(h) * U, Math.tan(vv) * V + viewOffset(lens), 1);
+    case 'panorama':
+      return unit(Math.sin(U * h), Math.tan(vv) * V, Math.cos(U * h));
+    case 'equirect': {
+      const lon = U * h, lat = V * vv;
+      return [Math.cos(lat) * Math.sin(lon), Math.sin(lat), Math.cos(lat) * Math.cos(lon)];
+    }
+    case 'fisheye': {
+      const a = U * h, b = V * vv;
+      return polar(Math.hypot(a, b), Math.atan2(b, a));
+    }
+    case 'planet': {
+      const x = Math.tan(h / 2) * U, y = Math.tan(vv / 2) * V;
+      return polar(2 * Math.atan(Math.hypot(x, y)), Math.atan2(y, x));
+    }
+  }
+}
+
+/** The source ray through a point of the output, both coordinates 0 to 1. */
 export function viewRay(lens: LensState, u: number, v: number): Vec3 {
-  const tx = Math.tan((lens.fov * RAD) / 2);
-  const ty = Math.tan((verticalFov(lens.fov, lens.aspect) * RAD) / 2);
-  const x = tx * (2 * u - 1), y = ty * (2 * v - 1);
-  const n = Math.hypot(x, y, 1);
-  return apply(viewRotation(lens), [x / n, y / n, 1 / n]);
+  return apply(viewRotation(lens), outputRay(lens, u, v));
 }
 
-export function lensJob(lens: LensState): LensJob {
+/** Where a source ray appears in a normal view, both coordinates 0 to 1, or null behind it. */
+export function viewPoint(lens: LensState, d: Vec3): [number, number] | null {
+  const m = viewRotation(lens);
+  const x = m[0][0] * d[0] + m[1][0] * d[1] + m[2][0] * d[2];
+  const y = m[0][1] * d[0] + m[1][1] * d[1] + m[2][1] * d[2];
+  const z = m[0][2] * d[0] + m[1][2] * d[1] + m[2][2] * d[2];
+  if (z <= 0) return null;
+  const tx = Math.tan((lens.fov * RAD) / 2);
+  const ty = Math.tan((verticalFov(lens) * RAD) / 2);
+  return [(x / z / tx + 1) / 2, ((y / z - viewOffset(lens)) / ty + 1) / 2];
+}
+
+export function lensJob(lens: LensState, width: number, height: number): LensJob {
   const { yaw, pitch, roll } = v360Angles(viewRotation(lens));
-  const { w, h } = lensOutputSize(lens);
+  const { w, h } = lensOutputSize(lens, width);
   const round = (n: number) => Math.round(n * 1000) / 1000;
+  // The output's fields follow its final shape, which rounding to even pixels nudges.
+  const shaped = { ...lens, aspect: w / h };
   return {
+    from: lens.from,
     cx: round(lens.cx),
     cy: round(lens.cy),
     r: round(lens.r),
     lensFov: round(lens.lensFov),
     projection: lens.projection,
+    inHFov: round(lens.sourceFov),
+    inVFov: round(sourceVerticalFov(lens, width, height)),
+    to: lens.to,
     yaw: round(yaw),
     pitch: round(pitch),
     roll: round(roll),
     hFov: round(lens.fov),
-    vFov: round(2 * Math.atan(Math.tan((lens.fov * RAD) / 2) * (h / w)) / RAD),
+    vFov: round(verticalFov(shaped)),
+    vOffset: round(viewOffset(shaped)),
     width: w,
     height: h,
   };
@@ -200,20 +325,8 @@ export function dragSky(lens: LensState, dx: number, dy: number, width: number):
   };
 }
 
-/** Where a lens ray appears in the view, both coordinates 0 to 1, or null behind it. */
-export function viewPoint(lens: LensState, d: Vec3): [number, number] | null {
-  const m = viewRotation(lens);
-  const x = m[0][0] * d[0] + m[1][0] * d[1] + m[2][0] * d[2];
-  const y = m[0][1] * d[0] + m[1][1] * d[1] + m[2][1] * d[2];
-  const z = m[0][2] * d[0] + m[1][2] * d[1] + m[2][2] * d[2];
-  if (z <= 0) return null;
-  const tx = Math.tan((lens.fov * RAD) / 2);
-  const ty = Math.tan((verticalFov(lens.fov, lens.aspect) * RAD) / 2);
-  return [(x / z / tx + 1) / 2, (y / z / ty + 1) / 2];
-}
-
 /**
- * The aim that puts lens ray `target` under the output point (u, v), starting from `lens`.
+ * The aim that puts source ray `target` under the output point (u, v), starting from `lens`.
  * A few Newton steps on pan and tilt: the grab-drag of the preview, with no sign conventions
  * to keep in step with viewRotation.
  */
@@ -227,7 +340,6 @@ export function aimAt(lens: LensState, target: Vec3, u: number, v: number): { pa
     const d = viewRay({ ...lens, pan: p, tilt: t }, u, v);
     return [dot(d, e1), dot(d, e2)];
   };
-  const tiltLimit = lens.facing === 'up' ? lens.lensFov / 2 + 30 : 179;
   for (let i = 0; i < 8; i += 1) {
     const e = err(pan, tilt);
     if (Math.hypot(e[0], e[1]) < 1e-7) break;
@@ -248,8 +360,7 @@ export function aimAt(lens: LensState, target: Vec3, u: number, v: number): { pa
   }
   if (!Number.isFinite(pan) || !Number.isFinite(tilt)) return { pan: lens.pan, tilt: lens.tilt };
   pan = ((((pan + 180) % 360) + 360) % 360) - 180;
-  if (lens.facing === 'up') tilt = Math.max(0, Math.min(tiltLimit, tilt));
-  else tilt = Math.max(-89.9, Math.min(89.9, tilt));
+  tilt = Math.max(-89.9, Math.min(89.9, tilt));
   return { pan, tilt };
 }
 

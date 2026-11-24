@@ -22,6 +22,7 @@ import type {
   ValueKey,
 } from './types';
 import { everShown, newRedaction, toRedactJob } from './redact';
+import { DISTORT_FROM, DISTORT_TO, defaultLens } from './lens';
 import {
   type ValueState,
   valueAt,
@@ -33,6 +34,7 @@ import {
 /** Display order in the tab: the colour dials, then the two that reshape the frame, then the
  *  two that add something to it. */
 export const EFFECT_IDS: EffectId[] = [
+  'distortion',
   'brightness',
   'contrast',
   'saturation',
@@ -45,6 +47,7 @@ export const EFFECT_IDS: EffectId[] = [
 ];
 
 export const EFFECT_LABEL: Record<EffectId, string> = {
+  distortion: 'Distortion',
   brightness: 'Brightness',
   contrast: 'Contrast',
   saturation: 'Saturation',
@@ -57,6 +60,8 @@ export const EFFECT_LABEL: Record<EffectId, string> = {
 };
 
 export const EFFECT_HINT: Record<EffectId, string> = {
+  distortion:
+    'Reprojects the picture, such as a fisheye into a normal view. While this row is open, drag the picture to aim and scroll to zoom.',
   brightness: 'Multiplies every pixel, so black stays black.',
   contrast: 'Pushes light and dark away from the midpoint.',
   saturation: 'Zero is black and white, above one is punchier colour.',
@@ -87,6 +92,7 @@ export const EFFECT_RANGE = {
 export function defaultEffects(): EffectsState {
   return {
     on: {
+      distortion: false,
       brightness: false,
       contrast: false,
       saturation: false,
@@ -98,6 +104,8 @@ export function defaultEffects(): EffectsState {
       fade: false,
     },
     settings: {
+      // The circle is sized to the frame when the effect is first switched on.
+      distortion: { ...defaultLens(0, 0) },
       brightness: { amount: 1.2, keys: [] },
       contrast: { amount: 1.25, keys: [] },
       saturation: { amount: 1.3, keys: [] },
@@ -268,6 +276,12 @@ export function effectSummary(effects: EffectsState, id: EffectId): string {
     if (n > 0) return n === 1 ? '1 keyframe' : `${n} keyframes`;
   }
   switch (id) {
+    case 'distortion': {
+      const d = s.distortion;
+      const from = DISTORT_FROM.find((o) => o.value === d.from)?.label ?? '';
+      const to = DISTORT_TO.find((o) => o.value === d.to)?.label ?? '';
+      return `${from} to ${to}, ${Math.round(d.fov)}°`;
+    }
     case 'brightness':
       return signedPercent(s.brightness.amount);
     case 'contrast':

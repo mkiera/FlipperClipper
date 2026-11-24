@@ -26,8 +26,6 @@ export interface UiState {
   rampOpen: boolean;
   playing: boolean;
   cropping: boolean;
-  /** The fisheye view's controls are open. */
-  lensEditing: boolean;
   /** The redaction the panel, the picture and the timeline lane are editing. */
   redactSelected: number;
   exporting: boolean;
@@ -61,7 +59,6 @@ export const edit: EditState = {
   ramp: [],
   orientation: NO_ORIENTATION,
   crop: null,
-  lens: null,
   mute: false,
   reverse: false,
   normalize: false,
@@ -83,7 +80,6 @@ export const ui: UiState = {
   rampOpen: false,
   playing: false,
   cropping: false,
-  lensEditing: false,
   redactSelected: 1,
   exporting: false,
   exportPercent: 0,
@@ -173,7 +169,6 @@ export function loadMedia(media: MediaInfo, src: string): void {
     ramp: [],
     orientation: NO_ORIENTATION,
     crop: null,
-    lens: null,
     mute: false,
     reverse: false,
     normalize: false,
@@ -192,7 +187,6 @@ export function loadMedia(media: MediaInfo, src: string): void {
   Object.assign(ui, {
     playing: false,
     cropping: false,
-    lensEditing: false,
     filmstrip: [],
   } satisfies Partial<UiState>);
   notify();

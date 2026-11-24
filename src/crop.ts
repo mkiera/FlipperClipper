@@ -91,7 +91,7 @@ export function isCropping(): boolean {
 }
 
 export function enterCrop(): void {
-  if (!edit.media || ui.cropping || edit.lens || ui.lensEditing) return;
+  if (!edit.media || ui.cropping || edit.effects.on.distortion) return;
   working = edit.crop ? { ...edit.crop } : fullFrame();
   aspect = null;
   markActiveChip();
@@ -210,7 +210,7 @@ function buildMark(): void {
 
 function drawMark(): void {
   const crop = edit.crop;
-  const show = crop !== null && edit.media !== null && !ui.cropping && edit.lens === null && !ui.lensEditing;
+  const show = crop !== null && edit.media !== null && !ui.cropping && !edit.effects.on.distortion;
   // Unhidden before measuring: display:none reports a zero rect.
   markLayer.hidden = !show;
   if (!crop || !show) return;

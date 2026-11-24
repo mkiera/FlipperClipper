@@ -305,7 +305,7 @@ function renderRedactions(): void {
 function cutSize(): { x: number; y: number; w: number; h: number } {
   const lens = currentLens();
   if (lens) {
-    const out = lensOutputSize(lens);
+    const out = lensOutputSize(lens, frameWidth(edit));
     return { x: 0, y: 0, w: out.w, h: out.h };
   }
   return edit.crop ?? { x: 0, y: 0, w: frameWidth(edit), h: frameHeight(edit) };

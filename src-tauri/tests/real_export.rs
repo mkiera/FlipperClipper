@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use flipperclipper_lib::ffmpeg::{
-    build_args, build_args_with_clips, output_duration, AudioTrackEdit, Effects, ExportFormat, ExportJob, LensJob, LensProjection, QualityPreset, Rect, TextAnchorX,
+    build_args, build_args_with_clips, output_duration, AudioTrackEdit, Effects, ExportFormat, ExportJob, DistortFrom, DistortTo, LensJob, LensProjection, QualityPreset, Rect, TextAnchorX,
     TextAnchorY, TextOverlay, Orientation, OVERLAY_TEXT_FILE, surely_has_filter,
 };
 use flipperclipper_lib::ramp::{SpeedPoint, RAMP_MAX, RAMP_MIN};
@@ -406,16 +406,21 @@ fn a_fisheye_view_exports_at_its_size_even_with_a_circle_hanging_off_the_frame()
         let mut j = job(&src, name);
         j.out_point = 1.0;
         j.lens = Some(LensJob {
+            from: DistortFrom::Fisheye,
             cx,
             cy: 541.0,
             r: 539.0,
             lens_fov: 180.0,
             projection: LensProjection::Equidistant,
+            in_h_fov: 90.0,
+            in_v_fov: 59.0,
+            to: DistortTo::Normal,
             yaw: 20.0,
             pitch: -30.0,
             roll: 10.0,
             h_fov: 70.0,
             v_fov: 42.0,
+            v_offset: -0.2,
             width: 640,
             height: 360,
         });

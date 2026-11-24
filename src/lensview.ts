@@ -1,36 +1,30 @@
-// The fisheye view: fit the lens circle on the picture, then aim and zoom a flat view inside it.
-// The preview is drawn on the GPU with the same camera model the export hands to v360.
+// The Distortion effect on the stage: the reprojected picture drawn on the GPU with the same
+// camera model the export hands to v360, aimed by dragging and zoomed by scrolling while its
+// row is open, and the fisheye's lens circle fitted on the source picture.
 
 import { contentBox } from './crop';
+import { withSetting } from './effects';
 import {
-  LENS_FOV_MAX,
-  LENS_FOV_MIN,
-  LENS_PROJECTIONS,
-  LENS_SIZES,
-  VIEW_FOV_MAX,
-  VIEW_FOV_MIN,
   aimAt,
   defaultLens,
   dragSky,
+  fovRange,
+  isSky,
   lensOutputSize,
   rayToFrame,
+  sourceVerticalFov,
   verticalFov,
+  viewOffset,
   viewRay,
   viewRotation,
 } from './lens';
 import { onTime, videoElement } from './player';
-import { edit, patchEdit, patchUi, refresh, subscribe, ui } from './state';
-import { frameHeight, frameWidth } from './types';
-import type { LensProjection, LensState } from './types';
+import { edit, patchEdit, subscribe, ui } from './state';
+import { frameHeight, frameWidth, isTurned } from './types';
+import type { DistortFrom, DistortTo, LensProjection, LensState, Orientation } from './types';
 
-type Tab = 'lens' | 'view';
-
-const ASPECTS: { label: string; value: number }[] = [
-  { label: '16:9', value: 16 / 9 },
-  { label: '4:3', value: 4 / 3 },
-  { label: '1:1', value: 1 },
-  { label: '9:16', value: 9 / 16 },
-];
+const FROM_CODE: Record<DistortFrom, number> = { fisheye: 0, normal: 1, equirect: 2 };
+const TO_CODE: Record<DistortTo, number> = { normal: 0, panorama: 1, equirect: 2, fisheye: 3, planet: 4 };
 const PROJECTION_CODE: Record<LensProjection, number> = {
   equidistant: 0,
   equisolid: 1,
@@ -47,20 +41,11 @@ let ringCircle!: SVGCircleElement;
 let ringEdge!: SVGCircleElement;
 let ringCentre!: SVGCircleElement;
 let footprint!: SVGPathElement;
-let lensRow!: HTMLElement;
-let viewRow!: HTMLElement;
-let tabChips!: HTMLElement;
-let aspectChips!: HTMLElement;
-let lensFovInput!: HTMLInputElement;
-let projectionSelect!: HTMLSelectElement;
-let facingSelect!: HTMLSelectElement;
-let fovInput!: HTMLInputElement;
-let rollInput!: HTMLInputElement;
-let sizeSelect!: HTMLSelectElement;
-let sizeLabel!: HTMLElement;
 
-let working: LensState | null = null;
-let tab: Tab = 'view';
+/** The lens circle is being fitted: the stage shows the source picture with the ring on it. */
+let fitting = false;
+/** Whether the Distortion row is open in the effects panel, where aiming happens. */
+let rowOpen: () => boolean = () => false;
 
 let gl: WebGLRenderingContext | null = null;
 let program: WebGLProgram | null = null;
@@ -73,25 +58,53 @@ function el<T extends HTMLElement>(id: string): T {
   return found as T;
 }
 
-/** The view being shown: the working copy while the controls are open. */
+/** The Distortion settings while the effect is on. */
 export function currentLens(): LensState | null {
-  return ui.lensEditing ? working : edit.lens;
+  return edit.media && edit.effects.on.distortion ? edit.effects.settings.distortion : null;
 }
 
-/** True while the picture on the stage is the flat view rather than the fisheye. */
+/** The controls for the picture are live: the effect is on and its row is open. */
+function aiming(): boolean {
+  return currentLens() !== null && ui.effectsOpen && rowOpen();
+}
+
+/** True while the stage shows the fitting circle on the source picture. */
+export function isFitting(): boolean {
+  return fitting && aiming() && currentLens()?.from === 'fisheye';
+}
+
+export function setFitting(on: boolean): void {
+  fitting = on;
+  sync();
+}
+
+/** True while the picture on the stage is the reprojected one rather than the source. */
 export function showsFlatView(): boolean {
-  return currentLens() !== null && !(ui.lensEditing && tab === 'lens');
+  return currentLens() !== null && !isFitting();
 }
 
 export function lensCanvas(): HTMLCanvasElement {
   return canvas;
 }
 
-/** Where the flat view sits on the stage, in `host`'s coordinates, and its output size. */
+/** The circle that fills the frame, the start for any fisheye. */
+export function fittedCircle(orientation: Orientation): Pick<LensState, 'cx' | 'cy' | 'r'> {
+  const media = edit.media;
+  if (!media) return { cx: 0, cy: 0, r: 0 };
+  const turned = isTurned(orientation);
+  const d = defaultLens(turned ? media.height : media.width, turned ? media.width : media.height);
+  return { cx: d.cx, cy: d.cy, r: d.r };
+}
+
+export function setLens(patch: Partial<LensState>): void {
+  patchEdit({ effects: withSetting(edit.effects, 'distortion', patch) });
+}
+
+/** Where the reprojected picture sits on the stage, in `host`'s coordinates. */
 export function lensFrameBox(host: HTMLElement): { left: number; top: number; width: number; height: number; scale: number } | null {
   const lens = currentLens();
-  if (!lens || !edit.media) return null;
-  const out = lensOutputSize(lens);
+  if (!lens) return null;
+  const out = lensOutputSize(lens, frameWidth(edit));
   const stageRect = stage.getBoundingClientRect();
   const hostRect = host.getBoundingClientRect();
   if (stageRect.width <= 0 || stageRect.height <= 0) return null;
@@ -106,29 +119,17 @@ export function lensFrameBox(host: HTMLElement): { left: number; top: number; wi
   };
 }
 
-export function initLensView(): void {
+export function initLensView(isRowOpen: () => boolean): void {
+  rowOpen = isRowOpen;
   stage = el('stage');
   layer = el('lens-layer');
-  lensRow = el('lens-row-lens');
-  viewRow = el('lens-row-view');
-  tabChips = el('lens-tabs');
-  aspectChips = el('lens-aspects');
-  lensFovInput = el('lens-fov');
-  projectionSelect = el('lens-projection');
-  facingSelect = el('lens-facing');
-  fovInput = el('lens-view-fov');
-  rollInput = el('lens-roll');
-  sizeSelect = el('lens-size');
-  sizeLabel = el('lens-out');
 
   canvas = document.createElement('canvas');
   canvas.id = 'lens-canvas';
   canvas.hidden = true;
   stage.insertBefore(canvas, el('fx-overlay'));
   setupGl();
-
   buildRing();
-  buildControls();
 
   canvas.addEventListener('pointerdown', onAimDown);
   canvas.addEventListener('pointermove', onAimMove);
@@ -145,62 +146,17 @@ export function initLensView(): void {
   sync();
 }
 
-export function toggleLens(): void {
-  if (ui.lensEditing) confirmLens();
-  else enterLens();
-}
-
-export function isEditingLens(): boolean {
-  return ui.lensEditing;
-}
-
-export function enterLens(): void {
-  if (!edit.media || ui.lensEditing || ui.cropping) return;
-  working = edit.lens ? { ...edit.lens } : defaultLens(frameWidth(edit), frameHeight(edit));
-  // A new lens starts on its circle, which has to be fitted before any view makes sense.
-  tab = edit.lens ? 'view' : 'lens';
-  patchUi({ lensEditing: true });
-}
-
-export function confirmLens(): void {
-  if (!ui.lensEditing || !working) return;
-  const lens = working;
-  working = null;
-  patchUi({ lensEditing: false });
-  patchEdit({ lens, crop: null });
-}
-
-export function cancelLens(): void {
-  if (!ui.lensEditing) return;
-  working = null;
-  patchUi({ lensEditing: false });
-}
-
-function turnOff(): void {
-  working = null;
-  patchUi({ lensEditing: false });
-  if (edit.lens) patchEdit({ lens: null });
-}
-
-function setWorking(patch: Partial<LensState>): void {
-  if (!working) return;
-  working = { ...working, ...patch };
-  // Through the state's listeners, so the effect overlays follow the new framing too.
-  refresh();
-}
-
 /* --- Layout --- */
 
-function sync(): void {
-  const lens = currentLens();
+export function sync(): void {
   const video = videoElement();
-  const flat = showsFlatView() && edit.media !== null;
+  const flat = showsFlatView();
 
-  layer.hidden = !ui.lensEditing;
   canvas.hidden = !flat;
-  canvas.classList.toggle('aiming', ui.lensEditing);
+  canvas.classList.toggle('aiming', aiming());
   // Kept decoding, only out of sight, so the canvas has frames to read.
   video.style.opacity = flat ? '0' : '';
+  layer.hidden = !isFitting();
 
   if (flat) {
     const box = lensFrameBox(stage);
@@ -219,117 +175,7 @@ function sync(): void {
     }
     queueDraw();
   }
-
-  if (ui.lensEditing && lens) syncControls(lens);
   drawRing();
-}
-
-function syncControls(lens: LensState): void {
-  lensRow.hidden = tab !== 'lens';
-  viewRow.hidden = tab !== 'view';
-  for (const chip of Array.from(tabChips.children) as HTMLElement[]) {
-    chip.classList.toggle('active', chip.dataset.tab === tab);
-  }
-  for (const chip of Array.from(aspectChips.children) as HTMLElement[]) {
-    chip.classList.toggle('active', Math.abs(Number(chip.dataset.value) - lens.aspect) < 1e-6);
-  }
-  setValue(lensFovInput, lens.lensFov);
-  projectionSelect.value = lens.projection;
-  facingSelect.value = lens.facing;
-  setValue(fovInput, lens.fov);
-  setValue(rollInput, lens.roll);
-
-  const native = lensOutputSize({ ...lens, size: null });
-  const first = sizeSelect.options[0];
-  if (first) first.textContent = `Lens detail (${native.w} x ${native.h})`;
-  sizeSelect.value = lens.size === null ? '' : String(lens.size);
-  const out = lensOutputSize(lens);
-  sizeLabel.textContent = `${out.w} x ${out.h}`;
-}
-
-function setValue(input: HTMLInputElement, value: number): void {
-  if (document.activeElement === input) return;
-  input.value = String(Math.round(value * 10) / 10);
-}
-
-function buildControls(): void {
-  const tabs: { label: string; value: Tab }[] = [
-    { label: 'Lens circle', value: 'lens' },
-    { label: 'View', value: 'view' },
-  ];
-  tabChips.replaceChildren(
-    ...tabs.map((t) => {
-      const chip = chipButton(t.label);
-      chip.dataset.tab = t.value;
-      chip.addEventListener('click', () => {
-        tab = t.value;
-        refresh();
-      });
-      return chip;
-    }),
-  );
-  aspectChips.replaceChildren(
-    ...ASPECTS.map((a) => {
-      const chip = chipButton(a.label);
-      chip.dataset.value = String(a.value);
-      chip.addEventListener('click', () => setWorking({ aspect: a.value }));
-      return chip;
-    }),
-  );
-
-  projectionSelect.replaceChildren(
-    ...LENS_PROJECTIONS.map((p) => new Option(p.label, p.value)),
-  );
-  projectionSelect.addEventListener('change', () =>
-    setWorking({ projection: projectionSelect.value as LensProjection }),
-  );
-  facingSelect.addEventListener('change', () => {
-    // The two framings read pan and tilt differently, so the aim starts over.
-    setWorking({ facing: facingSelect.value === 'forward' ? 'forward' : 'up', pan: 0, tilt: 0, roll: 0 });
-  });
-  sizeSelect.replaceChildren(
-    new Option('Lens detail', ''),
-    ...LENS_SIZES.map((s) => new Option(`${s}p`, String(s))),
-  );
-  sizeSelect.addEventListener('change', () =>
-    setWorking({ size: sizeSelect.value === '' ? null : Number(sizeSelect.value) }),
-  );
-
-  numberInput(lensFovInput, LENS_FOV_MIN, LENS_FOV_MAX, (v) => setWorking({ lensFov: v }));
-  numberInput(fovInput, VIEW_FOV_MIN, VIEW_FOV_MAX, (v) => setWorking({ fov: v }));
-  numberInput(rollInput, -180, 180, (v) => setWorking({ roll: v }));
-
-  el('lens-done').addEventListener('click', confirmLens);
-  el('lens-cancel').addEventListener('click', cancelLens);
-  el('lens-off').addEventListener('click', turnOff);
-  el('lens-reset').addEventListener('click', () => {
-    if (!working) return;
-    if (tab === 'lens') {
-      const d = defaultLens(frameWidth(edit), frameHeight(edit));
-      setWorking({ cx: d.cx, cy: d.cy, r: d.r });
-    } else {
-      setWorking({ pan: 0, tilt: 0, roll: 0, fov: 70 });
-    }
-  });
-}
-
-function chipButton(label: string): HTMLButtonElement {
-  const chip = document.createElement('button');
-  chip.type = 'button';
-  chip.className = 'chip';
-  chip.textContent = label;
-  return chip;
-}
-
-function numberInput(input: HTMLInputElement, min: number, max: number, set: (v: number) => void): void {
-  input.min = String(min);
-  input.max = String(max);
-  input.addEventListener('change', () => {
-    const v = Number(input.value);
-    if (!Number.isFinite(v)) return;
-    set(Math.min(max, Math.max(min, v)));
-    input.blur();
-  });
 }
 
 /* --- The lens circle, drawn on the fisheye picture --- */
@@ -353,11 +199,12 @@ function buildRing(): void {
   let mode: 'move' | 'size' | null = null;
   let startX = 0, startY = 0, start: LensState | null = null;
   const down = (which: 'move' | 'size') => (e: PointerEvent) => {
-    if (!working) return;
+    const lens = currentLens();
+    if (!lens) return;
     mode = which;
     startX = e.clientX;
     startY = e.clientY;
-    start = { ...working };
+    start = { ...lens };
     (e.currentTarget as Element).setPointerCapture(e.pointerId);
     e.preventDefault();
     e.stopPropagation();
@@ -366,14 +213,14 @@ function buildRing(): void {
   ringCentre.addEventListener('pointerdown', down('move'));
   ringEdge.addEventListener('pointerdown', down('size'));
   const move = (e: PointerEvent) => {
-    if (!mode || !start || !working) return;
+    if (!mode || !start) return;
     const box = contentBox(layer);
     if (!box) return;
     const dx = (e.clientX - startX) / box.scaleX, dy = (e.clientY - startY) / box.scaleY;
-    if (mode === 'move') setWorking({ cx: start.cx + dx, cy: start.cy + dy });
+    if (mode === 'move') setLens({ cx: start.cx + dx, cy: start.cy + dy });
     else {
       const ex = start.cx + start.r + dx, ey = start.cy + dy;
-      setWorking({ r: Math.max(16, Math.hypot(ex - start.cx, ey - start.cy)) });
+      setLens({ r: Math.max(16, Math.hypot(ex - start.cx, ey - start.cy)) });
     }
   };
   const up = (e: PointerEvent) => {
@@ -389,8 +236,8 @@ function buildRing(): void {
 }
 
 function drawRing(): void {
-  const lens = working;
-  const show = ui.lensEditing && tab === 'lens' && lens !== null;
+  const lens = currentLens();
+  const show = isFitting() && lens !== null;
   ring.style.display = show ? '' : 'none';
   if (!show || !lens) return;
   const box = contentBox(layer);
@@ -415,7 +262,7 @@ function drawRing(): void {
   let path = '';
   let pen = false;
   for (const [u, v] of edge) {
-    const p = rayToFrame(lens, viewRay(lens, u, v));
+    const p = rayToFrame(lens, viewRay(lens, u, v), frameWidth(edit), frameHeight(edit));
     if (!p) {
       pen = false;
       continue;
@@ -426,7 +273,7 @@ function drawRing(): void {
   footprint.setAttribute('d', path);
 }
 
-/* --- Aiming the flat view --- */
+/* --- Aiming --- */
 
 let aim: { target: [number, number, number]; pointer: number; x: number; y: number } | null = null;
 
@@ -436,25 +283,27 @@ function pointerUv(e: PointerEvent | WheelEvent): [number, number] {
 }
 
 function onAimDown(e: PointerEvent): void {
-  if (!ui.lensEditing || !working) return;
+  const lens = currentLens();
+  if (!lens || !aiming()) return;
   const [u, v] = pointerUv(e);
-  aim = { target: viewRay(working, u, v), pointer: e.pointerId, x: e.clientX, y: e.clientY };
+  aim = { target: viewRay(lens, u, v), pointer: e.pointerId, x: e.clientX, y: e.clientY };
   canvas.setPointerCapture(e.pointerId);
   e.preventDefault();
 }
 
 function onAimMove(e: PointerEvent): void {
-  if (!aim || !working || e.pointerId !== aim.pointer) return;
-  if (working.facing === 'up') {
+  const lens = currentLens();
+  if (!aim || !lens || e.pointerId !== aim.pointer) return;
+  if (isSky(lens)) {
     const width = canvas.getBoundingClientRect().width;
-    const step = dragSky(working, e.clientX - aim.x, e.clientY - aim.y, width);
+    const step = dragSky(lens, e.clientX - aim.x, e.clientY - aim.y, width);
     aim.x = e.clientX;
     aim.y = e.clientY;
-    setWorking(step);
+    setLens(step);
     return;
   }
   const [u, v] = pointerUv(e);
-  setWorking(aimAt(working, aim.target, u, v));
+  setLens(aimAt(lens, aim.target, u, v));
 }
 
 function onAimUp(e: PointerEvent): void {
@@ -464,19 +313,20 @@ function onAimUp(e: PointerEvent): void {
 }
 
 function onWheel(e: WheelEvent): void {
-  if (!ui.lensEditing || !working) return;
+  const lens = currentLens();
+  if (!lens || !aiming()) return;
   e.preventDefault();
-  const [u, v] = pointerUv(e);
-  const target = viewRay(working, u, v);
-  const fov = Math.min(VIEW_FOV_MAX, Math.max(VIEW_FOV_MIN, working.fov * Math.pow(1.1, Math.sign(e.deltaY))));
-  // Zooms about the pointer: the point under it stays there. A sky view zooms about its centre,
-  // since the zenith cannot always be held under the pointer with the sky kept up.
-  if (working.facing === 'up') {
-    setWorking({ fov });
+  const range = fovRange(lens.to);
+  const fov = Math.min(range.max, Math.max(range.min, lens.fov * Math.pow(1.1, Math.sign(e.deltaY))));
+  // A sky view zooms about its centre, since the zenith cannot always be held under the
+  // pointer with the sky kept up. Every other view zooms about the pointer.
+  if (isSky(lens)) {
+    setLens({ fov });
     return;
   }
-  const zoomed = { ...working, fov };
-  setWorking({ fov, ...aimAt(zoomed, target, u, v) });
+  const [u, v] = pointerUv(e);
+  const target = viewRay(lens, u, v);
+  setLens({ fov, ...aimAt({ ...lens, fov }, target, u, v) });
 }
 
 /* --- The GPU preview --- */
@@ -484,29 +334,51 @@ function onWheel(e: WheelEvent): void {
 const VERTEX = `attribute vec2 p; varying vec2 uv;
 void main() { uv = vec2(p.x * 0.5 + 0.5, 0.5 - p.y * 0.5); gl_Position = vec4(p, 0.0, 1.0); }`;
 
-// Mirrors lens.ts: rayToFrame for the sample point, then the turn and flips undone so the
-// texture, which is the decoded picture, is read where the turned frame shows it.
+// Mirrors lens.ts: outputRay, the aim, then rayToFrame for the sample point, and the turn and
+// flips undone so the texture, which is the decoded picture, is read where the frame shows it.
 const FRAGMENT = `precision highp float;
-uniform sampler2D tex; uniform mat3 rot; uniform vec2 tanHalf; uniform vec3 circle; uniform vec2 frame;
-uniform float halfFov; uniform int projection; uniform vec3 toRawU; uniform vec3 toRawV;
+uniform sampler2D tex; uniform mat3 rot; uniform vec2 outHalf; uniform float offset; uniform int outType;
+uniform int inType; uniform vec3 circle; uniform vec2 frame; uniform float halfFov; uniform int projection;
+uniform vec2 inTan; uniform vec3 toRawU; uniform vec3 toRawV;
 varying vec2 uv;
+const float PI = 3.14159265;
+vec3 polar(float th, float ph) { return vec3(sin(th) * cos(ph), sin(th) * sin(ph), cos(th)); }
 void main() {
-  vec3 d = normalize(rot * vec3(tanHalf.x * (2.0 * uv.x - 1.0), tanHalf.y * (2.0 * uv.y - 1.0), 1.0));
-  float h = length(d.xy);
-  float th = atan(h, d.z);
-  float m;
-  if (projection == 1) m = sin(th * 0.5) / sin(halfFov * 0.5);
-  else if (projection == 2) m = tan(th * 0.5) / tan(halfFov * 0.5);
-  else if (projection == 3) m = sin(th) / sin(min(halfFov, 1.5707963));
-  else m = th / halfFov;
-  vec2 dir = h > 1e-6 ? d.xy / h : vec2(0.0);
-  vec2 off = clamp(circle.z * m * dir, vec2(-circle.z), vec2(circle.z));
-  vec2 px = circle.xy + off;
-  vec2 t = px / frame;
+  vec2 c = 2.0 * uv - 1.0;
+  vec3 o;
+  if (outType == 0) o = normalize(vec3(tan(outHalf.x) * c.x, tan(outHalf.y) * c.y + offset, 1.0));
+  else if (outType == 1) o = normalize(vec3(sin(c.x * outHalf.x), tan(outHalf.y) * c.y, cos(c.x * outHalf.x)));
+  else if (outType == 2) o = vec3(cos(c.y * outHalf.y) * sin(c.x * outHalf.x), sin(c.y * outHalf.y), cos(c.y * outHalf.y) * cos(c.x * outHalf.x));
+  else if (outType == 3) { vec2 a = c * outHalf; o = polar(length(a), atan(a.y, a.x)); }
+  else { vec2 a = c * tan(outHalf * 0.5); o = polar(2.0 * atan(length(a)), atan(a.y, a.x)); }
+  vec3 d = rot * o;
+  vec2 t;
+  if (inType == 2) {
+    float lon = atan(d.x, d.z);
+    float lat = asin(clamp(d.y / length(d), -1.0, 1.0));
+    t = vec2((lon / PI + 1.0) * 0.5, (lat / (PI * 0.5) + 1.0) * 0.5);
+  } else if (inType == 1) {
+    if (d.z <= 0.0) { gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0); return; }
+    t = vec2((d.x / d.z / inTan.x + 1.0) * 0.5, (d.y / d.z / inTan.y + 1.0) * 0.5);
+  } else {
+    float h = length(d.xy);
+    float th = atan(h, d.z);
+    // Past the lens's field there is no picture: black, as the export masks it.
+    if (th > halfFov) { gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0); return; }
+    float m;
+    if (projection == 1) m = sin(th * 0.5) / sin(halfFov * 0.5);
+    else if (projection == 2) m = tan(th * 0.5) / tan(halfFov * 0.5);
+    else if (projection == 3) m = sin(th) / sin(min(halfFov, 1.5707963));
+    else m = th / halfFov;
+    vec2 dir = h > 1e-6 ? d.xy / h : vec2(0.0);
+    t = (circle.xy + circle.z * m * dir) / frame;
+  }
   if (t.x < 0.0 || t.y < 0.0 || t.x > 1.0 || t.y > 1.0) { gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0); return; }
   vec2 raw = vec2(dot(toRawU, vec3(t, 1.0)), dot(toRawV, vec3(t, 1.0)));
   gl_FragColor = texture2D(tex, raw);
 }`;
+
+const UNIFORMS = ['tex', 'rot', 'outHalf', 'offset', 'outType', 'inType', 'circle', 'frame', 'halfFov', 'projection', 'inTan', 'toRawU', 'toRawV'];
 
 function setupGl(): void {
   gl = canvas.getContext('webgl', { alpha: false, antialias: false, preserveDrawingBuffer: true });
@@ -522,15 +394,13 @@ function setupGl(): void {
   gl.attachShader(p, shader(gl.FRAGMENT_SHADER, FRAGMENT));
   gl.linkProgram(p);
   if (!gl.getProgramParameter(p, gl.LINK_STATUS)) {
-    console.error('FlipperClipper: fisheye shader', gl.getProgramInfoLog(p));
+    console.error('FlipperClipper: distortion shader', gl.getProgramInfoLog(p));
     gl = null;
     return;
   }
   program = p;
   gl.useProgram(p);
-  for (const name of ['tex', 'rot', 'tanHalf', 'circle', 'frame', 'halfFov', 'projection', 'toRawU', 'toRawV']) {
-    uniforms[name] = gl.getUniformLocation(p, name);
-  }
+  for (const name of UNIFORMS) uniforms[name] = gl.getUniformLocation(p, name);
   gl.bindBuffer(gl.ARRAY_BUFFER, gl.createBuffer());
   gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
   const a = gl.getAttribLocation(p, 'p');
@@ -558,7 +428,7 @@ function queueDraw(): void {
 /** Turned-frame fractions to decoded-picture fractions: the flips undone, then the turn. */
 function toRaw(): { u: [number, number, number]; v: [number, number, number] } {
   const { rotate, flipH, flipV } = edit.orientation;
-  // Flips act on the turned picture, so they come off first: x' = fx * x + cx.
+  // Flips act on the turned picture, so they come off first: x' = fx * x + ox.
   const fx = flipH ? -1 : 1, ox = flipH ? 1 : 0;
   const fy = flipV ? -1 : 1, oy = flipV ? 1 : 0;
   // Then the turn: raw coordinates as functions of the unflipped turned ones (x, y).
@@ -580,7 +450,6 @@ function toRaw(): { u: [number, number, number]; v: [number, number, number] } {
       ru = [1, 0, 0];
       rv = [0, 1, 0];
   }
-  // Substitute x = fx * t.x + ox, y = fy * t.y + oy.
   const compose = (r: [number, number, number]): [number, number, number] => [
     r[0] * fx,
     r[1] * fy,
@@ -601,9 +470,14 @@ function draw(): void {
   try {
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGB, gl.RGB, gl.UNSIGNED_BYTE, video);
   } catch (err) {
-    console.error('FlipperClipper: fisheye preview could not read the video', err);
+    console.error('FlipperClipper: the distortion preview could not read the video', err);
     return;
   }
+  const RAD = Math.PI / 180;
+  const width = frameWidth(edit), height = frameHeight(edit);
+  // The preview's own shape, which the output size rounds only slightly.
+  const out = lensOutputSize(lens, width);
+  const shaped = { ...lens, aspect: out.w / out.h };
   const m = viewRotation(lens);
   // GLSL takes the matrix column by column.
   gl.uniformMatrix3fv(uniforms.rot, false, new Float32Array([
@@ -611,15 +485,21 @@ function draw(): void {
     m[0][1], m[1][1], m[2][1],
     m[0][2], m[1][2], m[2][2],
   ]));
-  const RAD = Math.PI / 180;
-  gl.uniform2f(uniforms.tanHalf, Math.tan((lens.fov * RAD) / 2), Math.tan((verticalFov(lens.fov, lens.aspect) * RAD) / 2));
+  gl.uniform2f(uniforms.outHalf, (lens.fov * RAD) / 2, (verticalFov(shaped) * RAD) / 2);
+  gl.uniform1f(uniforms.offset, viewOffset(shaped));
+  gl.uniform1i(uniforms.outType, TO_CODE[lens.to]);
+  gl.uniform1i(uniforms.inType, FROM_CODE[lens.from]);
   gl.uniform3f(uniforms.circle, lens.cx, lens.cy, lens.r);
-  gl.uniform2f(uniforms.frame, frameWidth(edit), frameHeight(edit));
+  gl.uniform2f(uniforms.frame, width, height);
   gl.uniform1f(uniforms.halfFov, (lens.lensFov * RAD) / 2);
   gl.uniform1i(uniforms.projection, PROJECTION_CODE[lens.projection]);
+  gl.uniform2f(
+    uniforms.inTan,
+    Math.tan((lens.sourceFov * RAD) / 2),
+    Math.tan((sourceVerticalFov(lens, width, height) * RAD) / 2),
+  );
   const raw = toRaw();
   gl.uniform3f(uniforms.toRawU, ...raw.u);
   gl.uniform3f(uniforms.toRawV, ...raw.v);
   gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
 }
-

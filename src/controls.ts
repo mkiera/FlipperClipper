@@ -16,7 +16,6 @@ import { edit, patchEdit, patchUi, refresh, rememberQuality, rememberTargetMb, s
 import { currentTime, onTime, onTrackLevels, togglePlay, trackPreviewStatus } from './player';
 import { toggleCrop } from './crop';
 import { lensJob } from './lens';
-import { toggleLens } from './lensview';
 import { enabledIds, toEffectsJob } from './effects';
 import { toggleEffectsPanel } from './effectspanel';
 import { ensureMeasured } from './loudness';
@@ -31,12 +30,15 @@ import {
   VIDEO_KBPS_MIN,
   VOLUME_MAX,
   defaultFormatFor,
+  frameHeight,
+  frameWidth,
   losslessEligible,
   outputDuration,
   shortEdge,
   type AudioTrackInfo,
   type ExportFormat,
   type ExportJob,
+  type LensJob,
   type QualityPreset,
 } from './types';
 
@@ -83,7 +85,6 @@ let speedSlider!: HTMLInputElement;
 let speedInput!: HTMLInputElement;
 let reverseBtn!: HTMLButtonElement;
 let cropBtn!: HTMLButtonElement;
-let lensBtn!: HTMLButtonElement;
 let effectsBtn!: HTMLButtonElement;
 let effectsBadge!: HTMLElement;
 let muteBtn!: HTMLButtonElement;
@@ -156,7 +157,6 @@ export function initControls(controlsDeps: ControlsDeps): void {
   speedInput = el<HTMLInputElement>('speed-input');
   reverseBtn = el<HTMLButtonElement>('reverse-btn');
   cropBtn = el<HTMLButtonElement>('crop-btn');
-  lensBtn = el<HTMLButtonElement>('lens-btn');
   effectsBtn = el<HTMLButtonElement>('effects-btn');
   effectsBadge = el('effects-badge');
   muteBtn = el<HTMLButtonElement>('mute-btn');
@@ -199,7 +199,6 @@ export function initControls(controlsDeps: ControlsDeps): void {
   openBtn.addEventListener('click', () => deps.openFile());
   playBtn.addEventListener('click', togglePlay);
   cropBtn.addEventListener('click', toggleCrop);
-  lensBtn.addEventListener('click', toggleLens);
   effectsBtn.addEventListener('click', toggleEffectsPanel);
   muteBtn.addEventListener('click', () => patchEdit({ mute: !edit.mute }));
   reverseBtn.addEventListener('click', toggleReverse);
@@ -607,12 +606,11 @@ function render(): void {
   reverseBtn.disabled = !hasMedia;
   reverseBtn.classList.toggle('active', edit.reverse);
 
-  // The fisheye view replaces the crop, so only one of the two is open at a time.
-  cropBtn.disabled = !hasMedia || edit.lens !== null || ui.lensEditing;
-  cropBtn.title = edit.lens ? 'Crop is off while the fisheye view is on' : 'Crop (C)';
-  cropBtn.classList.toggle('active', ui.cropping || (edit.crop !== null && edit.lens === null));
-  lensBtn.disabled = !hasMedia || ui.cropping;
-  lensBtn.classList.toggle('active', ui.lensEditing || edit.lens !== null);
+  // Distortion reshapes the frame the crop would be drawn on, so it takes the crop's place.
+  const distorted = edit.effects.on.distortion;
+  cropBtn.disabled = !hasMedia || distorted;
+  cropBtn.title = distorted ? 'Crop is off while the Distortion effect is on' : 'Crop (C)';
+  cropBtn.classList.toggle('active', ui.cropping || (edit.crop !== null && !distorted));
 
   const effectCount = enabledIds(edit.effects).length;
   effectsBtn.disabled = !hasMedia;
@@ -685,8 +683,7 @@ function render(): void {
   scheduleEstimate();
 
   exportBtn.hidden = ui.exporting;
-  // The open fisheye controls show a view the export would not use until Done.
-  exportBtn.disabled = !hasMedia || !ui.ffmpegAvailable || ui.lensEditing;
+  exportBtn.disabled = !hasMedia || !ui.ffmpegAvailable;
   exportRunning.hidden = !ui.exporting;
 
   const percent = Math.round(ui.exportPercent * 100);
@@ -722,7 +719,7 @@ function estimateSignature(): string {
     edit.outPoint,
     edit.speed,
     crop ? `${crop.x},${crop.y},${crop.w},${crop.h}` : '',
-    edit.lens ? JSON.stringify(lensJob(edit.lens)) : '',
+    distortionJob() ? JSON.stringify(distortionJob()) : '',
     edit.mute,
     edit.reverse,
     edit.volume,
@@ -783,7 +780,7 @@ function approximateSize(bytes: number): string {
 /* --- Export --- */
 
 export function beginExport(): void {
-  if (!edit.media || ui.exporting || !ui.ffmpegAvailable || ui.lensEditing) return;
+  if (!edit.media || ui.exporting || !ui.ffmpegAvailable) return;
 
   if (losslessEligible(edit)) {
     losslessBox.checked = edit.lossless;
@@ -805,6 +802,11 @@ export function closeExportPopover(): boolean {
   return true;
 }
 
+function distortionJob(): LensJob | null {
+  if (!edit.effects.on.distortion) return null;
+  return lensJob(edit.effects.settings.distortion, frameWidth(edit), frameHeight(edit));
+}
+
 function buildJob(input: string, output: string): ExportJob {
   return {
     input,
@@ -814,8 +816,8 @@ function buildJob(input: string, output: string): ExportJob {
     speed: edit.speed,
     ramp: edit.ramp,
     orientation: edit.orientation,
-    crop: edit.lens ? null : edit.crop,
-    lens: edit.lens ? lensJob(edit.lens) : null,
+    crop: edit.effects.on.distortion ? null : edit.crop,
+    lens: edit.audioOnly ? null : distortionJob(),
     mute: edit.mute,
     reverse: edit.reverse,
     normalize: edit.normalize,
@@ -842,7 +844,7 @@ let currentJobId: number | null = null;
 
 async function runExport(retryTarget?: string): Promise<void> {
   const media = edit.media;
-  if (!media || ui.exporting || ui.lensEditing) return;
+  if (!media || ui.exporting) return;
 
   if (!(await ffmpegReady())) return;
 

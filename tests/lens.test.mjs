@@ -58,14 +58,14 @@ test('a sky camera tilted toward the top of the picture looks there with the zen
   const L = await lensModule();
   const lens = sky(L, { tilt: 60 });
   // The view's centre lands above the lens centre, 60 of the 90 degrees out.
-  const [x, y] = L.rayToFrame(lens, L.viewRay(lens, 0.5, 0.5));
+  const [x, y] = L.rayToFrame(lens, L.viewRay(lens, 0.5, 0.5), 3840, 2160);
   close(x, 1920, 1e-6);
   close(y, 1065 - (805 * 60) / 90, 1e-6);
   // The view's top edge points back toward the lens centre: the sky is up.
-  const top = L.rayToFrame(lens, L.viewRay(lens, 0.5, 0));
+  const top = L.rayToFrame(lens, L.viewRay(lens, 0.5, 0), 3840, 2160);
   assert.ok(top[1] > y);
   // Panning 90 degrees turns the view clockwise round the circle, to the right.
-  const right = L.rayToFrame(sky(L, { tilt: 60, pan: 90 }), L.viewRay(sky(L, { tilt: 60, pan: 90 }), 0.5, 0.5));
+  const right = L.rayToFrame(sky(L, { tilt: 60, pan: 90 }), L.viewRay(sky(L, { tilt: 60, pan: 90 }), 0.5, 0.5), 3840, 2160);
   close(right[0], 1920 + (805 * 60) / 90, 1e-6);
   close(right[1], 1065, 1e-6);
 });
@@ -75,7 +75,7 @@ test('frame pixels and lens rays convert both ways for every projection', async 
   for (const projection of ['equidistant', 'equisolid', 'stereographic', 'orthographic']) {
     const lens = sky(L, { projection });
     for (const [x, y] of [[1920, 1065], [2300, 900], [1300, 1500], [1920 + 800, 1065]]) {
-      const back = L.rayToFrame(lens, L.frameToRay(lens, x, y));
+      const back = L.rayToFrame(lens, L.frameToRay(lens, x, y), 3840, 2160);
       close(back[0], x, 1e-6);
       close(back[1], y, 1e-6);
     }
@@ -97,12 +97,12 @@ test('dragging keeps the grabbed point under the pointer', async () => {
 test('the native output size follows the lens detail at its centre', async () => {
   const L = await lensModule();
   const lens = sky(L, { fov: 70, aspect: 16 / 9 });
-  const out = L.lensOutputSize(lens);
+  const out = L.lensOutputSize(lens, 3840);
   // 805 px across 90 degrees is 512.5 px per radian; 2 tan(35) of that is 717.7 px.
   assert.deepEqual(plain(out), { w: 718, h: 404 });
-  assert.deepEqual(plain(L.lensOutputSize({ ...lens, size: 1080 })), { w: 1920, h: 1080 });
-  assert.deepEqual(plain(L.lensOutputSize({ ...lens, aspect: 9 / 16, size: 1080 })), { w: 1080, h: 1920 });
-  const job = L.lensJob(lens);
+  assert.deepEqual(plain(L.lensOutputSize({ ...lens, size: 1080 }, 3840)), { w: 1920, h: 1080 });
+  assert.deepEqual(plain(L.lensOutputSize({ ...lens, aspect: 9 / 16, size: 1080 }, 3840)), { w: 1080, h: 1920 });
+  const job = L.lensJob(lens, 3840, 2160);
   assert.equal(job.width, 718);
   close(job.vFov, 2 * Math.atan(Math.tan(35 * RAD) * (404 / 718)) / RAD, 1e-3);
 });
@@ -126,5 +126,44 @@ test('a sky view follows the pointer in every direction, and leaves the zenith b
     close(u, 0.5 + dx / 1000, 0.01);
     close(v, 0.5 + dy / 1000 * (16 / 9), 0.02);
   }
+  }
+});
+
+test('past the lens field there is no picture, and a normal source has nothing behind it', async () => {
+  const L = await lensModule();
+  const lens = sky(L);
+  // 95 degrees off the axis of a 180 degree lens.
+  const beyond = [Math.sin(95 * RAD), 0, Math.cos(95 * RAD)];
+  assert.equal(L.rayToFrame(lens, beyond, 3840, 2160), null);
+  const normal = { ...lens, from: 'normal', sourceFov: 90 };
+  assert.equal(L.rayToFrame(normal, [0, 0, -1], 1920, 1080), null);
+  const centre = L.rayToFrame(normal, [0, 0, 1], 1920, 1080);
+  close(centre[0], 960, 1e-6);
+  close(centre[1], 540, 1e-6);
+  // A 360 source has a picture in every direction.
+  assert.ok(L.rayToFrame({ ...lens, from: 'equirect' }, [0, 0, -1], 3840, 1920));
+});
+
+test('rise shifts a normal view up without tilting it', async () => {
+  const L = await lensModule();
+  const lens = sky(L, { facing: 'forward', fov: 90, aspect: 1 });
+  const ahead = [0, 0, 1];
+  const [, level] = L.viewPoint(lens, ahead);
+  const [, risen] = L.viewPoint({ ...lens, rise: 0.5 }, ahead);
+  close(level, 0.5, 1e-9);
+  // Half a half-height up moves what is straight ahead a quarter of the frame down.
+  close(risen, 0.75, 1e-9);
+  // Only a normal view takes the shift.
+  assert.equal(L.viewOffset({ ...lens, to: 'panorama', rise: 0.5 }), 0);
+});
+
+test('every view keeps its shape at the centre, so its own size is the source detail', async () => {
+  const L = await lensModule();
+  for (const to of ['normal', 'panorama', 'equirect', 'fisheye', 'planet']) {
+    const lens = sky(L, { to, fov: 120, aspect: 2 });
+    const out = L.lensOutputSize(lens, 3840);
+    assert.ok(out.w > 0 && out.h > 0 && out.w % 2 === 0 && out.h % 2 === 0, to);
+    const v = L.verticalFov(lens);
+    assert.ok(v > 0 && v <= 180, `${to}: ${v}`);
   }
 });

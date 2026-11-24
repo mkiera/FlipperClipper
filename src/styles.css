@@ -817,55 +817,6 @@ select option:disabled {
   stroke-dasharray: 5 4;
 }
 
-#lens-bar {
-  position: absolute;
-  left: 50%;
-  bottom: 12px;
-  transform: translateX(-50%);
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 8px;
-  max-width: calc(100% - 24px);
-  padding: 8px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius-panel);
-  background: var(--float);
-  backdrop-filter: blur(16px);
-  -webkit-backdrop-filter: blur(16px);
-  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.4);
-  pointer-events: auto;
-}
-
-.lens-row {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: center;
-  align-items: center;
-  gap: 8px;
-}
-
-.lens-row[hidden] {
-  display: none;
-}
-
-.lens-field {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  color: var(--fg-dim);
-  white-space: nowrap;
-}
-
-.lens-field input {
-  width: 56px;
-}
-
-.lens-hint {
-  color: var(--fg-dim);
-  font-size: 12px;
-}
-
 /* ---------------------------------------------------------------- effects */
 
 /* Docked beside the stage rather than floating over it. Two reasons: a panel over the picture

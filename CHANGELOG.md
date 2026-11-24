@@ -3,7 +3,7 @@
 ## Unreleased
 
 - Join several videos into one. Add clips with the new button beside the timeline zoom or by dropping files onto the timeline, or drop several files on the video at once, and they line up on one timeline in name order. Split the clip under the playhead with X or the scissors button. Drag a clip in the clip lane above the filmstrip to move it, and press its cross or Delete to remove it. Playback runs straight through the clips, and the export joins them into one file. Trim, speed, effects, crop and the audio tracks apply to the joined video. The export takes the size of the largest clip, and smaller or differently shaped clips are fitted inside it with black bars.
-- Fisheye view turns a fisheye clip, such as a 180° all-sky camera, into a flat video of a narrower view. Press Fisheye, drag the ring onto the edge of the lens picture and set the lens field and projection. Then on View, drag the picture to aim, scroll or type a field to zoom, and pick the shape and size. The export reprojects the clip to match the preview.
+- Quick Effects has a Distortion effect. It reprojects the picture from a fisheye (such as a 180° all-sky camera), a normal camera or a 360 video into a normal view, a panorama, a 360 panorama, a fisheye or a little planet. While its row is open, drag the picture to aim and scroll to zoom. Fit lens circle shows the source with a ring to drag onto the edge of the round picture. Rise moves a normal view up or down without tilting it. Outside the lens there is nothing to show, so it stays black. The export matches the preview.
 
 ## 1.3.0 - 2026-11-10
 

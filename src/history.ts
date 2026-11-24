@@ -38,7 +38,6 @@ const TRACKED = [
   'speed',
   'ramp',
   'crop',
-  'lens',
   'mute',
   'reverse',
   'normalize',

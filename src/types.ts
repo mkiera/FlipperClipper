@@ -205,6 +205,7 @@ export interface EffectSettings {
   /** The keyframes animate the opacity and whether the text shows. */
   text: TextOverlay & { keys: ValueKey[] };
   redact: { items: RedactItem[] };
+  distortion: LensState;
 }
 
 export type EffectId = keyof EffectSettings;
@@ -218,41 +219,59 @@ export interface EffectsState {
 
 export type LensProjection = 'equidistant' | 'equisolid' | 'stereographic' | 'orthographic';
 
-/** A flat view taken out of a fisheye picture. The circle is in turned frame pixels. */
+/** What the source picture is. */
+export type DistortFrom = 'fisheye' | 'normal' | 'equirect';
+/** What the export draws. 'planet' is the stereographic projection. */
+export type DistortTo = 'normal' | 'panorama' | 'equirect' | 'fisheye' | 'planet';
+
+/** The Distortion effect: the source reprojected into another view. Frame pixels are turned. */
 export interface LensState {
+  from: DistortFrom;
+  /** The fisheye's lens circle. Its radius is where rays lensFov / 2 off the axis land. */
   cx: number;
   cy: number;
-  /** The radius of the lens circle, where rays lensFov / 2 off the axis land. */
   r: number;
   /** Degrees across the whole circle. */
   lensFov: number;
   projection: LensProjection;
   /** 'up' frames the view with the sky above it, the way an all-sky camera is read. */
   facing: 'up' | 'forward';
+  /** A normal source's horizontal field, degrees. */
+  sourceFov: number;
+  to: DistortTo;
   /** Degrees. See viewRotation in lens.ts. */
   pan: number;
   tilt: number;
   roll: number;
   /** The view's horizontal field, degrees. */
   fov: number;
+  /** A normal view's frame shifted up (positive) or down, in half-heights, without tilting. */
+  rise: number;
   /** Width over height. */
   aspect: number;
-  /** The output's short edge, or null for the detail the lens holds at its centre. */
+  /** The output's short edge, or null for the detail the source holds at the view's centre. */
   size: number | null;
 }
 
-/** The fisheye view as the export takes it: ready for v360. */
+/** The Distortion effect as the export takes it: ready for v360. */
 export interface LensJob {
+  from: DistortFrom;
   cx: number;
   cy: number;
   r: number;
   lensFov: number;
   projection: LensProjection;
+  /** A normal source's field, degrees. */
+  inHFov: number;
+  inVFov: number;
+  to: DistortTo;
   yaw: number;
   pitch: number;
   roll: number;
   hFov: number;
   vFov: number;
+  /** v360's v_offset: a shift of the normal view, in units of its tangent plane. */
+  vOffset: number;
   width: number;
   height: number;
 }
@@ -300,7 +319,7 @@ export interface ExportJob {
   /** Applied at the head of the chain, so the crop rectangle is in the turned frame. */
   orientation: Orientation;
   crop: Rect | null;
-  /** Replaces the crop: the fisheye reprojected to a flat view. */
+  /** The Distortion effect. It replaces the crop. */
   lens: LensJob | null;
   mute: boolean;
   reverse: boolean;
@@ -336,8 +355,6 @@ export interface EditState {
   ramp: SpeedPoint[];
   orientation: Orientation;
   crop: Rect | null;
-  /** The fisheye view. Set, it takes the crop's place. */
-  lens: LensState | null;
   mute: boolean;
   reverse: boolean;
   normalize: boolean;
@@ -510,9 +527,15 @@ export function defaultFormatFor(inputPath: string): VideoFormat {
 const LENS_MAX_EDGE = 8192;
 const LENS_RAD = Math.PI / 180;
 
-/** Lens pixels per radian at the centre of the circle. */
-function centreDensity(lens: LensState): number {
+/** Source pixels per radian where the view looks. `width` is the turned frame's width. */
+function sourceDensity(lens: LensState, width: number): number {
   const half = (lens.lensFov * LENS_RAD) / 2;
+  switch (lens.from) {
+    case 'normal':
+      return width / 2 / Math.tan((lens.sourceFov * LENS_RAD) / 2);
+    case 'equirect':
+      return width / (2 * Math.PI);
+  }
   switch (lens.projection) {
     case 'equisolid':
       return lens.r / (2 * Math.sin(half / 2));
@@ -529,27 +552,32 @@ function evenEdge(n: number): number {
   return Math.max(2, 2 * Math.round(n / 2));
 }
 
-/** The output frame: the lens's own detail at its centre, or the short edge the user picked. */
-export function lensOutputSize(lens: LensState): { w: number; h: number } {
-  let w: number, h: number;
+/** The output frame: the source's own detail at the view's centre, or the short edge picked.
+ *  `width` is the turned frame's width. */
+export function lensOutputSize(lens: LensState, width: number): { w: number; h: number } {
+  const h = lens.fov * LENS_RAD;
+  // The output's width in units of its own centre's pixels per radian.
+  const span =
+    lens.to === 'normal' ? 2 * Math.tan(h / 2) : lens.to === 'planet' ? 4 * Math.tan(h / 4) : h;
+  let w: number, ht: number;
   if (lens.size === null) {
-    w = 2 * Math.tan((lens.fov * LENS_RAD) / 2) * centreDensity(lens);
-    h = w / lens.aspect;
+    w = span * sourceDensity(lens, width);
+    ht = w / lens.aspect;
   } else if (lens.aspect >= 1) {
-    h = lens.size;
-    w = h * lens.aspect;
+    ht = lens.size;
+    w = ht * lens.aspect;
   } else {
     w = lens.size;
-    h = w / lens.aspect;
+    ht = w / lens.aspect;
   }
-  const shrink = Math.min(1, LENS_MAX_EDGE / Math.max(w, h));
-  return { w: evenEdge(Math.max(16, w * shrink)), h: evenEdge(Math.max(16, h * shrink)) };
+  const shrink = Math.min(1, LENS_MAX_EDGE / Math.max(w, ht));
+  return { w: evenEdge(Math.max(16, w * shrink)), h: evenEdge(Math.max(16, ht * shrink)) };
 }
 
 /** The smaller dimension of the frame after crop; null with no media. */
 export function shortEdge(state: EditState): number | null {
-  if (state.lens) {
-    const size = lensOutputSize(state.lens);
+  if (state.effects.on.distortion) {
+    const size = lensOutputSize(state.effects.settings.distortion, frameWidth(state));
     return Math.min(size.w, size.h);
   }
   const width = state.crop?.w ?? state.media?.width ?? null;
@@ -590,7 +618,6 @@ export function isTrimOnly(state: EditState): boolean {
     !hasRamp(state) &&
     !anyEffectOn(state.effects) &&
     state.crop === null &&
-    !state.lens &&
     !state.mute &&
     !state.reverse &&
     !state.normalize &&
