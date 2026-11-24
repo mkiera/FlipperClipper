@@ -216,6 +216,47 @@ export interface EffectsState {
   settings: EffectSettings;
 }
 
+export type LensProjection = 'equidistant' | 'equisolid' | 'stereographic' | 'orthographic';
+
+/** A flat view taken out of a fisheye picture. The circle is in turned frame pixels. */
+export interface LensState {
+  cx: number;
+  cy: number;
+  /** The radius of the lens circle, where rays lensFov / 2 off the axis land. */
+  r: number;
+  /** Degrees across the whole circle. */
+  lensFov: number;
+  projection: LensProjection;
+  /** 'up' frames the view with the sky above it, the way an all-sky camera is read. */
+  facing: 'up' | 'forward';
+  /** Degrees. See viewRotation in lens.ts. */
+  pan: number;
+  tilt: number;
+  roll: number;
+  /** The view's horizontal field, degrees. */
+  fov: number;
+  /** Width over height. */
+  aspect: number;
+  /** The output's short edge, or null for the detail the lens holds at its centre. */
+  size: number | null;
+}
+
+/** The fisheye view as the export takes it: ready for v360. */
+export interface LensJob {
+  cx: number;
+  cy: number;
+  r: number;
+  lensFov: number;
+  projection: LensProjection;
+  yaw: number;
+  pitch: number;
+  roll: number;
+  hFov: number;
+  vFov: number;
+  width: number;
+  height: number;
+}
+
 /** One point on the speed curve: a multiplier on the speed slider, at a moment on the source
  *  timeline. Between two points the multiplier moves linearly, and outside them it holds. */
 /** Quarter turns clockwise, as the frame is shown. A file's own rotation tag is already
@@ -259,6 +300,8 @@ export interface ExportJob {
   /** Applied at the head of the chain, so the crop rectangle is in the turned frame. */
   orientation: Orientation;
   crop: Rect | null;
+  /** Replaces the crop: the fisheye reprojected to a flat view. */
+  lens: LensJob | null;
   mute: boolean;
   reverse: boolean;
   /** EBU R128 loudness normalisation. Runs before volume, which trims from the level it sets. */
@@ -293,6 +336,8 @@ export interface EditState {
   ramp: SpeedPoint[];
   orientation: Orientation;
   crop: Rect | null;
+  /** The fisheye view. Set, it takes the crop's place. */
+  lens: LensState | null;
   mute: boolean;
   reverse: boolean;
   normalize: boolean;
@@ -462,8 +507,51 @@ export function defaultFormatFor(inputPath: string): VideoFormat {
   }
 }
 
+const LENS_MAX_EDGE = 8192;
+const LENS_RAD = Math.PI / 180;
+
+/** Lens pixels per radian at the centre of the circle. */
+function centreDensity(lens: LensState): number {
+  const half = (lens.lensFov * LENS_RAD) / 2;
+  switch (lens.projection) {
+    case 'equisolid':
+      return lens.r / (2 * Math.sin(half / 2));
+    case 'stereographic':
+      return lens.r / (2 * Math.tan(half / 2));
+    case 'orthographic':
+      return lens.r / Math.sin(Math.min(half, Math.PI / 2));
+    default:
+      return lens.r / half;
+  }
+}
+
+function evenEdge(n: number): number {
+  return Math.max(2, 2 * Math.round(n / 2));
+}
+
+/** The output frame: the lens's own detail at its centre, or the short edge the user picked. */
+export function lensOutputSize(lens: LensState): { w: number; h: number } {
+  let w: number, h: number;
+  if (lens.size === null) {
+    w = 2 * Math.tan((lens.fov * LENS_RAD) / 2) * centreDensity(lens);
+    h = w / lens.aspect;
+  } else if (lens.aspect >= 1) {
+    h = lens.size;
+    w = h * lens.aspect;
+  } else {
+    w = lens.size;
+    h = w / lens.aspect;
+  }
+  const shrink = Math.min(1, LENS_MAX_EDGE / Math.max(w, h));
+  return { w: evenEdge(Math.max(16, w * shrink)), h: evenEdge(Math.max(16, h * shrink)) };
+}
+
 /** The smaller dimension of the frame after crop; null with no media. */
 export function shortEdge(state: EditState): number | null {
+  if (state.lens) {
+    const size = lensOutputSize(state.lens);
+    return Math.min(size.w, size.h);
+  }
   const width = state.crop?.w ?? state.media?.width ?? null;
   const height = state.crop?.h ?? state.media?.height ?? null;
   return width === null || height === null ? null : Math.min(width, height);
@@ -502,6 +590,7 @@ export function isTrimOnly(state: EditState): boolean {
     !hasRamp(state) &&
     !anyEffectOn(state.effects) &&
     state.crop === null &&
+    !state.lens &&
     !state.mute &&
     !state.reverse &&
     !state.normalize &&

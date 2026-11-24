@@ -159,7 +159,11 @@ function chip(name: string, title: string, run: () => void): HTMLButtonElement {
 function setOrientation(patch: Partial<Orientation>): void {
   const orientation = { ...edit.orientation, ...patch };
   const swapped = isTurned(orientation) !== isTurned(edit.orientation);
-  patchEdit({ orientation, ...(swapped && edit.crop ? { crop: null } : {}) });
+  patchEdit({
+    orientation,
+    ...(swapped && edit.crop ? { crop: null } : {}),
+    ...(swapped && edit.lens ? { lens: null } : {}),
+  });
 }
 
 /* --- Rows --- */

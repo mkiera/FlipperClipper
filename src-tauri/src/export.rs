@@ -636,6 +636,18 @@ fn validate(job: &ExportJob) -> Result<(), String> {
         }
     }
 
+    if let Some(lens) = job.lens {
+        let finite = [lens.cx, lens.cy, lens.r, lens.lens_fov, lens.yaw, lens.pitch, lens.roll, lens.h_fov, lens.v_fov]
+            .iter()
+            .all(|v| v.is_finite());
+        if !finite || lens.r < 1.0 || !(1.0..=360.0).contains(&lens.lens_fov) {
+            return Err("The fisheye lens circle is not usable.".to_string());
+        }
+        if !(1.0..180.0).contains(&lens.h_fov) || !(1.0..180.0).contains(&lens.v_fov) {
+            return Err("The fisheye view's field must be between 1 and 179 degrees.".to_string());
+        }
+    }
+
     Ok(())
 }
 
@@ -958,6 +970,7 @@ mod tests {
             ramp: Vec::new(),
             orientation: ffmpeg::Orientation::default(),
             crop: None,
+            lens: None,
             mute: false,
             reverse: false,
             normalize: false,

@@ -15,6 +15,8 @@ import {
 import { edit, patchEdit, patchUi, refresh, rememberQuality, rememberTargetMb, settings, subscribe, ui } from './state';
 import { currentTime, onTime, onTrackLevels, togglePlay, trackPreviewStatus } from './player';
 import { toggleCrop } from './crop';
+import { lensJob } from './lens';
+import { toggleLens } from './lensview';
 import { enabledIds, toEffectsJob } from './effects';
 import { toggleEffectsPanel } from './effectspanel';
 import { ensureMeasured } from './loudness';
@@ -81,6 +83,7 @@ let speedSlider!: HTMLInputElement;
 let speedInput!: HTMLInputElement;
 let reverseBtn!: HTMLButtonElement;
 let cropBtn!: HTMLButtonElement;
+let lensBtn!: HTMLButtonElement;
 let effectsBtn!: HTMLButtonElement;
 let effectsBadge!: HTMLElement;
 let muteBtn!: HTMLButtonElement;
@@ -153,6 +156,7 @@ export function initControls(controlsDeps: ControlsDeps): void {
   speedInput = el<HTMLInputElement>('speed-input');
   reverseBtn = el<HTMLButtonElement>('reverse-btn');
   cropBtn = el<HTMLButtonElement>('crop-btn');
+  lensBtn = el<HTMLButtonElement>('lens-btn');
   effectsBtn = el<HTMLButtonElement>('effects-btn');
   effectsBadge = el('effects-badge');
   muteBtn = el<HTMLButtonElement>('mute-btn');
@@ -195,6 +199,7 @@ export function initControls(controlsDeps: ControlsDeps): void {
   openBtn.addEventListener('click', () => deps.openFile());
   playBtn.addEventListener('click', togglePlay);
   cropBtn.addEventListener('click', toggleCrop);
+  lensBtn.addEventListener('click', toggleLens);
   effectsBtn.addEventListener('click', toggleEffectsPanel);
   muteBtn.addEventListener('click', () => patchEdit({ mute: !edit.mute }));
   reverseBtn.addEventListener('click', toggleReverse);
@@ -602,8 +607,12 @@ function render(): void {
   reverseBtn.disabled = !hasMedia;
   reverseBtn.classList.toggle('active', edit.reverse);
 
-  cropBtn.disabled = !hasMedia;
-  cropBtn.classList.toggle('active', ui.cropping || edit.crop !== null);
+  // The fisheye view replaces the crop, so only one of the two is open at a time.
+  cropBtn.disabled = !hasMedia || edit.lens !== null || ui.lensEditing;
+  cropBtn.title = edit.lens ? 'Crop is off while the fisheye view is on' : 'Crop (C)';
+  cropBtn.classList.toggle('active', ui.cropping || (edit.crop !== null && edit.lens === null));
+  lensBtn.disabled = !hasMedia || ui.cropping;
+  lensBtn.classList.toggle('active', ui.lensEditing || edit.lens !== null);
 
   const effectCount = enabledIds(edit.effects).length;
   effectsBtn.disabled = !hasMedia;
@@ -712,6 +721,7 @@ function estimateSignature(): string {
     edit.outPoint,
     edit.speed,
     crop ? `${crop.x},${crop.y},${crop.w},${crop.h}` : '',
+    edit.lens ? JSON.stringify(lensJob(edit.lens)) : '',
     edit.mute,
     edit.reverse,
     edit.volume,
@@ -803,7 +813,8 @@ function buildJob(input: string, output: string): ExportJob {
     speed: edit.speed,
     ramp: edit.ramp,
     orientation: edit.orientation,
-    crop: edit.crop,
+    crop: edit.lens ? null : edit.crop,
+    lens: edit.lens ? lensJob(edit.lens) : null,
     mute: edit.mute,
     reverse: edit.reverse,
     normalize: edit.normalize,

@@ -3,6 +3,7 @@
 ## Unreleased
 
 - Join several videos into one. Add clips with the new button beside the timeline zoom or by dropping files onto the timeline, or drop several files on the video at once, and they line up on one timeline in name order. Split the clip under the playhead with X or the scissors button. Drag a clip in the clip lane above the filmstrip to move it, and press its cross or Delete to remove it. Playback runs straight through the clips, and the export joins them into one file. Trim, speed, effects, crop and the audio tracks apply to the joined video. The export takes the size of the largest clip, and smaller or differently shaped clips are fitted inside it with black bars.
+- Fisheye view turns a fisheye clip, such as a 180° all-sky camera, into a flat video of a narrower view. Press Fisheye, drag the ring onto the edge of the lens picture and set the lens field and projection. Then on View, drag the picture to aim, scroll or type a field to zoom, and pick the shape and size. The export reprojects the clip to match the preview.
 
 ## 1.3.0 - 2026-11-10
 
