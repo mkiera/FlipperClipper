@@ -40,20 +40,27 @@ Invoke-FcCheck 'fisheye-view' {
     Invoke-FcElement (Find-FcElement -Name 'View' -ControlType Button)
     Save-FcScreenshot -Name 'view-start' | Out-Null
 
-    $fov = Find-FcElement -Id 'lens-view-fov' -ControlType Edit
-    $fov.SetFocus()
-    Send-FcKeys '^a50{TAB}'
-    $size = Find-FcElement -Id 'lens-out' -ControlType Text -Optional
-    $sizeText = if ($size) { $size.Current.Name } else { Find-FcText -Like '* x *' }
+    # The size label has no accessible id of its own: it is the only text that reads "W x H".
+    $readSize = { Get-FcTexts | Where-Object { $_ -match '^\d+ x \d+$' } | Select-Object -First 1 }
+    $before = & $readSize
+    $fov = Find-FcElement -Id 'lens-view-fov' -ControlType Spinner
+    # A long clip is still building its filmstrip here, which can take the focus back once.
+    $sizeText = $null
+    for ($try = 1; $try -le 3 -and -not $sizeText; $try++) {
+        $fov.SetFocus()
+        Send-FcKeys '^a50{TAB}'
+        $sizeText = try { Wait-Fc -TimeoutSeconds 4 -What 'the size label to follow the new field' { $t = & $readSize; if ($t -and $t -ne $before) { $t } } } catch { $null }
+    }
     Write-FcLog "output size label: $sizeText"
     Assert-Fc ($sizeText -match '^(\d+) x (\d+)$') "the bar shows the output size ('$sizeText')"
     $outW = [int]$Matches[1]
     $outH = [int]$Matches[2]
     Save-FcScreenshot -Name 'view-50' | Out-Null
 
-    $stage = (Find-FcElement -Id 'stage').Current.BoundingRectangle
-    $cx = [int]($stage.X + $stage.Width / 2)
-    $cy = [int]($stage.Y + $stage.Height / 2)
+    # The stage has no accessible element: aim from a point in the picture above the bar.
+    $win = (Get-FcWindow).Current.BoundingRectangle
+    $cx = [int]($win.X + $win.Width / 2)
+    $cy = [int]($win.Y + $win.Height * 0.3)
     Set-FcForeground
     Invoke-FcDrag -X $cx -Y $cy -DX 0 -DY 160
     Save-FcScreenshot -Name 'view-aimed' | Out-Null
