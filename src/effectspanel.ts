@@ -503,7 +503,13 @@ function buildDistortionBody(): HTMLElement[] {
     sourceField.hidden = l.from !== 'normal';
     fill.hidden = !fisheye;
     const riseInput = rise.querySelector('input');
-    if (riseInput) riseInput.disabled = viewRise({ ...l, rise: 1 }) === 0;
+    if (riseInput) {
+      const most = viewRise({ ...l, rise: 1 });
+      riseInput.min = String(-most);
+      riseInput.max = String(most);
+      riseInput.disabled = most === 0;
+      if (document.activeElement !== riseInput) riseInput.value = String(viewRise(l));
+    }
     const lensInput = lensField.querySelector('input');
     if (lensInput) lensInput.max = String(maxLensField(l.projection));
     const range = fovRange(l.to);
@@ -842,7 +848,7 @@ function slider(spec: SliderSpec, followsPlayhead = false): HTMLElement {
   input.addEventListener('input', () => {
     let v = Number(input.value);
     // A detent about three pixels of thumb travel wide each side, whatever the slider's length.
-    const zone = (spec.max - spec.min) * (input.clientWidth > 0 ? 3 / input.clientWidth : 0.02);
+    const zone = (Number(input.max) - Number(input.min)) * (input.clientWidth > 0 ? 3 / input.clientWidth : 0.02);
     if (dragging && spec.snap !== undefined && Math.abs(v - spec.snap) <= zone) {
       v = spec.snap;
       input.value = String(v);
