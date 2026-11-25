@@ -393,7 +393,7 @@ export function dragSky(lens: LensState, dx: number, dy: number, width: number):
   // In steps of a few pixels, each taken from where the last one left the view: the scale
   // round the zenith changes with the tilt, so one long step would turn too far or too little.
   const steps = Math.max(1, Math.ceil(Math.hypot(dx, dy) / 3));
-  const risen = viewOffset(lens) !== 0;
+  const risen = viewRise(lens) !== 0;
   let at = lens;
   for (let i = 0; i < steps; i += 1) {
     const step = risen
@@ -421,25 +421,32 @@ function dragLevel(lens: LensState, ax: number, ay: number): { pan: number; tilt
 }
 
 /**
- * A risen normal view's drag: the frame's centre sits off the view's axis, possibly past the
- * zenith, so the pan and tilt that move what is there by (dx, dy) are solved for directly from
- * how it moves on screen. Damped, so near the zenith, where the pan barely moves it, the step
+ * A risen view's drag: the frame's centre sits off the view's axis, possibly past the zenith,
+ * so the pan and tilt that bring what is there to (dx, dy) from it are solved for directly, in
+ * any kind of view, from the rays the view sends out. Damped, so near the zenith, where the pan barely moves it, the step
  * stays small instead of spinning.
  */
 function dragRisen(lens: LensState, dx: number, dy: number, width: number, perPixel: number): { pan: number; tilt: number } {
   const height = width / lens.aspect;
   const target = viewRay(lens, 0.5, 0.5);
-  const at = (pan: number, tilt: number): [number, number] | null => {
-    const p = viewPoint({ ...lens, pan, tilt }, target);
-    return p ? [p[0] * width, p[1] * height] : null;
+  // Measured on the plane square to the target, as the miss between it and the ray the view
+  // sends out where the pointer went.
+  const helper: Vec3 = Math.abs(target[0]) < 0.9 ? [1, 0, 0] : [0, 1, 0];
+  const e1 = unit(cross(target, helper));
+  const e2 = cross(target, e1);
+  const at = (pan: number, tilt: number): [number, number] => {
+    const d = viewRay({ ...lens, pan, tilt }, 0.5 + dx / width, 0.5 + dy / height);
+    return [dot(d, e1), dot(d, e2)];
   };
   const h = 0.05;
   const base = at(lens.pan, lens.tilt), byPan = at(lens.pan + h, lens.tilt), byTilt = at(lens.pan, lens.tilt + h);
-  if (!base || !byPan || !byTilt) return { pan: lens.pan, tilt: lens.tilt };
   const j = [
     [(byPan[0] - base[0]) / h, (byTilt[0] - base[0]) / h],
     [(byPan[1] - base[1]) / h, (byTilt[1] - base[1]) / h],
   ];
+  const move = Math.hypot(dx, dy) * perPixel;
+  // The step has to cancel the miss.
+  [dx, dy] = [-base[0], -base[1]];
   // (J^T J + damping) step = J^T move
   const a = j[0][0] ** 2 + j[1][0] ** 2, b = j[0][0] * j[0][1] + j[1][0] * j[1][1], d = j[0][1] ** 2 + j[1][1] ** 2;
   const damping = 1e-3 * (a + d) + 1e-9;
@@ -457,7 +464,6 @@ function dragRisen(lens: LensState, dx: number, dy: number, width: number, perPi
   }
   // Held to what the plain angle drag would allow for this move, with its floor on the ring
   // round the zenith, so a fast drag keeps up but nothing spins the view near the zenith.
-  const move = Math.hypot(dx, dy) * perPixel;
   // The ring the frame centre is on: its distance from the zenith, the lens axis.
   const ring = Math.max(Math.hypot(target[0], target[1]) / Math.hypot(target[0], target[1], target[2]), 0.1);
   const panMost = (1.5 * move) / ring + 0.5, tiltMost = 1.5 * move + 0.5;

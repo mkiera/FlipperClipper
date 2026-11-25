@@ -50,6 +50,7 @@ import {
   fovRange,
   lensOutputSize,
   maxLensField,
+  viewRise,
 } from './lens';
 import { circleUnfitted, fittedCircle, isFitting, movedCircle, setFitting, setLens } from './lensview';
 import { frameWidth, isTurned } from './types';
@@ -463,9 +464,9 @@ function buildDistortionBody(): HTMLElement[] {
     min: -1,
     max: 1,
     step: 0.01,
-    read: () => lens().rise,
+    read: () => viewRise(lens()),
     show: (v) => `${v > 0 ? '+' : ''}${Math.round(v * 100)}%`,
-    write: (v) => setLens({ rise: v }),
+    write: (v) => setLens({ rise: viewRise({ ...lens(), rise: v }) }),
     snap: 0,
   });
   rise.title = 'Moves the frame up or down without tilting it, so upright things stay upright.';
@@ -501,6 +502,8 @@ function buildDistortionBody(): HTMLElement[] {
     fitLine.hidden = !fisheye;
     sourceField.hidden = l.from !== 'normal';
     fill.hidden = !fisheye;
+    const riseInput = rise.querySelector('input');
+    if (riseInput) riseInput.disabled = viewRise({ ...l, rise: 1 }) === 0;
     const lensInput = lensField.querySelector('input');
     if (lensInput) lensInput.max = String(maxLensField(l.projection));
     const range = fovRange(l.to);

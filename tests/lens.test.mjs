@@ -390,3 +390,20 @@ test('fill stretches the lens picture over the rest of the sphere', async () => 
   delete old.fill;
   assert.equal(L.lensField(old), 180);
 });
+
+test('a risen sky view of any kind follows the pointer, past the zenith too', async () => {
+  const L = await lensModule();
+  const angle = (a, b) => Math.acos(Math.max(-1, Math.min(1, a[0] * b[0] + a[1] * b[1] + a[2] * b[2])));
+  for (const to of ['normal', 'panorama', 'equirect', 'fisheye', 'planet']) {
+    for (const [dx, dy] of [[10, 0], [-10, 0], [0, 10], [7, -7]]) {
+      const lens = sky(L, { to, fov: 120, aspect: 16 / 9, rise: 0.8, tilt: 10, pan: 30 });
+      const width = 1280, height = 720;
+      const grabbed = L.viewRay(lens, 0.5, 0.5);
+      const moved = { ...lens, ...L.dragSky(lens, dx, dy, width) };
+      const before = angle(L.viewRay(lens, 0.5 + dx / width, 0.5 + dy / height), grabbed);
+      const after = angle(L.viewRay(moved, 0.5 + dx / width, 0.5 + dy / height), grabbed);
+      // What was at the frame's centre is now under the pointer, or most of the way there.
+      assert.ok(after < before * 0.35, `${to} ${dx},${dy}: ${after} of ${before}`);
+    }
+  }
+});
