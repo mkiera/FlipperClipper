@@ -358,12 +358,22 @@ function Select-FcOption {
         $done = ((Get-FcValue $Combo) -eq $Option)
     } catch { Write-FcLog "selection pattern route failed: $_" }
 
-    if (-not $done) {
-        # Typing on a closed, focused select picks the first option starting with those letters.
-        Write-FcLog 'falling back to the keyboard'
-        $Combo.SetFocus()
-        $keys = if ($TypeKeys) { $TypeKeys } else { $Option }
-        Send-FcKeys $keys
+    # Typing on a closed, focused select picks the first option starting with those letters.
+    # The pattern route can throw with the list left open or the window behind a closing dialog,
+    # so each try closes the list and brings the window forward first.
+    for ($try = 1; -not $done -and $try -le 3; $try++) {
+        Write-FcLog "falling back to the keyboard (try $try)"
+        try {
+            $ec = $null
+            if ($Combo.TryGetCurrentPattern([System.Windows.Automation.ExpandCollapsePattern]::Pattern, [ref]$ec)) { $ec.Collapse() }
+        } catch { }
+        Start-Sleep -Milliseconds 500
+        try {
+            Set-FcForeground
+            $Combo.SetFocus()
+            $keys = if ($TypeKeys) { $TypeKeys } else { $Option }
+            Send-FcKeys $keys
+        } catch { Write-FcLog "keyboard route failed: $_" }
         Start-Sleep -Milliseconds 500
         $done = ((Get-FcValue $Combo) -eq $Option)
     }
