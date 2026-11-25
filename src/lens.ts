@@ -4,7 +4,7 @@
 // here was measured against v360 in FFmpeg 6.1.
 
 import { lensOutputSize } from './types';
-import type { DistortFrom, DistortTo, LensJob, LensProjection, LensState } from './types';
+import type { DistortFrom, DistortTo, LensJob, LensProjection, LensState, Orientation } from './types';
 
 export { lensOutputSize };
 
@@ -158,6 +158,45 @@ export function lensTheta(projection: LensProjection, m: number, lensFov: number
     }
     default:
       return m * half;
+  }
+}
+
+/** A decoded-frame pixel position (frame W x H) in the turned frame: the turn, then the flips. */
+export function rawToTurned(rx: number, ry: number, orientation: Orientation, W: number, H: number): [number, number] {
+  let x: number, y: number;
+  switch (orientation.rotate) {
+    case 90:
+      [x, y] = [H - ry, rx];
+      break;
+    case 180:
+      [x, y] = [W - rx, H - ry];
+      break;
+    case 270:
+      [x, y] = [ry, W - rx];
+      break;
+    default:
+      [x, y] = [rx, ry];
+  }
+  const turned = orientation.rotate === 90 || orientation.rotate === 270;
+  if (orientation.flipH) x = (turned ? H : W) - x;
+  if (orientation.flipV) y = (turned ? W : H) - y;
+  return [x, y];
+}
+
+/** The inverse of rawToTurned. */
+export function turnedToRaw(x: number, y: number, orientation: Orientation, W: number, H: number): [number, number] {
+  const turned = orientation.rotate === 90 || orientation.rotate === 270;
+  if (orientation.flipH) x = (turned ? H : W) - x;
+  if (orientation.flipV) y = (turned ? W : H) - y;
+  switch (orientation.rotate) {
+    case 90:
+      return [y, H - x];
+    case 180:
+      return [W - x, H - y];
+    case 270:
+      return [W - y, x];
+    default:
+      return [x, y];
   }
 }
 

@@ -196,3 +196,35 @@ test('a sky view can be dragged down to look straight below', async () => {
   const centre = L.viewRay(lens, 0.5, 0.5);
   close(centre[2], -1, 1e-9);
 });
+
+test('frame positions survive every turn and flip both ways', async () => {
+  const L = await lensModule();
+  const W = 3840, H = 2160;
+  for (const rotate of [0, 90, 180, 270]) {
+    for (const flipH of [false, true]) {
+      for (const flipV of [false, true]) {
+        const o = { rotate, flipH, flipV };
+        const [x, y] = L.rawToTurned(1000, 300, o, W, H);
+        const turned = rotate === 90 || rotate === 270;
+        assert.ok(x >= 0 && x <= (turned ? H : W) && y >= 0 && y <= (turned ? W : H));
+        const back = L.turnedToRaw(x, y, o, W, H);
+        close(back[0], 1000, 1e-9);
+        close(back[1], 300, 1e-9);
+      }
+    }
+  }
+  // A quarter turn clockwise puts the picture's top-left corner at the top right.
+  assert.deepEqual(plain(L.rawToTurned(0, 0, { rotate: 90, flipH: false, flipV: false }, W, H)), [H, 0]);
+});
+
+test('dragging a wide normal view moves the picture at the centre as far as the pointer', async () => {
+  const L = await lensModule();
+  for (const fov of [40, 110, 150]) {
+    const lens = sky(L, { tilt: 80, fov });
+    const centre = L.viewRay(lens, 0.5, 0.5);
+    const moved = { ...lens, ...L.dragSky(lens, 0, 20, 1000) };
+    const [, v] = L.viewPoint(moved, centre);
+    // 20 px down on a view 1000 px wide and 562.5 px high.
+    close((v - 0.5) * 562.5, 20, 1);
+  }
+});

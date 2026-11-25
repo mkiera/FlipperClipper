@@ -827,7 +827,7 @@ function slider(spec: SliderSpec, followsPlayhead = false): HTMLElement {
   input.addEventListener('keydown', () => (dragging = false));
   input.addEventListener('input', () => {
     let v = Number(input.value);
-    if (dragging && spec.snap !== undefined && Math.abs(v - spec.snap) <= (spec.max - spec.min) * 0.02) {
+    if (dragging && spec.snap !== undefined && Math.abs(v - spec.snap) <= (spec.max - spec.min) * 0.01) {
       v = spec.snap;
       input.value = String(v);
     }

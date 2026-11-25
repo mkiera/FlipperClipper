@@ -17,21 +17,42 @@ export function findLensCircle(luma: ArrayLike<number>, width: number, height: n
   if (width < 16 || height < 16) return null;
   // A 3x3 minimum wipes out lines and text a pixel or two thick, and pulls the disc's edge in
   // by one pixel, which the radius gets back at the end.
-  const eroded = new Uint8Array(width * height);
+  // Done as a row pass then a column pass, which is the same and nine times cheaper.
+  const rows = new Uint8Array(width * height);
   for (let y = 0; y < height; y += 1) {
     for (let x = 0; x < width; x += 1) {
-      let low = 255;
-      for (let j = Math.max(0, y - 1); j <= Math.min(height - 1, y + 1); j += 1) {
-        for (let i = Math.max(0, x - 1); i <= Math.min(width - 1, x + 1); i += 1) {
-          low = Math.min(low, luma[j * width + i]);
-        }
-      }
-      eroded[y * width + x] = low;
+      const i = y * width + x;
+      let low = luma[i];
+      if (x > 0) low = Math.min(low, luma[i - 1]);
+      if (x < width - 1) low = Math.min(low, luma[i + 1]);
+      rows[i] = low;
     }
   }
-  const sorted = Array.from(eroded).sort((a, b) => a - b);
-  const bright = sorted[Math.floor(sorted.length * 0.95)];
-  const threshold = Math.max(20, bright * 0.2);
+  const eroded = new Uint8Array(width * height);
+  const counts = new Array<number>(256).fill(0);
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const i = y * width + x;
+      let low = rows[i];
+      if (y > 0) low = Math.min(low, rows[i - width]);
+      if (y < height - 1) low = Math.min(low, rows[i + width]);
+      eroded[i] = low;
+      counts[low] += 1;
+    }
+  }
+  const percentile = (share: number) => {
+    let seen = 0;
+    for (let v = 0; v < 256; v += 1) {
+      seen += counts[v];
+      if (seen >= share * eroded.length) return v;
+    }
+    return 255;
+  };
+  // Lit means clearly above the black surround, judged from the picture's own range, so a dim
+  // night sky and its dark horizon still count.
+  const black = percentile(0.05), bright = percentile(0.95);
+  if (bright - black < 12) return null;
+  const threshold = black + Math.max(6, (bright - black) * 0.12);
   const lit = (x: number, y: number) => eroded[y * width + x] >= threshold;
 
   const points: [number, number][] = [];

@@ -12,7 +12,9 @@ import {
   isSky,
   lensField,
   lensOutputSize,
+  rawToTurned,
   rayToFrame,
+  turnedToRaw,
   sourceVerticalFov,
   verticalFov,
   viewOffset,
@@ -112,6 +114,13 @@ export function circleUnfitted(lens: LensState, orientation: Orientation): boole
   return Math.abs(lens.cx - d.cx) < 0.5 && Math.abs(lens.cy - d.cy) < 0.5 && Math.abs(lens.r - d.r) < 0.5;
 }
 
+function refitIfGuessed(): void {
+  const lens = currentLens();
+  if (!lens || lens.from !== 'fisheye' || !circleUnfitted(lens, edit.orientation)) return;
+  const found = findCircleOnShow(edit.orientation);
+  if (found) setLens(found);
+}
+
 /** The lens circle in the decoded frame on show, moved into the turned frame, or null. */
 function findCircleOnShow(orientation: Orientation): Pick<LensState, 'cx' | 'cy' | 'r'> | null {
   const media = edit.media;
@@ -139,55 +148,15 @@ function findCircleOnShow(orientation: Orientation): Pick<LensState, 'cx' | 'cy'
   const found = findLensCircle(luma, w, h);
   if (!found) return null;
   const kx = media.width / w, ky = media.height / h;
-  const [cx, cy] = rawToTurned(found.cx * kx, found.cy * ky, orientation);
+  const [cx, cy] = rawToTurned(found.cx * kx, found.cy * ky, orientation, media.width, media.height);
   return { cx, cy, r: (found.r * (kx + ky)) / 2 };
-}
-
-/** A decoded-frame pixel position in the turned frame: the turn, then the flips. */
-function rawToTurned(rx: number, ry: number, orientation: Orientation): [number, number] {
-  const W = edit.media?.width ?? 0, H = edit.media?.height ?? 0;
-  let x: number, y: number;
-  switch (orientation.rotate) {
-    case 90:
-      [x, y] = [H - ry, rx];
-      break;
-    case 180:
-      [x, y] = [W - rx, H - ry];
-      break;
-    case 270:
-      [x, y] = [ry, W - rx];
-      break;
-    default:
-      [x, y] = [rx, ry];
-  }
-  const turned = isTurned(orientation);
-  if (orientation.flipH) x = (turned ? H : W) - x;
-  if (orientation.flipV) y = (turned ? W : H) - y;
-  return [x, y];
-}
-
-/** The inverse of rawToTurned. */
-function turnedToRaw(x: number, y: number, orientation: Orientation): [number, number] {
-  const W = edit.media?.width ?? 0, H = edit.media?.height ?? 0;
-  const turned = isTurned(orientation);
-  if (orientation.flipH) x = (turned ? H : W) - x;
-  if (orientation.flipV) y = (turned ? W : H) - y;
-  switch (orientation.rotate) {
-    case 90:
-      return [y, H - x];
-    case 180:
-      return [W - x, H - y];
-    case 270:
-      return [W - y, x];
-    default:
-      return [x, y];
-  }
 }
 
 /** The lens circle kept on the same part of the picture when the turn or flips change. */
 export function movedCircle(lens: LensState, from: Orientation, to: Orientation): Pick<LensState, 'cx' | 'cy'> {
-  const [rx, ry] = turnedToRaw(lens.cx, lens.cy, from);
-  const [cx, cy] = rawToTurned(rx, ry, to);
+  const W = edit.media?.width ?? 0, H = edit.media?.height ?? 0;
+  const [rx, ry] = turnedToRaw(lens.cx, lens.cy, from, W, H);
+  const [cx, cy] = rawToTurned(rx, ry, to, W, H);
   return { cx, cy };
 }
 
@@ -236,6 +205,8 @@ export function initLensView(isRowOpen: () => boolean): void {
   new ResizeObserver(sync).observe(stage);
   video.addEventListener('loadeddata', queueDraw);
   video.addEventListener('seeked', queueDraw);
+  // A frame too dark to find the circle in leaves the guess; a later frame may show it.
+  for (const type of ['loadeddata', 'seeked']) video.addEventListener(type, refitIfGuessed);
   onTime(queueDraw);
   subscribe(sync);
   sync();
