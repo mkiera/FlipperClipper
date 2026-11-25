@@ -115,19 +115,21 @@ export function circleUnfitted(lens: LensState, orientation: Orientation): boole
 }
 
 /** The media whose frames refitIfGuessed has looked at, how often, and whether it fitted. */
-let refit: { media: unknown; tries: number; done: boolean } = { media: null, tries: 0, done: false };
+let refit: { media: unknown; tries: number; done: boolean; at: number } = { media: null, tries: 0, done: false, at: 0 };
 
 /**
- * A frame too dark to find the circle in leaves the guess, so a few later frames get a look.
- * Only once per clip: a picture with no disc stops costing a readback on every seek, and an
+ * A frame too dark to find the circle in leaves the guess, so a few later frames get a look,
+ * spaced out so a scrub through a dark stretch does not use them all. Only once per clip: a picture with no disc stops costing a readback on every seek, and an
  * undo back to the guess is not fitted over again.
  */
 function refitIfGuessed(): void {
   const lens = currentLens();
   if (!lens || lens.from !== 'fisheye' || !circleUnfitted(lens, edit.orientation)) return;
-  if (refit.media !== edit.media) refit = { media: edit.media, tries: 0, done: false };
-  if (refit.done || refit.tries >= 5) return;
+  if (refit.media !== edit.media) refit = { media: edit.media, tries: 0, done: false, at: 0 };
+  const now = performance.now();
+  if (refit.done || refit.tries >= 10 || now - refit.at < 500) return;
   refit.tries += 1;
+  refit.at = now;
   const found = findCircleOnShow(edit.orientation);
   if (!found) return;
   refit.done = true;

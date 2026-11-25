@@ -372,7 +372,12 @@ export function dragSky(lens: LensState, dx: number, dy: number, width: number):
   const perPixel = span / RAD / Math.max(1, width);
   let pan: number, tilt: number;
   if (viewOffset(lens) !== 0) {
-    ({ pan, tilt } = dragRisen(lens, dx, dy, width));
+    // In steps of a few pixels, each solved where the last one left the view, so a long move
+    // lands where the pointer did rather than where a straight-line guess points.
+    const steps = Math.max(1, Math.ceil(Math.hypot(dx, dy) / 8));
+    let at = lens;
+    for (let i = 0; i < steps; i += 1) at = { ...at, ...dragRisen(at, dx / steps, dy / steps, width, perPixel) };
+    ({ pan, tilt } = at);
   } else {
     // The turn is the view's last rotation, so the pointer's move is turned back first.
     const c = Math.cos(lens.roll * RAD), s = Math.sin(lens.roll * RAD);
@@ -394,7 +399,7 @@ export function dragSky(lens: LensState, dx: number, dy: number, width: number):
  * how it moves on screen. Damped, so near the zenith, where the pan barely moves it, the step
  * stays small instead of spinning.
  */
-function dragRisen(lens: LensState, dx: number, dy: number, width: number): { pan: number; tilt: number } {
+function dragRisen(lens: LensState, dx: number, dy: number, width: number, perPixel: number): { pan: number; tilt: number } {
   const height = width / lens.aspect;
   const target = viewRay(lens, 0.5, 0.5);
   const at = (pan: number, tilt: number): [number, number] | null => {
@@ -416,13 +421,13 @@ function dragRisen(lens: LensState, dx: number, dy: number, width: number): { pa
   let dPan = ((d + damping) * ga - b * gb) / det;
   let dTilt = ((a + damping) * gb - b * ga) / det;
   if (!Number.isFinite(dPan) || !Number.isFinite(dTilt)) return { pan: lens.pan, tilt: lens.tilt };
-  // One pointer event never spins the view more than a few degrees.
-  const most = 10;
-  const size = Math.hypot(dPan, dTilt);
-  if (size > most) {
-    dPan *= most / size;
-    dTilt *= most / size;
-  }
+  // Held to what the plain angle drag would allow for this move, with its floor on the ring
+  // round the zenith, so a fast drag keeps up but nothing spins the view near the zenith.
+  const move = Math.hypot(dx, dy) * perPixel;
+  const ring = Math.max(Math.sin(lens.tilt * RAD + Math.atan(viewOffset(lens))), 0.1);
+  const panMost = (1.5 * move) / ring + 0.5, tiltMost = 1.5 * move + 0.5;
+  dPan = Math.max(-panMost, Math.min(panMost, dPan));
+  dTilt = Math.max(-tiltMost, Math.min(tiltMost, dTilt));
   return { pan: lens.pan + dPan, tilt: lens.tilt + dTilt };
 }
 

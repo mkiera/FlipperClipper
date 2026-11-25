@@ -258,3 +258,15 @@ test('each lens type stops at the field it can describe', async () => {
   const out = L.lensOutputSize(lens, 3840);
   assert.ok(out.w > 100 && Number.isFinite(out.w), JSON.stringify(out));
 });
+
+test('a fast drag on a risen wide view lands where the same drag in slow steps does', async () => {
+  const L = await lensModule();
+  const lens = sky(L, { tilt: 90, fov: 150, rise: 0.8, pan: 10 });
+  for (const dx of [40, 80]) {
+    const fast = L.dragSky(lens, dx, 0, 800);
+    let slow = lens;
+    for (let i = 0; i < dx / 4; i += 1) slow = { ...slow, ...L.dragSky(slow, 4, 0, 800) };
+    close(fast.pan, slow.pan, 0.5);
+    close(fast.tilt, slow.tilt, 0.5);
+  }
+});
