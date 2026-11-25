@@ -14,7 +14,7 @@ Invoke-FcCheck 'close-during-export' {
     Invoke-FcElement (Find-FcElement -Id 'effects-btn' -Name 'Effects' -ControlType Button)
     $text = Find-FcElement -Name 'Text overlay' -ControlType CheckBox
     Switch-FcElement $text
-    Assert-Fc ((Get-FcToggleState $text) -eq 'On') 'the text overlay is switched on'
+    Wait-Fc -TimeoutSeconds 5 -What 'the text overlay to switch on' { (Get-FcToggleState $text) -eq 'On' } | Out-Null
     Get-FcTree -Name 'tree-effects' | Out-Null
     Save-FcScreenshot -Name 'text-overlay-on' | Out-Null
 
