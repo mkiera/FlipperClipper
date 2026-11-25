@@ -228,3 +228,29 @@ test('dragging a wide normal view moves the picture at the centre as far as the 
     close((v - 0.5) * 562.5, 20, 1);
   }
 });
+
+test('with a rise, what sits at the frame centre still follows the pointer', async () => {
+  const L = await lensModule();
+  for (const rise of [-0.8, 0, 0.8, 1]) {
+    const lens = sky(L, { tilt: 90, fov: 150, rise, pan: 10 });
+    // The frame's centre, wherever the rise put the view's axis.
+    const centre = L.viewRay(lens, 0.5, 0.5);
+    for (const [dx, dy] of [[0, 10], [10, 0]]) {
+      const moved = { ...lens, ...L.dragSky(lens, dx, dy, 1000) };
+      const [u, v] = L.viewPoint(moved, centre);
+      close((u - 0.5) * 1000, dx, 1.5);
+      close((v - 0.5) * 562.5, dy, 1.5);
+    }
+  }
+});
+
+test('each lens type stops at the field it can describe', async () => {
+  const L = await lensModule();
+  assert.equal(L.lensField({ projection: 'orthographic', lensFov: 240 }), 180);
+  assert.equal(L.lensField({ projection: 'stereographic', lensFov: 360 }), 300);
+  assert.equal(L.lensField({ projection: 'equidistant', lensFov: 360 }), 360);
+  // At its limit a stereographic lens still has a finite, usable size.
+  const lens = sky(L, { projection: 'stereographic', lensFov: 360, size: null });
+  const out = L.lensOutputSize(lens, 3840);
+  assert.ok(out.w > 100 && Number.isFinite(out.w), JSON.stringify(out));
+});

@@ -530,8 +530,14 @@ const LENS_MAX_EDGE = 8192;
 const LENS_RAD = Math.PI / 180;
 
 /** Source pixels per radian where the view looks. `width` is the turned frame's width. */
+/** The widest lens field a projection can describe: orthographic stops at the side, and
+ *  stereographic runs off to infinity at 360. */
+export function maxLensField(projection: LensProjection): number {
+  return projection === 'orthographic' ? 180 : projection === 'stereographic' ? 300 : 360;
+}
+
 function sourceDensity(lens: LensState, width: number): number {
-  const half = (lens.lensFov * LENS_RAD) / 2;
+  const half = (Math.min(maxLensField(lens.projection), lens.lensFov) * LENS_RAD) / 2;
   switch (lens.from) {
     case 'normal':
       return width / 2 / Math.tan((lens.sourceFov * LENS_RAD) / 2);

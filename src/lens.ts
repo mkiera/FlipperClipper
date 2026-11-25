@@ -3,10 +3,10 @@
 // Ry(yaw) * Rx(pitch) * Rz(roll) applied to each output ray. Every input and output formula
 // here was measured against v360 in FFmpeg 6.1.
 
-import { lensOutputSize } from './types';
+import { lensOutputSize, maxLensField } from './types';
 import type { DistortFrom, DistortTo, LensJob, LensProjection, LensState, Orientation } from './types';
 
-export { lensOutputSize };
+export { lensOutputSize, maxLensField };
 
 export type Mat3 = number[][];
 export type Vec3 = [number, number, number];
@@ -200,9 +200,9 @@ export function turnedToRaw(x: number, y: number, orientation: Orientation, W: n
   }
 }
 
-/** The lens field the camera model uses: an orthographic lens cannot see past 180 degrees. */
+/** The lens field the camera model uses, held to what its projection can describe. */
 export function lensField(lens: Pick<LensState, 'projection' | 'lensFov'>): number {
-  return lens.projection === 'orthographic' ? Math.min(180, lens.lensFov) : lens.lensFov;
+  return Math.min(maxLensField(lens.projection), lens.lensFov);
 }
 
 /** A normal source's vertical field from its horizontal one and the frame's shape. */
@@ -370,12 +370,15 @@ export function dragSky(lens: LensState, dx: number, dy: number, width: number):
   const h = (lens.fov * RAD) / 2;
   const span = lens.to === 'normal' ? 2 * Math.tan(h) : lens.to === 'planet' ? 4 * Math.tan(h / 2) : 2 * h;
   const perPixel = span / RAD / Math.max(1, width);
+  // A rise puts the frame's centre off the view's axis, where the picture's scale is smaller
+  // and its ring round the zenith is another one.
+  const o = viewOffset(lens);
   // The turn is the view's last rotation, so the pointer's move is turned back first.
   const c = Math.cos(lens.roll * RAD), s = Math.sin(lens.roll * RAD);
   [dx, dy] = [dx * c - dy * s, dx * s + dy * c];
-  const ring = Math.max(Math.sin(lens.tilt * RAD), 0.1);
-  const pan = lens.pan + (dx * perPixel) / ring;
-  const tilt = lens.tilt - dy * perPixel;
+  const ring = Math.max(Math.sin(lens.tilt * RAD + Math.atan(o)), 0.1);
+  const pan = lens.pan + (dx * perPixel) / Math.sqrt(1 + o * o) / ring;
+  const tilt = lens.tilt - (dy * perPixel) / (1 + o * o);
   return {
     pan: ((((pan + 180) % 360) + 360) % 360) - 180,
     // Up to straight down, past the lens's own edge.

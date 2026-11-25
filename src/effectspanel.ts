@@ -49,6 +49,7 @@ import {
   SOURCE_FOV_MIN,
   fovRange,
   lensOutputSize,
+  maxLensField,
 } from './lens';
 import { circleUnfitted, fittedCircle, isFitting, movedCircle, setFitting, setLens } from './lensview';
 import { frameWidth, isTurned } from './types';
@@ -372,8 +373,7 @@ function buildDistortionBody(): HTMLElement[] {
     LENS_PROJECTIONS,
     (value) => {
       const projection = value as LensState['projection'];
-      // An orthographic lens cannot see past 180 degrees.
-      setLens(projection === 'orthographic' ? { projection, lensFov: Math.min(180, lens().lensFov) } : { projection });
+      setLens({ projection, lensFov: Math.min(maxLensField(projection), lens().lensFov) });
     },
     () => lens().projection,
   );
@@ -407,7 +407,7 @@ function buildDistortionBody(): HTMLElement[] {
     step: 1,
     read: () => lens().lensFov,
     show: (v) => `${Math.round(v)}°`,
-    write: (v) => setLens({ lensFov: lens().projection === 'orthographic' ? Math.min(180, v) : v }),
+    write: (v) => setLens({ lensFov: Math.min(maxLensField(lens().projection), v) }),
   });
   const fitLine = document.createElement('div');
   fitLine.className = 'fx-line';
@@ -491,7 +491,7 @@ function buildDistortionBody(): HTMLElement[] {
     sourceField.hidden = l.from !== 'normal';
     rise.hidden = l.to !== 'normal';
     const lensInput = lensField.querySelector('input');
-    if (lensInput) lensInput.max = String(l.projection === 'orthographic' ? 180 : LENS_FOV_MAX);
+    if (lensInput) lensInput.max = String(maxLensField(l.projection));
     const range = fovRange(l.to);
     const input = field.querySelector('input');
     if (input) {
