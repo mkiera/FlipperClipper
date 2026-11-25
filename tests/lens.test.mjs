@@ -282,6 +282,13 @@ test('a fast drag on a risen wide view lands where the same drag in slow steps d
     close(fast.pan, slow.pan, 0.5);
     close(fast.tilt, slow.tilt, 0.5);
   }
+  // Level too: the ring round the zenith grows as a diagonal drag tilts (150, tilt 30).
+  const level = sky(L, { tilt: 30, fov: 150 });
+  const one = L.dragSky(level, 40, 40, 800);
+  let twenty = level;
+  for (let i = 0; i < 20; i += 1) twenty = { ...twenty, ...L.dragSky(twenty, 2, 2, 800) };
+  close(one.pan, twenty.pan, 1);
+  close(one.tilt, twenty.tilt, 1);
   // Pressed against the zenith on a diagonal: the tilt stops at its limit in every step, so
   // the pan does not depend on how the move was cut into events.
   const top = sky(L, { tilt: 0, fov: 150, rise: 0.8, roll: 90 });
