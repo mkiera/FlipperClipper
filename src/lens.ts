@@ -370,20 +370,60 @@ export function dragSky(lens: LensState, dx: number, dy: number, width: number):
   const h = (lens.fov * RAD) / 2;
   const span = lens.to === 'normal' ? 2 * Math.tan(h) : lens.to === 'planet' ? 4 * Math.tan(h / 2) : 2 * h;
   const perPixel = span / RAD / Math.max(1, width);
-  // A rise puts the frame's centre off the view's axis, where the picture's scale is smaller
-  // and its ring round the zenith is another one.
-  const o = viewOffset(lens);
-  // The turn is the view's last rotation, so the pointer's move is turned back first.
-  const c = Math.cos(lens.roll * RAD), s = Math.sin(lens.roll * RAD);
-  [dx, dy] = [dx * c - dy * s, dx * s + dy * c];
-  const ring = Math.max(Math.sin(lens.tilt * RAD + Math.atan(o)), 0.1);
-  const pan = lens.pan + (dx * perPixel) / Math.sqrt(1 + o * o) / ring;
-  const tilt = lens.tilt - (dy * perPixel) / (1 + o * o);
+  let pan: number, tilt: number;
+  if (viewOffset(lens) !== 0) {
+    ({ pan, tilt } = dragRisen(lens, dx, dy, width));
+  } else {
+    // The turn is the view's last rotation, so the pointer's move is turned back first.
+    const c = Math.cos(lens.roll * RAD), s = Math.sin(lens.roll * RAD);
+    [dx, dy] = [dx * c - dy * s, dx * s + dy * c];
+    const ring = Math.max(Math.sin(lens.tilt * RAD), 0.1);
+    pan = lens.pan + (dx * perPixel) / ring;
+    tilt = lens.tilt - dy * perPixel;
+  }
   return {
     pan: ((((pan + 180) % 360) + 360) % 360) - 180,
     // Up to straight down, past the lens's own edge.
     tilt: Math.max(0, Math.min(180, tilt)),
   };
+}
+
+/**
+ * A risen normal view's drag: the frame's centre sits off the view's axis, possibly past the
+ * zenith, so the pan and tilt that move what is there by (dx, dy) are solved for directly from
+ * how it moves on screen. Damped, so near the zenith, where the pan barely moves it, the step
+ * stays small instead of spinning.
+ */
+function dragRisen(lens: LensState, dx: number, dy: number, width: number): { pan: number; tilt: number } {
+  const height = width / lens.aspect;
+  const target = viewRay(lens, 0.5, 0.5);
+  const at = (pan: number, tilt: number): [number, number] | null => {
+    const p = viewPoint({ ...lens, pan, tilt }, target);
+    return p ? [p[0] * width, p[1] * height] : null;
+  };
+  const h = 0.05;
+  const base = at(lens.pan, lens.tilt), byPan = at(lens.pan + h, lens.tilt), byTilt = at(lens.pan, lens.tilt + h);
+  if (!base || !byPan || !byTilt) return { pan: lens.pan, tilt: lens.tilt };
+  const j = [
+    [(byPan[0] - base[0]) / h, (byTilt[0] - base[0]) / h],
+    [(byPan[1] - base[1]) / h, (byTilt[1] - base[1]) / h],
+  ];
+  // (J^T J + damping) step = J^T move
+  const a = j[0][0] ** 2 + j[1][0] ** 2, b = j[0][0] * j[0][1] + j[1][0] * j[1][1], d = j[0][1] ** 2 + j[1][1] ** 2;
+  const damping = 1e-3 * (a + d) + 1e-9;
+  const ga = j[0][0] * dx + j[1][0] * dy, gb = j[0][1] * dx + j[1][1] * dy;
+  const det = (a + damping) * (d + damping) - b * b;
+  let dPan = ((d + damping) * ga - b * gb) / det;
+  let dTilt = ((a + damping) * gb - b * ga) / det;
+  if (!Number.isFinite(dPan) || !Number.isFinite(dTilt)) return { pan: lens.pan, tilt: lens.tilt };
+  // One pointer event never spins the view more than a few degrees.
+  const most = 10;
+  const size = Math.hypot(dPan, dTilt);
+  if (size > most) {
+    dPan *= most / size;
+    dTilt *= most / size;
+  }
+  return { pan: lens.pan + dPan, tilt: lens.tilt + dTilt };
 }
 
 /**

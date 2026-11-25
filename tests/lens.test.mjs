@@ -231,8 +231,12 @@ test('dragging a wide normal view moves the picture at the centre as far as the 
 
 test('with a rise, what sits at the frame centre still follows the pointer', async () => {
   const L = await lensModule();
-  for (const rise of [-0.8, 0, 0.8, 1]) {
-    const lens = sky(L, { tilt: 90, fov: 150, rise, pan: 10 });
+  const cases = [];
+  for (const rise of [-0.8, 0, 0.8, 1]) cases.push({ tilt: 90, rise, roll: 0 });
+  // Past the zenith, and with a turn: the frame's centre then moves both ways at once.
+  cases.push({ tilt: 30, rise: 0.8, roll: 0 }, { tilt: 80, rise: 0.8, roll: 30 }, { tilt: 60, rise: -0.5, roll: -45 });
+  for (const { tilt, rise, roll } of cases) {
+    const lens = sky(L, { tilt, fov: 150, rise, pan: 10, roll });
     // The frame's centre, wherever the rise put the view's axis.
     const centre = L.viewRay(lens, 0.5, 0.5);
     for (const [dx, dy] of [[0, 10], [10, 0]]) {
