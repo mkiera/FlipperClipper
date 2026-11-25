@@ -114,11 +114,24 @@ export function circleUnfitted(lens: LensState, orientation: Orientation): boole
   return Math.abs(lens.cx - d.cx) < 0.5 && Math.abs(lens.cy - d.cy) < 0.5 && Math.abs(lens.r - d.r) < 0.5;
 }
 
+/** The media whose frames refitIfGuessed has looked at, how often, and whether it fitted. */
+let refit: { media: unknown; tries: number; done: boolean } = { media: null, tries: 0, done: false };
+
+/**
+ * A frame too dark to find the circle in leaves the guess, so a few later frames get a look.
+ * Only once per clip: a picture with no disc stops costing a readback on every seek, and an
+ * undo back to the guess is not fitted over again.
+ */
 function refitIfGuessed(): void {
   const lens = currentLens();
   if (!lens || lens.from !== 'fisheye' || !circleUnfitted(lens, edit.orientation)) return;
+  if (refit.media !== edit.media) refit = { media: edit.media, tries: 0, done: false };
+  if (refit.done || refit.tries >= 5) return;
+  refit.tries += 1;
   const found = findCircleOnShow(edit.orientation);
-  if (found) setLens(found);
+  if (!found) return;
+  refit.done = true;
+  setLens(found);
 }
 
 /** The lens circle in the decoded frame on show, moved into the turned frame, or null. */

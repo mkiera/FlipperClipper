@@ -64,3 +64,18 @@ test('a bright square is not taken for a lens circle', async () => {
   for (let y = 50; y < 309; y += 1) for (let x = 190; x < 449; x += 1) out[y * w + x] = 180;
   assert.equal(F.findLensCircle(out, w, h), null);
 });
+
+test('a picture that fades out toward its edge gives no circle rather than a small one', async () => {
+  const F = await fitModule();
+  const w = 640, h = 360;
+  for (const fade of [(t) => 1 - t * t, (t) => Math.cos((t * Math.PI) / 2) ** 2]) {
+    const out = new Uint8Array(w * h);
+    for (let y = 0; y < h; y += 1) {
+      for (let x = 0; x < w; x += 1) {
+        const t = Math.hypot(x + 0.5 - 320, y + 0.5 - 180) / 150;
+        out[y * w + x] = t <= 1 ? Math.round(180 * fade(t)) : 3;
+      }
+    }
+    assert.equal(F.findLensCircle(out, w, h), null);
+  }
+});

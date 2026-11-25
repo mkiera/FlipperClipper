@@ -104,7 +104,26 @@ export function findLensCircle(luma: ArrayLike<number>, width: number, height: n
   const inside = coverage(eroded, width, height, circle, 0.85, threshold);
   const outside = coverage(eroded, width, height, { cx, cy, r: r * 1.12 }, -1, threshold);
   if (inside < 0.75 || outside > 0.15) return null;
+  // A real lens edge is a step. A picture that fades out toward its edge crosses the threshold
+  // on a circle too, but a smaller one, and only just above it.
+  const step = edgeStep(luma, width, height, { cx, cy, r: r + 1 });
+  if (step < 2 * (threshold - black)) return null;
   return { cx, cy, r: r + 1 };
+}
+
+/** How much brighter the picture is just inside the circle than just outside it: the median
+ *  over the edge where the frame shows both sides. */
+function edgeStep(luma: ArrayLike<number>, width: number, height: number, c: Circle): number {
+  const steps: number[] = [];
+  const at = (x: number, y: number) => luma[Math.round(y) * width + Math.round(x)];
+  for (let i = 0; i < 360; i += 1) {
+    const a = (i * Math.PI) / 180, ux = Math.cos(a), uy = Math.sin(a);
+    const ix = c.cx + ux * (c.r - 4), iy = c.cy + uy * (c.r - 4);
+    const ox = c.cx + ux * (c.r + 3), oy = c.cy + uy * (c.r + 3);
+    if (Math.min(ix, ox) < 0 || Math.min(iy, oy) < 0 || Math.max(ix, ox) > width - 1 || Math.max(iy, oy) > height - 1) continue;
+    steps.push(at(ix, iy) - at(ox, oy));
+  }
+  return steps.length < 36 ? 0 : median(steps);
 }
 
 /** The share of lit pixels inside `scale` of the circle, or with a negative scale, outside it. */

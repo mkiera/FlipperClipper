@@ -827,7 +827,9 @@ function slider(spec: SliderSpec, followsPlayhead = false): HTMLElement {
   input.addEventListener('keydown', () => (dragging = false));
   input.addEventListener('input', () => {
     let v = Number(input.value);
-    if (dragging && spec.snap !== undefined && Math.abs(v - spec.snap) <= (spec.max - spec.min) * 0.01) {
+    // A detent about three pixels of thumb travel wide each side, whatever the slider's length.
+    const zone = (spec.max - spec.min) * (input.clientWidth > 0 ? 3 / input.clientWidth : 0.02);
+    if (dragging && spec.snap !== undefined && Math.abs(v - spec.snap) <= zone) {
       v = spec.snap;
       input.value = String(v);
     }
