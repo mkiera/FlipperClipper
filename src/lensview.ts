@@ -17,7 +17,7 @@ import {
   turnedToRaw,
   sourceVerticalFov,
   verticalFov,
-  viewOffset,
+  viewRise,
   viewRay,
   viewRotation,
 } from './lens';
@@ -419,7 +419,7 @@ void main() { uv = vec2(p.x * 0.5 + 0.5, 0.5 - p.y * 0.5); gl_Position = vec4(p,
 // Mirrors lens.ts: outputRay, the aim, then rayToFrame for the sample point, and the turn and
 // flips undone so the texture, which is the decoded picture, is read where the frame shows it.
 const FRAGMENT = `precision highp float;
-uniform sampler2D tex; uniform mat3 rot; uniform vec2 outHalf; uniform float offset; uniform int outType;
+uniform sampler2D tex; uniform mat3 rot; uniform vec2 outHalf; uniform float rise; uniform int outType;
 uniform int inType; uniform vec3 circle; uniform vec2 frame; uniform float halfFov; uniform int projection;
 uniform vec2 inTan; uniform vec3 toRawU; uniform vec3 toRawV;
 varying vec2 uv;
@@ -427,8 +427,9 @@ const float PI = 3.14159265;
 vec3 polar(float th, float ph) { return vec3(sin(th) * cos(ph), sin(th) * sin(ph), cos(th)); }
 void main() {
   vec2 c = 2.0 * uv - 1.0;
+  c.y -= rise;
   vec3 o;
-  if (outType == 0) o = normalize(vec3(tan(outHalf.x) * c.x, tan(outHalf.y) * c.y + offset, 1.0));
+  if (outType == 0) o = normalize(vec3(tan(outHalf.x) * c.x, tan(outHalf.y) * c.y, 1.0));
   else if (outType == 1) o = normalize(vec3(sin(c.x * outHalf.x), tan(outHalf.y) * c.y, cos(c.x * outHalf.x)));
   else if (outType == 2) o = vec3(cos(c.y * outHalf.y) * sin(c.x * outHalf.x), sin(c.y * outHalf.y), cos(c.y * outHalf.y) * cos(c.x * outHalf.x));
   else if (outType == 3) { vec2 a = c * outHalf; o = polar(length(a), atan(a.y, a.x)); }
@@ -460,7 +461,7 @@ void main() {
   gl_FragColor = texture2D(tex, raw);
 }`;
 
-const UNIFORMS = ['tex', 'rot', 'outHalf', 'offset', 'outType', 'inType', 'circle', 'frame', 'halfFov', 'projection', 'inTan', 'toRawU', 'toRawV'];
+const UNIFORMS = ['tex', 'rot', 'outHalf', 'rise', 'outType', 'inType', 'circle', 'frame', 'halfFov', 'projection', 'inTan', 'toRawU', 'toRawV'];
 
 function setupGl(): void {
   gl = canvas.getContext('webgl', { alpha: false, antialias: false, preserveDrawingBuffer: true });
@@ -568,7 +569,7 @@ function draw(): void {
     m[0][2], m[1][2], m[2][2],
   ]));
   gl.uniform2f(uniforms.outHalf, (lens.fov * RAD) / 2, (verticalFov(shaped) * RAD) / 2);
-  gl.uniform1f(uniforms.offset, viewOffset(shaped));
+  gl.uniform1f(uniforms.rise, viewRise(shaped));
   gl.uniform1i(uniforms.outType, TO_CODE[lens.to]);
   gl.uniform1i(uniforms.inType, FROM_CODE[lens.from]);
   gl.uniform3f(uniforms.circle, lens.cx, lens.cy, lens.r);

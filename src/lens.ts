@@ -3,7 +3,7 @@
 // Ry(yaw) * Rx(pitch) * Rz(roll) applied to each output ray. Every input and output formula
 // here was measured against v360 in FFmpeg 6.1.
 
-import { lensOutputSize, maxLensField } from './types';
+import { filledLensField, lensOutputSize, maxLensField } from './types';
 import type { DistortFrom, DistortTo, LensJob, LensProjection, LensState, Orientation } from './types';
 
 export { lensOutputSize, maxLensField };
@@ -69,6 +69,7 @@ export function defaultLens(width: number, height: number): LensState {
     roll: 0,
     fov: 70,
     rise: 0,
+    fill: 0,
     aspect: 16 / 9,
     size: null,
   };
@@ -201,8 +202,8 @@ export function turnedToRaw(x: number, y: number, orientation: Orientation, W: n
 }
 
 /** The lens field the camera model uses, held to what its projection can describe. */
-export function lensField(lens: Pick<LensState, 'projection' | 'lensFov'>): number {
-  return Math.min(maxLensField(lens.projection), lens.lensFov);
+export function lensField(lens: Pick<LensState, 'projection' | 'lensFov' | 'fill'>): number {
+  return filledLensField(lens);
 }
 
 /** A normal source's vertical field from its horizontal one and the frame's shape. */
@@ -266,6 +267,16 @@ export function verticalFov(lens: Pick<LensState, 'to' | 'fov' | 'aspect'>): num
   }
 }
 
+/**
+ * The rise the view can show, in half-heights. A 360 or fisheye view's height is an angle, and
+ * the taller view the export cuts the frame from stops at a full turn.
+ */
+export function viewRise(lens: Pick<LensState, 'to' | 'fov' | 'aspect' | 'rise'>): number {
+  if (lens.to !== 'equirect' && lens.to !== 'fisheye') return lens.rise;
+  const most = Math.max(0, 360 / Math.max(verticalFov(lens), 1e-6) - 1);
+  return Math.max(-most, Math.min(most, lens.rise));
+}
+
 /** The rise as a shift of the normal view's tangent plane, in its own units, up negative. */
 export function viewOffset(lens: Pick<LensState, 'to' | 'fov' | 'aspect' | 'rise'>): number {
   if (lens.to !== 'normal' || lens.rise === 0) return 0;
@@ -274,7 +285,7 @@ export function viewOffset(lens: Pick<LensState, 'to' | 'fov' | 'aspect' | 'rise
 
 /** The output's own ray through a point, both coordinates 0 to 1, before the aim turns it. */
 export function outputRay(lens: LensState, u: number, v: number): Vec3 {
-  const U = 2 * u - 1, V = 2 * v - 1;
+  const U = 2 * u - 1, V = 2 * v - 1 - viewRise(lens);
   const h = (lens.fov * RAD) / 2, vv = (verticalFov(lens) * RAD) / 2;
   const unit = (x: number, y: number, z: number): Vec3 => {
     const n = Math.hypot(x, y, z);
@@ -287,7 +298,7 @@ export function outputRay(lens: LensState, u: number, v: number): Vec3 {
   ];
   switch (lens.to) {
     case 'normal':
-      return unit(Math.tan(h) * U, Math.tan(vv) * V + viewOffset(lens), 1);
+      return unit(Math.tan(h) * U, Math.tan(vv) * V, 1);
     case 'panorama':
       return unit(Math.sin(U * h), Math.tan(vv) * V, Math.cos(U * h));
     case 'equirect': {
@@ -331,11 +342,16 @@ export function lensJob(lens: LensState, width: number, height: number): LensJob
   let vFov = verticalFov(shaped), renderHeight = h, cropY = 0;
   // v360's own v_offset stops at one tangent unit, which a wide view passes at a small rise.
   // A taller view, cut down to the frame, shifts it any distance.
-  if (lens.to === 'normal' && lens.rise !== 0) {
-    const extra = 2 * Math.round((h * Math.abs(lens.rise)) / 2);
+  const rise = viewRise(shaped);
+  const extra = 2 * Math.round((h * Math.abs(rise)) / 2);
+  if (extra > 0) {
     renderHeight = h + extra;
-    vFov = (2 * Math.atan((Math.tan((vFov * RAD) / 2) * renderHeight) / h)) / RAD;
-    cropY = lens.rise > 0 ? 0 : extra;
+    const taller = renderHeight / h;
+    // Each view's height grows in its own measure: a tangent, an angle, or a planet's half-angle tangent.
+    if (lens.to === 'normal' || lens.to === 'panorama') vFov = (2 * Math.atan(Math.tan((vFov * RAD) / 2) * taller)) / RAD;
+    else if (lens.to === 'planet') vFov = (4 * Math.atan(Math.tan((vFov * RAD) / 4) * taller)) / RAD;
+    else vFov = Math.min(360, vFov * taller);
+    cropY = rise > 0 ? 0 : extra;
   }
   return {
     from: lens.from,

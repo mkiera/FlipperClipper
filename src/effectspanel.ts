@@ -469,6 +469,17 @@ function buildDistortionBody(): HTMLElement[] {
     snap: 0,
   });
   rise.title = 'Moves the frame up or down without tilting it, so upright things stay upright.';
+  const fill = slider({
+    label: 'Fill',
+    min: 0,
+    max: 1,
+    step: 0.01,
+    read: () => lens().fill || 0,
+    show: (v) => `${Math.round(v * 100)}%`,
+    write: (v) => setLens({ fill: v }),
+    snap: 0,
+  });
+  fill.title = 'Stretches the picture over the part the lens never saw, so less of the view is black.';
 
   const aspect = chipGroup('Shape', ASPECTS, (value) => setLens({ aspect: value }), () => lens().aspect);
   const size = document.createElement('select');
@@ -489,7 +500,7 @@ function buildDistortionBody(): HTMLElement[] {
     lensField.hidden = !fisheye;
     fitLine.hidden = !fisheye;
     sourceField.hidden = l.from !== 'normal';
-    rise.hidden = l.to !== 'normal';
+    fill.hidden = !fisheye;
     const lensInput = lensField.querySelector('input');
     if (lensInput) lensInput.max = String(maxLensField(l.projection));
     const range = fovRange(l.to);
@@ -504,7 +515,7 @@ function buildDistortionBody(): HTMLElement[] {
     if (size.value !== value) size.value = value;
   });
 
-  return [from, fisheyeLine, lensField, fitLine, sourceField, toLine, field, turn, rise, outLine, size];
+  return [from, fisheyeLine, lensField, fitLine, sourceField, toLine, field, turn, rise, fill, outLine, size];
 }
 
 function buildRedactBody(): HTMLElement[] {

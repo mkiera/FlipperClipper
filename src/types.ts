@@ -245,8 +245,10 @@ export interface LensState {
   roll: number;
   /** The view's horizontal field, degrees. */
   fov: number;
-  /** A normal view's frame shifted up (positive) or down, in half-heights, without tilting. */
+  /** The view's frame shifted up (positive) or down, in half-heights, without tilting. */
   rise: number;
+  /** 0 to 1: how far a fisheye's picture is stretched over the part of the sphere its lens never saw. */
+  fill: number;
   /** Width over height. */
   aspect: number;
   /** The output's short edge, or null for the detail the source holds at the view's centre. */
@@ -536,8 +538,16 @@ export function maxLensField(projection: LensProjection): number {
   return projection === 'orthographic' ? 180 : projection === 'stereographic' ? 300 : 360;
 }
 
+/** The lens field the camera model works with: the lens's own, held to what its projection can
+ *  describe, then widened by the fill toward the most that projection reaches. */
+export function filledLensField(lens: Pick<LensState, 'projection' | 'lensFov' | 'fill'>): number {
+  const most = maxLensField(lens.projection);
+  const own = Math.min(most, lens.lensFov);
+  return own + (most - own) * Math.max(0, Math.min(1, lens.fill || 0));
+}
+
 function sourceDensity(lens: LensState, width: number): number {
-  const half = (Math.min(maxLensField(lens.projection), lens.lensFov) * LENS_RAD) / 2;
+  const half = (filledLensField(lens) * LENS_RAD) / 2;
   switch (lens.from) {
     case 'normal':
       return width / 2 / Math.tan((lens.sourceFov * LENS_RAD) / 2);

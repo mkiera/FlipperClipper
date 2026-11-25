@@ -332,3 +332,61 @@ test('a vertical drag moves the centre as far as the pointer in every view, what
     }
   }
 });
+
+test('rise shifts every view by the same share of the frame', async () => {
+  const L = await lensModule();
+  for (const to of ['normal', 'panorama', 'equirect', 'fisheye', 'planet']) {
+    const lens = sky(L, { to, fov: 100, aspect: 16 / 9, tilt: 50, pan: 20 });
+    // What the level view shows a quarter of the way down, the risen one shows at its middle.
+    const level = L.viewRay(lens, 0.3, 0.25), risen = L.viewRay({ ...lens, rise: 0.5 }, 0.3, 0.5);
+    for (let i = 0; i < 3; i += 1) close(risen[i], level[i], 1e-9, to);
+  }
+});
+
+test('a risen view of any kind renders taller and keeps the rows the preview shows', async () => {
+  const L = await lensModule();
+  for (const to of ['panorama', 'equirect', 'fisheye', 'planet']) {
+    const lens = sky(L, { to, fov: 120, aspect: 16 / 9, size: 1080, rise: 0.5 });
+    const job = L.lensJob(lens, 3840, 2160);
+    assert.equal(job.renderHeight, 1080 + 540, to);
+    assert.equal(job.cropY, 0, to);
+    // The taller view's top edge is the risen frame's top edge.
+    const tall = { ...lens, aspect: job.width / job.renderHeight, rise: 0 };
+    const scale = to === 'planet' ? Math.tan((job.vFov * RAD) / 4) / Math.tan((L.verticalFov({ ...lens, aspect: job.width / job.height }) * RAD) / 4)
+      : to === 'panorama' ? Math.tan((job.vFov * RAD) / 2) / Math.tan((L.verticalFov({ ...lens, aspect: job.width / job.height }) * RAD) / 2)
+      : job.vFov / L.verticalFov({ ...lens, aspect: job.width / job.height });
+    close(scale, 1.5, 1e-3, to);
+    assert.ok(tall.aspect > 0);
+  }
+  // A view whose height is an angle stops at a full turn, in the preview as in the export.
+  const full = sky(L, { to: 'fisheye', fov: 360, aspect: 1, size: 720, rise: 0.5 });
+  assert.equal(L.viewRise(full), 0);
+  assert.equal(L.lensJob(full, 3840, 2160).renderHeight, 720);
+  const half = sky(L, { to: 'equirect', fov: 360, aspect: 2, rise: 1 });
+  close(L.viewRise(half), 1, 1e-9);
+  assert.ok(L.lensJob(half, 3840, 2160).vFov <= 360);
+});
+
+test('fill stretches the lens picture over the rest of the sphere', async () => {
+  const L = await lensModule();
+  const lens = sky(L, {});
+  const behind = [0, 0, -1], side = [1, 0, 0];
+  // A 180 lens sees nothing behind it, and its edge is the horizon.
+  assert.equal(L.rayToFrame(lens, behind, 3840, 2160), null);
+  close(L.rayToFrame(lens, side, 3840, 2160)[0] - lens.cx, lens.r, 1e-6);
+  // Filled, the edge is the point straight behind, and the horizon sits halfway out.
+  const filled = { ...lens, fill: 1 };
+  assert.equal(L.lensField(filled), 360);
+  close(L.rayToFrame(filled, side, 3840, 2160)[0] - lens.cx, lens.r / 2, 1e-6);
+  const nearlyBehind = L.rayToFrame(filled, [1e-6, 0, -1], 3840, 2160);
+  close(nearlyBehind[0] - lens.cx, lens.r, 1e-3);
+  assert.equal(L.lensJob(filled, 3840, 2160).lensFov, 360);
+  assert.equal(L.lensField({ ...lens, fill: 0.5 }), 270);
+  // A projection that cannot reach all the way round fills as far as it can.
+  assert.equal(L.lensField({ ...lens, projection: 'stereographic', fill: 1 }), 300);
+  assert.equal(L.lensField({ ...lens, projection: 'orthographic', fill: 1 }), 180);
+  // A state saved before the fill existed reads as no fill.
+  const old = { ...lens };
+  delete old.fill;
+  assert.equal(L.lensField(old), 180);
+});
