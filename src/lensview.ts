@@ -119,8 +119,9 @@ let refit: { media: unknown; tries: number; done: boolean; at: number } = { medi
 
 /**
  * A frame too dark to find the circle in leaves the guess, so a few later frames get a look,
- * spaced out so a scrub through a dark stretch does not use them all. Only once per clip: a picture with no disc stops costing a readback on every seek, and an
- * undo back to the guess is not fitted over again.
+ * spaced out so a scrub through a dark stretch does not use them all. Only once per clip: a
+ * picture with no disc stops costing a readback on every seek, and an undo back to the guess
+ * is not fitted over again.
  */
 function refitIfGuessed(): void {
   const lens = currentLens();

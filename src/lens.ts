@@ -374,7 +374,7 @@ export function dragSky(lens: LensState, dx: number, dy: number, width: number):
   if (viewOffset(lens) !== 0) {
     // In steps of a few pixels, each solved where the last one left the view, so a long move
     // lands where the pointer did rather than where a straight-line guess points.
-    const steps = Math.max(1, Math.ceil(Math.hypot(dx, dy) / 8));
+    const steps = Math.max(1, Math.ceil(Math.hypot(dx, dy) / 3));
     let at = lens;
     for (let i = 0; i < steps; i += 1) at = { ...at, ...dragRisen(at, dx / steps, dy / steps, width, perPixel) };
     ({ pan, tilt } = at);
@@ -433,9 +433,12 @@ function dragRisen(lens: LensState, dx: number, dy: number, width: number, perPi
   const move = Math.hypot(dx, dy) * perPixel;
   const ring = Math.max(Math.sin(lens.tilt * RAD + Math.atan(viewOffset(lens))), 0.1);
   const panMost = (1.5 * move) / ring + 0.5, tiltMost = 1.5 * move + 0.5;
-  dPan = Math.max(-panMost, Math.min(panMost, dPan));
-  dTilt = Math.max(-tiltMost, Math.min(tiltMost, dTilt));
   if (!Number.isFinite(dPan)) dPan = 0;
+  // One factor for both: where pan and tilt move the centre the same way, the solve asks for
+  // large steps that cancel, and cutting each on its own would stop them cancelling.
+  const k = Math.min(1, panMost / Math.max(Math.abs(dPan), 1e-12), tiltMost / Math.max(Math.abs(dTilt), 1e-12));
+  dPan *= k;
+  dTilt *= k;
   return { pan: lens.pan + dPan, tilt: lens.tilt + dTilt };
 }
 

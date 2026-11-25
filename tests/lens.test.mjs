@@ -229,6 +229,17 @@ test('dragging a wide normal view moves the picture at the centre as far as the 
   }
 });
 
+test('a risen and turned drag never jumps against the pointer', async () => {
+  const L = await lensModule();
+  // Where pan and tilt move the frame centre the same way (fov 110, rise 0.5, tilt 46, turn -45).
+  const lens = sky(L, { tilt: 46, fov: 110, rise: 0.5, roll: -45 });
+  const centre = L.viewRay(lens, 0.5, 0.5);
+  const moved = { ...lens, ...L.dragSky(lens, -10, 0, 1000) };
+  const [u, v] = L.viewPoint(moved, centre);
+  assert.ok((u - 0.5) * 1000 <= 0, `u moved ${(u - 0.5) * 1000}`);
+  assert.ok(Math.hypot((u - 0.5) * 1000, (v - 0.5) * 562.5) <= 12, `moved ${(u - 0.5) * 1000}, ${(v - 0.5) * 562.5}`);
+});
+
 test('with a rise, what sits at the frame centre still follows the pointer', async () => {
   const L = await lensModule();
   const cases = [];
@@ -262,10 +273,12 @@ test('each lens type stops at the field it can describe', async () => {
 test('a fast drag on a risen wide view lands where the same drag in slow steps does', async () => {
   const L = await lensModule();
   const lens = sky(L, { tilt: 90, fov: 150, rise: 0.8, pan: 10 });
-  for (const dx of [40, 80]) {
-    const fast = L.dragSky(lens, dx, 0, 800);
+  // A diagonal one, where solving the whole move in one step would land 4 degrees off.
+  for (const [dx, dy] of [[40, 0], [80, 0], [60, 60]]) {
+    const fast = L.dragSky(lens, dx, dy, 800);
     let slow = lens;
-    for (let i = 0; i < dx / 4; i += 1) slow = { ...slow, ...L.dragSky(slow, 4, 0, 800) };
+    const n = Math.round(Math.hypot(dx, dy) / 4);
+    for (let i = 0; i < n; i += 1) slow = { ...slow, ...L.dragSky(slow, dx / n, dy / n, 800) };
     close(fast.pan, slow.pan, 0.5);
     close(fast.tilt, slow.tilt, 0.5);
   }
