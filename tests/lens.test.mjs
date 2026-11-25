@@ -240,6 +240,18 @@ test('a risen and turned drag never jumps against the pointer', async () => {
   assert.ok(Math.hypot((u - 0.5) * 1000, (v - 0.5) * 562.5) <= 12, `moved ${(u - 0.5) * 1000}, ${(v - 0.5) * 562.5}`);
 });
 
+test('a held drag along the limit on a risen, turned view moves smoothly', async () => {
+  const L = await lensModule();
+  let lens = sky(L, { tilt: 40, fov: 150, rise: 0.5, roll: 30 });
+  for (let i = 0; i < 20; i += 1) {
+    const centre = L.viewRay(lens, 0.5, 0.5);
+    lens = { ...lens, ...L.dragSky(lens, 6, 0, 1000) };
+    const [u, v] = L.viewPoint(lens, centre);
+    const moved = Math.hypot((u - 0.5) * 1000, (v - 0.5) * 562.5);
+    assert.ok(moved <= 7, `event ${i} moved ${moved}`);
+  }
+});
+
 test('with a rise, what sits at the frame centre still follows the pointer', async () => {
   const L = await lensModule();
   const cases = [];

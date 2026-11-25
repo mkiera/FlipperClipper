@@ -437,7 +437,8 @@ function dragRisen(lens: LensState, dx: number, dy: number, width: number, perPi
   // Held to what the plain angle drag would allow for this move, with its floor on the ring
   // round the zenith, so a fast drag keeps up but nothing spins the view near the zenith.
   const move = Math.hypot(dx, dy) * perPixel;
-  const ring = Math.max(Math.sin(lens.tilt * RAD + Math.atan(viewOffset(lens))), 0.1);
+  // The ring the frame centre is on: its distance from the zenith, the lens axis.
+  const ring = Math.max(Math.hypot(target[0], target[1]) / Math.hypot(target[0], target[1], target[2]), 0.1);
   const panMost = (1.5 * move) / ring + 0.5, tiltMost = 1.5 * move + 0.5;
   if (!Number.isFinite(dPan)) dPan = 0;
   // One factor for both: where pan and tilt move the centre the same way, the solve asks for
