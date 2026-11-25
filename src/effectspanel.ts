@@ -508,6 +508,7 @@ function buildDistortionBody(): HTMLElement[] {
       riseInput.min = String(-most);
       riseInput.max = String(most);
       riseInput.disabled = most === 0;
+      if (most > 0) riseInput.step = String(most / 100);
       if (document.activeElement !== riseInput) riseInput.value = String(viewRise(l));
     }
     const lensInput = lensField.querySelector('input');
