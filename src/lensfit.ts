@@ -71,6 +71,10 @@ export function findLensCircle(luma: ArrayLike<number>, width: number, height: n
   if (!circle) return null;
   circle = fitCircle(kept);
   if (!circle || kept.length < 24) return null;
+  // Most of the edge must lie on the circle: a square or another bright shape does not.
+  const fit = circle;
+  const onEdge = points.filter(([x, y]) => Math.abs(Math.hypot(x - fit.cx, y - fit.cy) - fit.r) <= Math.max(1.5, fit.r * 0.01));
+  if (onEdge.length < points.length * 0.3) return null;
   const { cx, cy, r } = circle;
   if (r < Math.min(width, height) * 0.15 || r > Math.hypot(width, height) / 2) return null;
   if (cx < 0 || cy < 0 || cx > width || cy > height) return null;

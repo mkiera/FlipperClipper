@@ -161,6 +161,11 @@ export function lensTheta(projection: LensProjection, m: number, lensFov: number
   }
 }
 
+/** The lens field the camera model uses: an orthographic lens cannot see past 180 degrees. */
+export function lensField(lens: Pick<LensState, 'projection' | 'lensFov'>): number {
+  return lens.projection === 'orthographic' ? Math.min(180, lens.lensFov) : lens.lensFov;
+}
+
 /** A normal source's vertical field from its horizontal one and the frame's shape. */
 export function sourceVerticalFov(lens: LensState, width: number, height: number): number {
   return (2 * Math.atan((Math.tan((lens.sourceFov * RAD) / 2) * height) / width)) / RAD;
@@ -186,8 +191,9 @@ export function rayToFrame(lens: LensState, d: Vec3, width: number, height: numb
   }
   const h = Math.hypot(d[0], d[1]);
   const theta = Math.atan2(h, d[2]);
-  if (theta > (lens.lensFov * RAD) / 2 + 1e-9) return null;
-  const m = lensRadius(lens.projection, theta, lens.lensFov);
+  const field = lensField(lens);
+  if (theta > (field * RAD) / 2 + 1e-9) return null;
+  const m = lensRadius(lens.projection, theta, field);
   if (h < 1e-12) return [lens.cx, lens.cy];
   return [lens.cx + (lens.r * m * d[0]) / h, lens.cy + (lens.r * m * d[1]) / h];
 }
@@ -197,7 +203,7 @@ export function frameToRay(lens: LensState, x: number, y: number): Vec3 | null {
   const dx = (x - lens.cx) / lens.r, dy = (y - lens.cy) / lens.r;
   const m = Math.hypot(dx, dy);
   if (m > 1) return null;
-  const theta = lensTheta(lens.projection, m, lens.lensFov);
+  const theta = lensTheta(lens.projection, m, lensField(lens));
   if (theta === null) return null;
   if (m < 1e-12) return [0, 0, 1];
   const s = Math.sin(theta);
@@ -297,7 +303,7 @@ export function lensJob(lens: LensState, width: number, height: number): LensJob
     cx: round(lens.cx),
     cy: round(lens.cy),
     r: round(lens.r),
-    lensFov: round(lens.lensFov),
+    lensFov: round(lensField(lens)),
     projection: lens.projection,
     inHFov: round(lens.sourceFov),
     inVFov: round(sourceVerticalFov(lens, width, height)),
@@ -321,7 +327,10 @@ export function lensJob(lens: LensState, width: number, height: number): LensJob
  * grab has no answer there and the aim works in angles instead.
  */
 export function dragSky(lens: LensState, dx: number, dy: number, width: number): { pan: number; tilt: number } {
-  const perPixel = lens.fov / Math.max(1, width);
+  // Degrees per pixel at the view's centre, so what is there keeps up with the pointer.
+  const h = (lens.fov * RAD) / 2;
+  const span = lens.to === 'normal' ? 2 * Math.tan(h) : lens.to === 'planet' ? 4 * Math.tan(h / 2) : 2 * h;
+  const perPixel = span / RAD / Math.max(1, width);
   // The turn is the view's last rotation, so the pointer's move is turned back first.
   const c = Math.cos(lens.roll * RAD), s = Math.sin(lens.roll * RAD);
   [dx, dy] = [dx * c - dy * s, dx * s + dy * c];

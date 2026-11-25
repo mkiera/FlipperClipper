@@ -50,7 +50,7 @@ import {
   fovRange,
   lensOutputSize,
 } from './lens';
-import { circleUnfitted, fittedCircle, isFitting, setFitting, setLens } from './lensview';
+import { circleUnfitted, fittedCircle, isFitting, movedCircle, setFitting, setLens } from './lensview';
 import { frameWidth, isTurned } from './types';
 import type {
   EffectId,
@@ -181,8 +181,10 @@ function setOrientation(patch: Partial<Orientation>): void {
   patchEdit({
     orientation,
     ...(swapped && edit.crop ? { crop: null } : {}),
-    // The lens circle was fitted to the frame the other way up.
-    ...(swapped ? { effects: withSetting(edit.effects, 'distortion', fittedCircle(orientation)) } : {}),
+    // The lens circle stays on the same part of the picture.
+    ...(edit.effects.settings.distortion.r > 0
+      ? { effects: withSetting(edit.effects, 'distortion', movedCircle(edit.effects.settings.distortion, edit.orientation, orientation)) }
+      : {}),
   });
 }
 
@@ -368,7 +370,11 @@ function buildDistortionBody(): HTMLElement[] {
   const projection = selectOf(
     'Lens type. Most fisheye and all-sky lenses are equidistant.',
     LENS_PROJECTIONS,
-    (value) => setLens({ projection: value as LensState['projection'] }),
+    (value) => {
+      const projection = value as LensState['projection'];
+      // An orthographic lens cannot see past 180 degrees.
+      setLens(projection === 'orthographic' ? { projection, lensFov: Math.min(180, lens().lensFov) } : { projection });
+    },
     () => lens().projection,
   );
   const facing = selectOf(
@@ -401,7 +407,7 @@ function buildDistortionBody(): HTMLElement[] {
     step: 1,
     read: () => lens().lensFov,
     show: (v) => `${Math.round(v)}°`,
-    write: (v) => setLens({ lensFov: v }),
+    write: (v) => setLens({ lensFov: lens().projection === 'orthographic' ? Math.min(180, v) : v }),
   });
   const fitLine = document.createElement('div');
   fitLine.className = 'fx-line';
@@ -484,6 +490,8 @@ function buildDistortionBody(): HTMLElement[] {
     fitLine.hidden = !fisheye;
     sourceField.hidden = l.from !== 'normal';
     rise.hidden = l.to !== 'normal';
+    const lensInput = lensField.querySelector('input');
+    if (lensInput) lensInput.max = String(l.projection === 'orthographic' ? 180 : LENS_FOV_MAX);
     const range = fovRange(l.to);
     const input = field.querySelector('input');
     if (input) {

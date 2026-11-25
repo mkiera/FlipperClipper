@@ -10,6 +10,7 @@ import {
   dragSky,
   fovRange,
   isSky,
+  lensField,
   lensOutputSize,
   rayToFrame,
   sourceVerticalFov,
@@ -137,10 +138,14 @@ function findCircleOnShow(orientation: Orientation): Pick<LensState, 'cx' | 'cy'
   }
   const found = findLensCircle(luma, w, h);
   if (!found) return null;
-  const W = media.width, H = media.height;
-  const kx = W / w, ky = H / h;
-  const rx = found.cx * kx, ry = found.cy * ky, r = (found.r * (kx + ky)) / 2;
-  // Into the turned frame: the turn, then the flips, as the frame shows them.
+  const kx = media.width / w, ky = media.height / h;
+  const [cx, cy] = rawToTurned(found.cx * kx, found.cy * ky, orientation);
+  return { cx, cy, r: (found.r * (kx + ky)) / 2 };
+}
+
+/** A decoded-frame pixel position in the turned frame: the turn, then the flips. */
+function rawToTurned(rx: number, ry: number, orientation: Orientation): [number, number] {
+  const W = edit.media?.width ?? 0, H = edit.media?.height ?? 0;
   let x: number, y: number;
   switch (orientation.rotate) {
     case 90:
@@ -158,7 +163,32 @@ function findCircleOnShow(orientation: Orientation): Pick<LensState, 'cx' | 'cy'
   const turned = isTurned(orientation);
   if (orientation.flipH) x = (turned ? H : W) - x;
   if (orientation.flipV) y = (turned ? W : H) - y;
-  return { cx: x, cy: y, r };
+  return [x, y];
+}
+
+/** The inverse of rawToTurned. */
+function turnedToRaw(x: number, y: number, orientation: Orientation): [number, number] {
+  const W = edit.media?.width ?? 0, H = edit.media?.height ?? 0;
+  const turned = isTurned(orientation);
+  if (orientation.flipH) x = (turned ? H : W) - x;
+  if (orientation.flipV) y = (turned ? W : H) - y;
+  switch (orientation.rotate) {
+    case 90:
+      return [y, H - x];
+    case 180:
+      return [W - x, H - y];
+    case 270:
+      return [W - y, x];
+    default:
+      return [x, y];
+  }
+}
+
+/** The lens circle kept on the same part of the picture when the turn or flips change. */
+export function movedCircle(lens: LensState, from: Orientation, to: Orientation): Pick<LensState, 'cx' | 'cy'> {
+  const [rx, ry] = turnedToRaw(lens.cx, lens.cy, from);
+  const [cx, cy] = rawToTurned(rx, ry, to);
+  return { cx, cy };
 }
 
 export function setLens(patch: Partial<LensState>): void {
@@ -556,7 +586,7 @@ function draw(): void {
   gl.uniform1i(uniforms.inType, FROM_CODE[lens.from]);
   gl.uniform3f(uniforms.circle, lens.cx, lens.cy, lens.r);
   gl.uniform2f(uniforms.frame, width, height);
-  gl.uniform1f(uniforms.halfFov, (lens.lensFov * RAD) / 2);
+  gl.uniform1f(uniforms.halfFov, (lensField(lens) * RAD) / 2);
   gl.uniform1i(uniforms.projection, PROJECTION_CODE[lens.projection]);
   gl.uniform2f(
     uniforms.inTan,

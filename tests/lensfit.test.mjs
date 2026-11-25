@@ -57,3 +57,10 @@ test('finds nothing in a normal picture or a black one', async () => {
   assert.equal(F.findLensCircle(normal, w, h), null);
   assert.equal(F.findLensCircle(new Uint8Array(w * h), w, h), null);
 });
+
+test('a bright square is not taken for a lens circle', async () => {
+  const F = await fitModule();
+  const w = 640, h = 360, out = new Uint8Array(w * h);
+  for (let y = 50; y < 309; y += 1) for (let x = 190; x < 449; x += 1) out[y * w + x] = 180;
+  assert.equal(F.findLensCircle(out, w, h), null);
+});

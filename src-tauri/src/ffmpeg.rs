@@ -4093,12 +4093,14 @@ mod tests {
         // A crop past the rendered rows is held inside them.
         lens.crop_y = 9999;
         j.lens = Some(lens);
-        let vf = value_after(&build_args(&j, "libx264", true, 3840, 1920, 30.0, None), "-vf").unwrap();
+        let args = build_args(&j, "libx264", true, 3840, 1920, 30.0, None);
+        let vf = value_after(&args, "-vf").unwrap();
         assert!(vf.contains(&format!("crop={}:{}:0:{},", lens.width, lens.height, 1700 - lens.height)), "{vf}");
         // No taller render, no cut.
         lens.render_height = 0;
         j.lens = Some(lens);
-        let vf = value_after(&build_args(&j, "libx264", true, 3840, 1920, 30.0, None), "-vf").unwrap();
+        let args = build_args(&j, "libx264", true, 3840, 1920, 30.0, None);
+        let vf = value_after(&args, "-vf").unwrap();
         assert!(!vf.contains("crop="), "{vf}");
     }
 
