@@ -269,4 +269,12 @@ test('a fast drag on a risen wide view lands where the same drag in slow steps d
     close(fast.pan, slow.pan, 0.5);
     close(fast.tilt, slow.tilt, 0.5);
   }
+  // Pressed against the zenith on a diagonal: the tilt stops at its limit in every step, so
+  // the pan does not depend on how the move was cut into events.
+  const top = sky(L, { tilt: 0, fov: 150, rise: 0.8, roll: 90 });
+  const once = L.dragSky(top, 80, 80, 800);
+  let many = top;
+  for (let i = 0; i < 20; i += 1) many = { ...many, ...L.dragSky(many, 4, 4, 800) };
+  close(once.pan, many.pan, 1);
+  close(once.tilt, many.tilt, 1);
 });

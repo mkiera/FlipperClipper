@@ -421,6 +421,13 @@ function dragRisen(lens: LensState, dx: number, dy: number, width: number, perPi
   let dPan = ((d + damping) * ga - b * gb) / det;
   let dTilt = ((a + damping) * gb - b * ga) / det;
   if (!Number.isFinite(dPan) || !Number.isFinite(dTilt)) return { pan: lens.pan, tilt: lens.tilt };
+  // At the tilt's limit, the tilt stops there and the pan takes what is left of the move.
+  const limited = Math.max(0, Math.min(180, lens.tilt + dTilt)) - lens.tilt;
+  if (limited !== dTilt) {
+    dTilt = limited;
+    const rx = dx - j[0][1] * dTilt, ry = dy - j[1][1] * dTilt;
+    dPan = (j[0][0] * rx + j[1][0] * ry) / (a + damping);
+  }
   // Held to what the plain angle drag would allow for this move, with its floor on the ring
   // round the zenith, so a fast drag keeps up but nothing spins the view near the zenith.
   const move = Math.hypot(dx, dy) * perPixel;
@@ -428,6 +435,7 @@ function dragRisen(lens: LensState, dx: number, dy: number, width: number, perPi
   const panMost = (1.5 * move) / ring + 0.5, tiltMost = 1.5 * move + 0.5;
   dPan = Math.max(-panMost, Math.min(panMost, dPan));
   dTilt = Math.max(-tiltMost, Math.min(tiltMost, dTilt));
+  if (!Number.isFinite(dPan)) dPan = 0;
   return { pan: lens.pan + dPan, tilt: lens.tilt + dTilt };
 }
 
