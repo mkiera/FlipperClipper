@@ -366,10 +366,14 @@ export function lensJob(lens: LensState, width: number, height: number): LensJob
  * grab has no answer there and the aim works in angles instead.
  */
 export function dragSky(lens: LensState, dx: number, dy: number, width: number): { pan: number; tilt: number } {
-  // Degrees per pixel at the view's centre, so what is there keeps up with the pointer.
-  const h = (lens.fov * RAD) / 2;
-  const span = lens.to === 'normal' ? 2 * Math.tan(h) : lens.to === 'planet' ? 4 * Math.tan(h / 2) : 2 * h;
-  const perPixel = span / RAD / Math.max(1, width);
+  // Degrees per pixel at the view's centre, across and down, so what is there keeps up with
+  // the pointer. They differ where the view's height is held short, as a 360 view's is at 180.
+  const h = (lens.fov * RAD) / 2, vv = (verticalFov(lens) * RAD) / 2;
+  const span = (half: number) =>
+    lens.to === 'normal' || lens.to === 'panorama' ? 2 * Math.tan(half) : lens.to === 'planet' ? 4 * Math.tan(half / 2) : 2 * half;
+  const height = width / lens.aspect;
+  const perPixel = (lens.to === 'panorama' ? 2 * h : span(h)) / RAD / Math.max(1, width);
+  const perPixelY = span(vv) / RAD / Math.max(1, height);
   // In steps of a few pixels, each taken from where the last one left the view: the scale
   // round the zenith changes with the tilt, so one long step would turn too far or too little.
   const steps = Math.max(1, Math.ceil(Math.hypot(dx, dy) / 3));
@@ -378,7 +382,7 @@ export function dragSky(lens: LensState, dx: number, dy: number, width: number):
   for (let i = 0; i < steps; i += 1) {
     const step = risen
       ? dragRisen(at, dx / steps, dy / steps, width, perPixel)
-      : dragLevel(at, dx / steps, dy / steps, perPixel);
+      : dragLevel(at, (dx / steps) * perPixel, (dy / steps) * perPixelY);
     at = { ...at, pan: step.pan, tilt: Math.max(0, Math.min(180, step.tilt)) };
   }
   const { pan, tilt } = at;
@@ -389,14 +393,15 @@ export function dragSky(lens: LensState, dx: number, dy: number, width: number):
   };
 }
 
-/** One step of a level view's drag, in angles: the tilt follows the move up and down, and the
- *  pan turns round the zenith as far as the ring the view's centre is on needs. */
-function dragLevel(lens: LensState, dx: number, dy: number, perPixel: number): { pan: number; tilt: number } {
+/** One step of a level view's drag, given in degrees across and down the view: the tilt
+ *  follows the move up and down, and the pan turns round the zenith as far as the ring the
+ *  view's centre is on needs. */
+function dragLevel(lens: LensState, ax: number, ay: number): { pan: number; tilt: number } {
   // The turn is the view's last rotation, so the pointer's move is turned back first.
   const c = Math.cos(lens.roll * RAD), s = Math.sin(lens.roll * RAD);
-  [dx, dy] = [dx * c - dy * s, dx * s + dy * c];
+  [ax, ay] = [ax * c - ay * s, ax * s + ay * c];
   const ring = Math.max(Math.sin(lens.tilt * RAD), 0.1);
-  return { pan: lens.pan + (dx * perPixel) / ring, tilt: lens.tilt - dy * perPixel };
+  return { pan: lens.pan + ax / ring, tilt: lens.tilt - ay };
 }
 
 /**

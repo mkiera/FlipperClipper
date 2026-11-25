@@ -310,3 +310,25 @@ test('a fast drag on a risen wide view lands where the same drag in slow steps d
   close(once.pan, many.pan, 1);
   close(once.tilt, many.tilt, 1);
 });
+
+test('a vertical drag moves the centre as far as the pointer in every view, whatever its shape', async () => {
+  const L = await lensModule();
+  for (const to of ['normal', 'panorama', 'equirect', 'fisheye', 'planet']) {
+    for (const [fov, aspect, width] of [[360, 1, 600], [360, 450 / 800, 450], [100, 16 / 9, 800]]) {
+      if (to === 'normal' && fov > 150) continue;
+      if (to === 'planet' && fov > 330) continue;
+      const lens = sky(L, { to, tilt: 60, fov, aspect });
+      const height = width / aspect;
+      const centre = L.viewRay(lens, 0.5, 0.5);
+      const moved = { ...lens, ...L.dragSky(lens, 0, 10, width) };
+      // Where the old centre now sits on the centre column: the closest ray, found finely.
+      let best = 0.5, bestDot = -2;
+      for (let v = 0.45; v <= 0.55; v += 0.00005) {
+        const d = L.viewRay(moved, 0.5, v);
+        const dot = d[0] * centre[0] + d[1] * centre[1] + d[2] * centre[2];
+        if (dot > bestDot) [best, bestDot] = [v, dot];
+      }
+      close((best - 0.5) * height, 10, 0.6);
+    }
+  }
+});
