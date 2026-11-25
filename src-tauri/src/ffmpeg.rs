@@ -358,9 +358,14 @@ pub struct LensJob {
     pub roll: f64,
     pub h_fov: f64,
     pub v_fov: f64,
-    pub v_offset: f64,
     pub width: i64,
     pub height: i64,
+    /// Rows v360 renders before the output's own are cut from them at crop_y: a normal view's
+    /// rise. v360's v_offset stops at one tangent unit, which a wide view passes early.
+    #[serde(default)]
+    pub render_height: i64,
+    #[serde(default)]
+    pub crop_y: i64,
 }
 
 /// The output size of the Distortion effect: even, as the encoders need.
@@ -449,13 +454,9 @@ fn lens_filters(lens: &LensJob, width: i64, height: i64) -> Vec<String> {
         }
         DistortFrom::Equirect => "input=e".to_string(),
     };
-    let offset = if lens.to == DistortTo::Normal && lens.v_offset != 0.0 {
-        format!(":v_offset={}", f(lens.v_offset.clamp(-1.0, 1.0)))
-    } else {
-        String::new()
-    };
+    let render_h = if lens.render_height > out_h { (lens.render_height.min(16384) / 2) * 2 } else { out_h };
     parts.push(format!(
-        "v360={}:output={}:h_fov={}:v_fov={}:yaw={}:pitch={}:roll={}{}:w={}:h={}:interp=cubic",
+        "v360={}:output={}:h_fov={}:v_fov={}:yaw={}:pitch={}:roll={}:w={}:h={}:interp=cubic",
         input,
         lens.to.v360(),
         f(lens.h_fov),
@@ -463,10 +464,13 @@ fn lens_filters(lens: &LensJob, width: i64, height: i64) -> Vec<String> {
         f(lens.yaw),
         f(lens.pitch),
         f(lens.roll),
-        offset,
         out_w,
-        out_h
+        render_h
     ));
+    if render_h > out_h {
+        let y = lens.crop_y.clamp(0, render_h - out_h);
+        parts.push(format!("crop={}:{}:0:{}", out_w, out_h, y));
+    }
     // v360 hands back the input's sample aspect; the new frame has square pixels.
     parts.push("setsar=1".to_string());
     parts
@@ -3950,7 +3954,8 @@ mod tests {
             roll: -180.0,
             h_fov: 70.0,
             v_fov: 42.5,
-            v_offset: 0.0,
+            render_height: 0,
+            crop_y: 0,
             width: 722,
             height: 406,
         }
@@ -4073,20 +4078,28 @@ mod tests {
     }
 
     #[test]
-    fn a_360_source_goes_straight_in_and_rise_shifts_only_a_normal_view() {
+    fn a_360_source_goes_straight_in_and_a_rise_renders_taller_then_cuts() {
         let mut j = job(QualityPreset::Balanced);
         let mut lens = sky_lens();
         lens.from = DistortFrom::Equirect;
-        lens.v_offset = -0.25;
+        lens.render_height = 1700;
+        lens.crop_y = 0;
         j.lens = Some(lens);
         let args = build_args(&j, "libx264", true, 3840, 1920, 30.0, None);
         let vf = value_after(&args, "-vf").unwrap();
         assert!(vf.starts_with("v360=input=e:output=flat:"), "{vf}");
-        assert!(vf.contains(":v_offset=-0.25:"), "{vf}");
-        lens.to = DistortTo::Panorama;
+        assert!(!vf.contains("v_offset"), "{vf}");
+        assert!(vf.contains(&format!(":w={}:h=1700:interp=cubic,crop={}:{}:0:0,", lens.width, lens.width, lens.height)), "{vf}");
+        // A crop past the rendered rows is held inside them.
+        lens.crop_y = 9999;
         j.lens = Some(lens);
-        let args = build_args(&j, "libx264", true, 3840, 1920, 30.0, None);
-        assert!(!value_after(&args, "-vf").unwrap().contains("v_offset"));
+        let vf = value_after(&build_args(&j, "libx264", true, 3840, 1920, 30.0, None), "-vf").unwrap();
+        assert!(vf.contains(&format!("crop={}:{}:0:{},", lens.width, lens.height, 1700 - lens.height)), "{vf}");
+        // No taller render, no cut.
+        lens.render_height = 0;
+        j.lens = Some(lens);
+        let vf = value_after(&build_args(&j, "libx264", true, 3840, 1920, 30.0, None), "-vf").unwrap();
+        assert!(!vf.contains("crop="), "{vf}");
     }
 
     #[test]
@@ -4110,7 +4123,7 @@ mod tests {
             "lens": { "from": "normal", "cx": 1.0, "cy": 2.0, "r": 3.0, "lensFov": 180.0,
                       "projection": "equisolid", "inHFov": 80.0, "inVFov": 50.0, "to": "planet",
                       "yaw": 1.0, "pitch": 2.0, "roll": 3.0, "hFov": 70.0, "vFov": 40.0,
-                      "vOffset": 0.0, "width": 640, "height": 360 }
+                      "width": 640, "height": 360 }
         }))
         .unwrap();
         let lens = job.lens.unwrap();

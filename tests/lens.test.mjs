@@ -167,3 +167,32 @@ test('every view keeps its shape at the centre, so its own size is the source de
     assert.ok(v > 0 && v <= 180, `${to}: ${v}`);
   }
 });
+
+test('a rise past what v360 can shift renders a taller view and keeps the right rows', async () => {
+  const L = await lensModule();
+  const lens = sky(L, { facing: 'forward', fov: 150, aspect: 16 / 9, size: 1080, rise: 0.8 });
+  const job = L.lensJob(lens, 3840, 2160);
+  assert.equal(job.height, 1080);
+  // 80% of a 1080 frame more rows above it, and the output keeps the top 1080.
+  assert.equal(job.renderHeight, 1080 + 864);
+  assert.equal(job.cropY, 0);
+  const t = Math.tan((L.verticalFov({ ...lens, aspect: job.width / job.height }) * RAD) / 2);
+  close(Math.tan((job.vFov * RAD) / 2), t * (1944 / 1080), 1e-4);
+  // The kept rows' centre is where the preview puts the frame's centre.
+  const centreTan = -Math.tan((job.vFov * RAD) / 2) + t;
+  close(centreTan, L.viewOffset({ ...lens, aspect: job.width / job.height }), 1e-3);
+  // Down keeps the bottom rows instead, and no rise renders just the frame.
+  const down = L.lensJob({ ...lens, rise: -0.5 }, 3840, 2160);
+  assert.equal(down.cropY, down.renderHeight - down.height);
+  const level = L.lensJob({ ...lens, rise: 0 }, 3840, 2160);
+  assert.equal(level.renderHeight, level.height);
+});
+
+test('a sky view can be dragged down to look straight below', async () => {
+  const L = await lensModule();
+  let lens = sky(L, { tilt: 100 });
+  for (let i = 0; i < 40; i += 1) lens = { ...lens, ...L.dragSky(lens, 0, -100, 1000) };
+  assert.equal(lens.tilt, 180);
+  const centre = L.viewRay(lens, 0.5, 0.5);
+  close(centre[2], -1, 1e-9);
+});

@@ -221,11 +221,10 @@ export function verticalFov(lens: Pick<LensState, 'to' | 'fov' | 'aspect'>): num
   }
 }
 
-/** v360's v_offset for the rise: half-heights in the tangent plane, up negative. */
+/** The rise as a shift of the normal view's tangent plane, in its own units, up negative. */
 export function viewOffset(lens: Pick<LensState, 'to' | 'fov' | 'aspect' | 'rise'>): number {
   if (lens.to !== 'normal' || lens.rise === 0) return 0;
-  const t = Math.tan((verticalFov(lens) * RAD) / 2);
-  return Math.max(-1, Math.min(1, -lens.rise * t));
+  return -lens.rise * Math.tan((verticalFov(lens) * RAD) / 2);
 }
 
 /** The output's own ray through a point, both coordinates 0 to 1, before the aim turns it. */
@@ -284,6 +283,15 @@ export function lensJob(lens: LensState, width: number, height: number): LensJob
   const round = (n: number) => Math.round(n * 1000) / 1000;
   // The output's fields follow its final shape, which rounding to even pixels nudges.
   const shaped = { ...lens, aspect: w / h };
+  let vFov = verticalFov(shaped), renderHeight = h, cropY = 0;
+  // v360's own v_offset stops at one tangent unit, which a wide view passes at a small rise.
+  // A taller view, cut down to the frame, shifts it any distance.
+  if (lens.to === 'normal' && lens.rise !== 0) {
+    const extra = 2 * Math.round((h * Math.abs(lens.rise)) / 2);
+    renderHeight = h + extra;
+    vFov = (2 * Math.atan((Math.tan((vFov * RAD) / 2) * renderHeight) / h)) / RAD;
+    cropY = lens.rise > 0 ? 0 : extra;
+  }
   return {
     from: lens.from,
     cx: round(lens.cx),
@@ -298,10 +306,11 @@ export function lensJob(lens: LensState, width: number, height: number): LensJob
     pitch: round(pitch),
     roll: round(roll),
     hFov: round(lens.fov),
-    vFov: round(verticalFov(shaped)),
-    vOffset: round(viewOffset(shaped)),
+    vFov: round(vFov),
     width: w,
     height: h,
+    renderHeight,
+    cropY,
   };
 }
 
@@ -321,7 +330,8 @@ export function dragSky(lens: LensState, dx: number, dy: number, width: number):
   const tilt = lens.tilt - dy * perPixel;
   return {
     pan: ((((pan + 180) % 360) + 360) % 360) - 180,
-    tilt: Math.max(0, Math.min(lens.lensFov / 2 + 30, tilt)),
+    // Up to straight down, past the lens's own edge.
+    tilt: Math.max(0, Math.min(180, tilt)),
   };
 }
 
@@ -360,7 +370,7 @@ export function aimAt(lens: LensState, target: Vec3, u: number, v: number): { pa
   }
   if (!Number.isFinite(pan) || !Number.isFinite(tilt)) return { pan: lens.pan, tilt: lens.tilt };
   pan = ((((pan + 180) % 360) + 360) % 360) - 180;
-  tilt = Math.max(-89.9, Math.min(89.9, tilt));
+  tilt = Math.max(-90, Math.min(90, tilt));
   return { pan, tilt };
 }
 

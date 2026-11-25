@@ -639,7 +639,7 @@ fn validate(job: &ExportJob) -> Result<(), String> {
     if let Some(lens) = job.lens {
         let finite = [
             lens.cx, lens.cy, lens.r, lens.lens_fov, lens.in_h_fov, lens.in_v_fov, lens.yaw, lens.pitch,
-            lens.roll, lens.h_fov, lens.v_fov, lens.v_offset,
+            lens.roll, lens.h_fov, lens.v_fov,
         ]
         .iter()
         .all(|v| v.is_finite());

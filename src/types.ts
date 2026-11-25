@@ -269,11 +269,13 @@ export interface LensJob {
   pitch: number;
   roll: number;
   hFov: number;
+  /** The field of the rendered view, which is taller than the output when it has a rise. */
   vFov: number;
-  /** v360's v_offset: a shift of the normal view, in units of its tangent plane. */
-  vOffset: number;
   width: number;
   height: number;
+  /** Rows v360 renders, and the first of them the output keeps: how a rise is made. */
+  renderHeight: number;
+  cropY: number;
 }
 
 /** One point on the speed curve: a multiplier on the speed slider, at a moment on the source

@@ -420,9 +420,10 @@ fn a_fisheye_view_exports_at_its_size_even_with_a_circle_hanging_off_the_frame()
             roll: 10.0,
             h_fov: 70.0,
             v_fov: 42.0,
-            v_offset: -0.2,
             width: 640,
             height: 360,
+            render_height: 432,
+            crop_y: 0,
         });
         let out = run_export(&j, 1920, 1080, 30.0, true);
         assert_eq!(dimensions_of(&out), (640, 360), "{name}");

@@ -18,6 +18,7 @@ import {
   viewRay,
   viewRotation,
 } from './lens';
+import { findLensCircle } from './lensfit';
 import { onTime, videoElement } from './player';
 import { edit, patchEdit, subscribe, ui } from './state';
 import { frameHeight, frameWidth, isTurned } from './types';
@@ -87,13 +88,77 @@ export function lensCanvas(): HTMLCanvasElement {
   return canvas;
 }
 
-/** The circle that fills the frame, the start for any fisheye. */
+/**
+ * The start for any fisheye: the round picture found in the frame on show, or failing that
+ * the circle that fills the frame. In turned frame pixels.
+ */
 export function fittedCircle(orientation: Orientation): Pick<LensState, 'cx' | 'cy' | 'r'> {
   const media = edit.media;
   if (!media) return { cx: 0, cy: 0, r: 0 };
   const turned = isTurned(orientation);
+  const found = findCircleOnShow(orientation);
+  if (found) return found;
   const d = defaultLens(turned ? media.height : media.width, turned ? media.width : media.height);
   return { cx: d.cx, cy: d.cy, r: d.r };
+}
+
+/** True while the circle is unset or still the frame-filling guess, so finding it is safe. */
+export function circleUnfitted(lens: LensState, orientation: Orientation): boolean {
+  const media = edit.media;
+  if (lens.r <= 0 || !media) return true;
+  const turned = isTurned(orientation);
+  const d = defaultLens(turned ? media.height : media.width, turned ? media.width : media.height);
+  return Math.abs(lens.cx - d.cx) < 0.5 && Math.abs(lens.cy - d.cy) < 0.5 && Math.abs(lens.r - d.r) < 0.5;
+}
+
+/** The lens circle in the decoded frame on show, moved into the turned frame, or null. */
+function findCircleOnShow(orientation: Orientation): Pick<LensState, 'cx' | 'cy' | 'r'> | null {
+  const media = edit.media;
+  const video = videoElement();
+  if (!media || video.readyState < 2 || !video.videoWidth || !video.videoHeight) return null;
+  const scale = Math.min(1, 640 / Math.max(video.videoWidth, video.videoHeight));
+  const w = Math.max(16, Math.round(video.videoWidth * scale));
+  const h = Math.max(16, Math.round(video.videoHeight * scale));
+  let pixels: Uint8ClampedArray;
+  try {
+    const work = document.createElement('canvas');
+    work.width = w;
+    work.height = h;
+    const ctx = work.getContext('2d', { willReadFrequently: true });
+    if (!ctx) return null;
+    ctx.drawImage(video, 0, 0, w, h);
+    pixels = ctx.getImageData(0, 0, w, h).data;
+  } catch {
+    return null;
+  }
+  const luma = new Uint8Array(w * h);
+  for (let i = 0; i < luma.length; i += 1) {
+    luma[i] = (pixels[i * 4] * 299 + pixels[i * 4 + 1] * 587 + pixels[i * 4 + 2] * 114) / 1000;
+  }
+  const found = findLensCircle(luma, w, h);
+  if (!found) return null;
+  const W = media.width, H = media.height;
+  const kx = W / w, ky = H / h;
+  const rx = found.cx * kx, ry = found.cy * ky, r = (found.r * (kx + ky)) / 2;
+  // Into the turned frame: the turn, then the flips, as the frame shows them.
+  let x: number, y: number;
+  switch (orientation.rotate) {
+    case 90:
+      [x, y] = [H - ry, rx];
+      break;
+    case 180:
+      [x, y] = [W - rx, H - ry];
+      break;
+    case 270:
+      [x, y] = [ry, W - rx];
+      break;
+    default:
+      [x, y] = [rx, ry];
+  }
+  const turned = isTurned(orientation);
+  if (orientation.flipH) x = (turned ? H : W) - x;
+  if (orientation.flipV) y = (turned ? W : H) - y;
+  return { cx: x, cy: y, r };
 }
 
 export function setLens(patch: Partial<LensState>): void {

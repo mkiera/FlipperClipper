@@ -50,7 +50,7 @@ import {
   fovRange,
   lensOutputSize,
 } from './lens';
-import { fittedCircle, isFitting, setFitting, setLens } from './lensview';
+import { circleUnfitted, fittedCircle, isFitting, setFitting, setLens } from './lensview';
 import { frameWidth, isTurned } from './types';
 import type {
   EffectId,
@@ -209,8 +209,8 @@ function buildRow(id: EffectId): HTMLElement {
     // Switching an effect on is nearly always followed by reaching for its dial.
     if (box.checked) expanded.add(id);
     let effects = withSwitch(edit.effects, id, box.checked);
-    // A lens circle starts as the largest the frame holds, measured once there is a frame.
-    if (id === 'distortion' && box.checked && effects.settings.distortion.r <= 0) {
+    // A lens circle starts as the round picture found in the frame on show, once there is one.
+    if (id === 'distortion' && box.checked && circleUnfitted(effects.settings.distortion, edit.orientation)) {
       effects = withSetting(effects, 'distortion', fittedCircle(edit.orientation));
     }
     patchEdit({ effects });
@@ -450,6 +450,7 @@ function buildDistortionBody(): HTMLElement[] {
     read: () => lens().roll,
     show: (v) => `${Math.round(v)}°`,
     write: (v) => setLens({ roll: v }),
+    snap: 0,
   });
   const rise = slider({
     label: 'Rise',
@@ -459,6 +460,7 @@ function buildDistortionBody(): HTMLElement[] {
     read: () => lens().rise,
     show: (v) => `${v > 0 ? '+' : ''}${Math.round(v * 100)}%`,
     write: (v) => setLens({ rise: v }),
+    snap: 0,
   });
   rise.title = 'Moves the frame up or down without tilting it, so upright things stay upright.';
 
@@ -788,6 +790,8 @@ interface SliderSpec {
   read: () => number;
   show: (value: number) => string;
   write: (value: number) => void;
+  /** A value a dragged thumb settles on when it comes near. */
+  snap?: number;
 }
 
 function slider(spec: SliderSpec, followsPlayhead = false): HTMLElement {
@@ -808,7 +812,19 @@ function slider(spec: SliderSpec, followsPlayhead = false): HTMLElement {
   const value = document.createElement('span');
   value.className = 'fx-value';
 
-  input.addEventListener('input', () => spec.write(Number(input.value)));
+  // Only a dragged thumb snaps: an arrow key's one step from the snap point must not undo itself.
+  let dragging = false;
+  input.addEventListener('pointerdown', () => (dragging = true));
+  for (const type of ['pointerup', 'pointercancel']) window.addEventListener(type, () => (dragging = false));
+  input.addEventListener('keydown', () => (dragging = false));
+  input.addEventListener('input', () => {
+    let v = Number(input.value);
+    if (dragging && spec.snap !== undefined && Math.abs(v - spec.snap) <= (spec.max - spec.min) * 0.02) {
+      v = spec.snap;
+      input.value = String(v);
+    }
+    spec.write(v);
+  });
 
   row.append(label, input, value);
   const update = () => {
