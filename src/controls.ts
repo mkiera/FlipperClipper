@@ -15,6 +15,7 @@ import {
 import { edit, patchEdit, patchUi, refresh, rememberQuality, rememberTargetMb, settings, subscribe, ui } from './state';
 import { currentTime, onTime, onTrackLevels, togglePlay, trackPreviewStatus } from './player';
 import { toggleCrop } from './crop';
+import { lensJob } from './lens';
 import { enabledIds, toEffectsJob } from './effects';
 import { toggleEffectsPanel } from './effectspanel';
 import { ensureMeasured } from './loudness';
@@ -29,12 +30,15 @@ import {
   VIDEO_KBPS_MIN,
   VOLUME_MAX,
   defaultFormatFor,
+  frameHeight,
+  frameWidth,
   losslessEligible,
   outputDuration,
   shortEdge,
   type AudioTrackInfo,
   type ExportFormat,
   type ExportJob,
+  type LensJob,
   type QualityPreset,
 } from './types';
 
@@ -602,8 +606,11 @@ function render(): void {
   reverseBtn.disabled = !hasMedia;
   reverseBtn.classList.toggle('active', edit.reverse);
 
-  cropBtn.disabled = !hasMedia;
-  cropBtn.classList.toggle('active', ui.cropping || edit.crop !== null);
+  // Distortion reshapes the frame the crop would be drawn on, so it takes the crop's place.
+  const distorted = edit.effects.on.distortion;
+  cropBtn.disabled = !hasMedia || distorted;
+  cropBtn.title = distorted ? 'Crop is off while the Distortion effect is on' : 'Crop (C)';
+  cropBtn.classList.toggle('active', ui.cropping || (edit.crop !== null && !distorted));
 
   const effectCount = enabledIds(edit.effects).length;
   effectsBtn.disabled = !hasMedia;
@@ -712,6 +719,7 @@ function estimateSignature(): string {
     edit.outPoint,
     edit.speed,
     crop ? `${crop.x},${crop.y},${crop.w},${crop.h}` : '',
+    distortionJob() ? JSON.stringify(distortionJob()) : '',
     edit.mute,
     edit.reverse,
     edit.volume,
@@ -794,6 +802,11 @@ export function closeExportPopover(): boolean {
   return true;
 }
 
+function distortionJob(): LensJob | null {
+  if (!edit.effects.on.distortion) return null;
+  return lensJob(edit.effects.settings.distortion, frameWidth(edit), frameHeight(edit));
+}
+
 function buildJob(input: string, output: string): ExportJob {
   return {
     input,
@@ -803,7 +816,8 @@ function buildJob(input: string, output: string): ExportJob {
     speed: edit.speed,
     ramp: edit.ramp,
     orientation: edit.orientation,
-    crop: edit.crop,
+    crop: edit.effects.on.distortion ? null : edit.crop,
+    lens: edit.audioOnly ? null : distortionJob(),
     mute: edit.mute,
     reverse: edit.reverse,
     normalize: edit.normalize,

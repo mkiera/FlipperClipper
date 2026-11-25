@@ -286,6 +286,208 @@ impl Orientation {
     }
 }
 
+/// How a fisheye lens maps the angle off its axis onto the picture: v360's input names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum LensProjection {
+    Equidistant,
+    Equisolid,
+    Stereographic,
+    Orthographic,
+}
+
+impl LensProjection {
+    fn v360(self) -> &'static str {
+        match self {
+            LensProjection::Equidistant => "fisheye",
+            LensProjection::Equisolid => "equisolid",
+            LensProjection::Stereographic => "sg",
+            LensProjection::Orthographic => "og",
+        }
+    }
+}
+
+/// What the source picture is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum DistortFrom {
+    Fisheye,
+    Normal,
+    Equirect,
+}
+
+/// What the Distortion effect draws, as v360's output names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum DistortTo {
+    Normal,
+    Panorama,
+    Equirect,
+    Fisheye,
+    Planet,
+}
+
+impl DistortTo {
+    fn v360(self) -> &'static str {
+        match self {
+            DistortTo::Normal => "flat",
+            DistortTo::Panorama => "cylindrical",
+            DistortTo::Equirect => "e",
+            DistortTo::Fisheye => "fisheye",
+            DistortTo::Planet => "sg",
+        }
+    }
+}
+
+/// The Distortion effect. The circle is in turned frame pixels; the angles are v360's yaw,
+/// pitch and roll in its default order, worked out by lens.ts.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LensJob {
+    pub from: DistortFrom,
+    pub cx: f64,
+    pub cy: f64,
+    pub r: f64,
+    pub lens_fov: f64,
+    pub projection: LensProjection,
+    pub in_h_fov: f64,
+    pub in_v_fov: f64,
+    pub to: DistortTo,
+    pub yaw: f64,
+    pub pitch: f64,
+    pub roll: f64,
+    pub h_fov: f64,
+    pub v_fov: f64,
+    pub width: i64,
+    pub height: i64,
+    /// Rows v360 renders before the output's own are cut from them at crop_y: a normal view's
+    /// rise. v360's v_offset stops at one tangent unit, which a wide view passes early.
+    #[serde(default)]
+    pub render_height: i64,
+    #[serde(default)]
+    pub crop_y: i64,
+}
+
+/// The output size of the Distortion effect: even, as the encoders need.
+fn lens_size(lens: &LensJob) -> (i64, i64) {
+    let even = |n: i64| (n.clamp(16, 8192) / 2) * 2;
+    (even(lens.width), even(lens.height))
+}
+
+/// A number for a filter argument: three decimals at most, no trailing zeros, never "-0".
+fn short_number(v: f64) -> String {
+    let s = format!("{:.3}", v);
+    let s = s.trim_end_matches('0').trim_end_matches('.').to_string();
+    if s == "-0" {
+        "0".to_string()
+    } else {
+        s
+    }
+}
+
+/// The fisheye's circle cut out as a square and centred, black where it runs off the frame
+/// and outside the circle. v360 maps its fisheye input's full width and height to the lens
+/// field, so the square has to be exactly the circle's diameter, and it reads past the field
+/// as if the picture went on, so everything outside the circle is masked to black. The mask
+/// is drawn once and held for every frame: drawing it per frame took six times as long.
+fn fisheye_square(lens: &LensJob, width: i64, height: i64) -> Vec<String> {
+    let side = ((lens.r * 2.0).round() as i64).max(2);
+    let side = side + side % 2;
+    // Every edge on an even pixel: 4:2:0 chroma cannot be cut or padded at an odd one.
+    let even = |v: i64| v - v.rem_euclid(2);
+    let left = even((lens.cx - side as f64 / 2.0).round() as i64);
+    let top = even((lens.cy - side as f64 / 2.0).round() as i64);
+    let x0 = left.clamp(0, even(width));
+    let y0 = top.clamp(0, even(height));
+    let x1 = (left + side).clamp(0, even(width));
+    let y1 = (top + side).clamp(0, even(height));
+    let mut parts = Vec::new();
+    if x1 - x0 >= 2 && y1 - y0 >= 2 {
+        if x0 != 0 || y0 != 0 || x1 != width || y1 != height {
+            parts.push(format!("crop={}:{}:{}:{}", x1 - x0, y1 - y0, x0, y0));
+        }
+        if x1 - x0 != side || y1 - y0 != side {
+            parts.push(format!("pad={side}:{side}:{}:{}:black", x0 - left, y0 - top));
+        }
+    } else {
+        // The circle lies wholly off the frame: what it sees is black.
+        parts.push(format!("crop=2:2:0:0,scale={side}:{side},drawbox=c=black:t=fill"));
+    }
+    let c = short_number(side as f64 / 2.0 - 0.5);
+    let rr = (side / 2) * (side / 2);
+    parts.push(format!(
+        "format=yuva420p[lenssq];color=c=white:s={side}x{side}:r=1:d=1,format=gray,geq=lum='if(lte((X-{c})*(X-{c})+(Y-{c})*(Y-{c}),{rr}),255,0)'[lensmask];[lenssq][lensmask]alphamerge"
+    ));
+    parts.push("premultiply=inplace=1".to_string());
+    parts.push("format=yuv420p".to_string());
+    parts
+}
+
+/// The Distortion effect: the source prepared for v360, then reprojected.
+fn lens_filters(lens: &LensJob, width: i64, height: i64) -> Vec<String> {
+    let (out_w, out_h) = lens_size(lens);
+    let f = short_number;
+    let mut parts = Vec::new();
+    let input = match lens.from {
+        DistortFrom::Fisheye => {
+            parts.extend(fisheye_square(lens, width, height));
+            format!(
+                "input={}:ih_fov={}:iv_fov={}",
+                lens.projection.v360(),
+                f(lens.lens_fov),
+                f(lens.lens_fov)
+            )
+        }
+        DistortFrom::Normal => {
+            // v360 fills what a normal camera never saw with its top-left pixel. Two black pixels
+            // round the edge make that black, and the field grows to cover them.
+            parts.push("pad=iw+4:ih+4:2:2:black".to_string());
+            let widen = |fov: f64, size: i64| {
+                let t = (fov.to_radians() / 2.0).tan() * (size + 4) as f64 / size.max(1) as f64;
+                2.0 * t.atan().to_degrees()
+            };
+            format!(
+                "input=flat:ih_fov={}:iv_fov={}",
+                f(widen(lens.in_h_fov, width)),
+                f(widen(lens.in_v_fov, height))
+            )
+        }
+        DistortFrom::Equirect => "input=e".to_string(),
+    };
+    let render_h = if lens.render_height > out_h { (lens.render_height.min(16384) / 2) * 2 } else { out_h };
+    parts.push(format!(
+        "v360={}:output={}:h_fov={}:v_fov={}:yaw={}:pitch={}:roll={}:w={}:h={}:interp=cubic",
+        input,
+        lens.to.v360(),
+        f(lens.h_fov),
+        f(lens.v_fov),
+        f(lens.yaw),
+        f(lens.pitch),
+        f(lens.roll),
+        out_w,
+        render_h
+    ));
+    if render_h > out_h {
+        let y = lens.crop_y.clamp(0, render_h - out_h);
+        parts.push(format!("crop={}:{}:0:{}", out_w, out_h, y));
+    }
+    // v360 hands back the input's sample aspect; the new frame has square pixels.
+    parts.push("setsar=1".to_string());
+    parts
+}
+
+/// The crop, or the lens view that takes its place, after the turn.
+fn framing_filters(job: &ExportJob, width: i64, height: i64) -> Vec<String> {
+    if let Some(lens) = job.lens.as_ref() {
+        return lens_filters(lens, width, height);
+    }
+    job.crop
+        .as_ref()
+        .and_then(|r| normalize_crop(r, width, height))
+        .map(|r| vec![format!("crop={}:{}:{}:{}", r.w, r.h, r.x, r.y)])
+        .unwrap_or_default()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExportJob {
@@ -301,6 +503,9 @@ pub struct ExportJob {
     #[serde(default)]
     pub orientation: Orientation,
     pub crop: Option<Rect>,
+    /// A fisheye view in place of the crop. When set, `crop` is ignored.
+    #[serde(default)]
+    pub lens: Option<LensJob>,
     pub mute: bool,
     pub reverse: bool,
     /// EBU R128 loudness normalisation. Emitted before `volume`, which trims from there.
@@ -1442,6 +1647,9 @@ pub fn turned_size(job: &ExportJob, width: i64, height: i64) -> (i64, i64) {
 }
 
 fn cropped_size(job: &ExportJob, width: i64, height: i64) -> (i64, i64) {
+    if let Some(lens) = job.lens.as_ref() {
+        return lens_size(lens);
+    }
     match job
         .crop
         .as_ref()
@@ -1801,19 +2009,13 @@ pub fn build_args_with_clips(
         // width without upscaling; the fps cap matters more, since gif has no interframe compression.
         // No -map, -an or -pix_fmt: with a filter_complex the graph's output is the only mapped
         // stream, and paletteuse emits pal8 that forcing yuv420p would break.
-        let crop = job
-            .crop
-            .as_ref()
-            .and_then(|r| normalize_crop(r, width, height));
         // The gif chain owns its own frame rate and width caps, so neither an
         // explicit output height nor an explicit bitrate applies here.
         let (fps_cap, width_cap) = gif_caps(job.quality);
 
         let mut chain: Vec<String> = Vec::new();
         chain.extend(job.orientation.filters());
-        if let Some(r) = crop {
-            chain.push(format!("crop={}:{}:{}:{}", r.w, r.h, r.x, r.y));
-        }
+        chain.extend(framing_filters(job, width, height));
         let (cut_width, cut_height) = cropped_size(job, width, height);
         chain.extend(source_clock_filters(job, cut_width, cut_height, fps));
         chain.extend(retime_filters(job, fps));
@@ -1868,10 +2070,6 @@ pub fn build_args_with_clips(
         push_all(&mut args, &["-an"]);
     }
 
-    let crop = job
-        .crop
-        .as_ref()
-        .and_then(|r| normalize_crop(r, width, height));
     let (effective_width, effective_height) = cropped_size(job, width, height);
 
     let is_webm = job.format == ExportFormat::Webm;
@@ -1886,11 +2084,9 @@ pub fn build_args_with_clips(
     let mut vfilters: Vec<String> = Vec::new();
     // Ahead of the crop, so the rectangle the UI produced lands on the frame it was drawn on.
     vfilters.extend(job.orientation.filters());
-    if let Some(r) = crop {
-        // Crop first, so setpts and scale only see the surviving pixels and the coordinates stay in
-        // the source pixel space the overlay measured them in.
-        vfilters.push(format!("crop={}:{}:{}:{}", r.w, r.h, r.x, r.y));
-    }
+    // Crop first, so setpts and scale only see the surviving pixels and the coordinates stay in
+    // the source pixel space the overlay measured them in.
+    vfilters.extend(framing_filters(job, width, height));
     // After the crop, so the boxes are measured in the frame the user drew them on, and before
     // anything retimes the stream, so their keyframes run on the source clock.
     vfilters.extend(source_clock_filters(job, effective_width, effective_height, fps));
@@ -2637,6 +2833,7 @@ mod tests {
             ramp: Vec::new(),
             orientation: Orientation::default(),
             crop: None,
+            lens: None,
             mute: false,
             reverse: false,
             normalize: false,
@@ -3737,6 +3934,205 @@ mod tests {
         let args = build_args(&j, "libx264", true, 1920, 1080, 30.0, None);
         assert_eq!(value_after(&args, "-vf"), Some("reverse"));
         assert_eq!(value_after(&args, "-af"), Some("areverse"));
+    }
+
+    // -- distortion ---------------------------------------------------------
+
+    fn sky_lens() -> LensJob {
+        LensJob {
+            from: DistortFrom::Fisheye,
+            cx: 1920.0,
+            cy: 1065.0,
+            r: 805.0,
+            lens_fov: 180.0,
+            projection: LensProjection::Equidistant,
+            in_h_fov: 90.0,
+            in_v_fov: 59.0,
+            to: DistortTo::Normal,
+            yaw: 0.0,
+            pitch: 35.5,
+            roll: -180.0,
+            h_fov: 70.0,
+            v_fov: 42.5,
+            render_height: 0,
+            crop_y: 0,
+            width: 722,
+            height: 406,
+        }
+    }
+
+    const SKY_MASK: &str = "format=yuva420p[lenssq];color=c=white:s=1610x1610:r=1:d=1,format=gray,geq=lum='if(lte((X-804.5)*(X-804.5)+(Y-804.5)*(Y-804.5),648025),255,0)'[lensmask];[lenssq][lensmask]alphamerge,premultiply=inplace=1,format=yuv420p,";
+
+    #[test]
+    fn a_fisheye_is_cut_square_masked_to_its_circle_and_reprojected() {
+        let mut j = job(QualityPreset::Balanced);
+        j.lens = Some(sky_lens());
+        let args = build_args(&j, "libx264", true, 3840, 2160, 30.0, None);
+        assert_eq!(
+            value_after(&args, "-vf"),
+            Some(format!("crop=1610:1610:1114:260,{SKY_MASK}v360=input=fisheye:ih_fov=180:iv_fov=180:output=flat:h_fov=70:v_fov=42.5:yaw=0:pitch=35.5:roll=-180:w=722:h=406:interp=cubic,setsar=1").as_str())
+        );
+    }
+
+    #[test]
+    fn a_circle_past_the_frame_edge_is_padded_back_to_its_full_square() {
+        let mut j = job(QualityPreset::Balanced);
+        let mut lens = sky_lens();
+        lens.cy = 700.0;
+        lens.r = 800.0;
+        j.lens = Some(lens);
+        let args = build_args(&j, "libx264", true, 3840, 2160, 30.0, None);
+        let vf = value_after(&args, "-vf").unwrap();
+        assert!(vf.starts_with("crop=1600:1500:1120:0,pad=1600:1600:0:100:black,format=yuva420p[lenssq]"), "{vf}");
+    }
+
+    #[test]
+    fn distortion_replaces_the_crop_and_sets_the_frame_size_downstream() {
+        let mut j = job(QualityPreset::Balanced);
+        j.crop = Some(Rect { x: 0, y: 0, w: 640, h: 360 });
+        j.lens = Some(sky_lens());
+        j.output_height = Some(360);
+        let args = build_args(&j, "libx264", true, 3840, 2160, 30.0, None);
+        let vf = value_after(&args, "-vf").unwrap();
+        assert!(!vf.contains("crop=640"), "{vf}");
+        // 722x406 scaled to a 360 short edge.
+        assert!(vf.contains("setsar=1,scale="), "{vf}");
+        assert_eq!(cropped_size(&j, 3840, 2160), (722, 406));
+    }
+
+    #[test]
+    fn distortion_follows_the_turn() {
+        let mut j = job(QualityPreset::Balanced);
+        j.orientation = Orientation { rotate: 90, flip_h: false, flip_v: false };
+        let mut lens = sky_lens();
+        lens.cx = 1080.0;
+        lens.cy = 1920.0;
+        lens.r = 1080.0;
+        j.lens = Some(lens);
+        let args = build_args(&j, "libx264", true, 3840, 2160, 30.0, None);
+        let vf = value_after(&args, "-vf").unwrap();
+        assert!(vf.starts_with("transpose=1,crop=2160:2160:0:840,format=yuva420p"), "{vf}");
+    }
+
+    #[test]
+    fn a_circle_barely_on_the_frame_cuts_on_even_pixels_only() {
+        let mut j = job(QualityPreset::Balanced);
+        let mut lens = sky_lens();
+        lens.cx = -804.0;
+        lens.cy = 1065.5;
+        lens.r = 805.0;
+        j.lens = Some(lens);
+        let args = build_args(&j, "libx264", true, 1921, 1081, 30.0, None);
+        let vf = value_after(&args, "-vf").unwrap();
+        assert!(vf.starts_with("crop=2:2:0:0,scale=1610:1610,drawbox"), "{vf}");
+        lens.cx = -803.0;
+        lens.cy = 1065.0;
+        j.lens = Some(lens);
+        let args = build_args(&j, "libx264", true, 1921, 1081, 30.0, None);
+        let vf = value_after(&args, "-vf").unwrap();
+        assert!(vf.starts_with("crop=2:820:0:260,pad=1610:1610:1608:0:black,format=yuva420p"), "{vf}");
+    }
+
+    #[test]
+    fn each_lens_type_and_view_has_its_v360_name() {
+        let mut j = job(QualityPreset::Balanced);
+        for (projection, name) in [
+            (LensProjection::Equisolid, "input=equisolid:"),
+            (LensProjection::Stereographic, "input=sg:"),
+            (LensProjection::Orthographic, "input=og:"),
+        ] {
+            let mut lens = sky_lens();
+            lens.projection = projection;
+            j.lens = Some(lens);
+            let args = build_args(&j, "libx264", true, 3840, 2160, 30.0, None);
+            assert!(value_after(&args, "-vf").unwrap().contains(name));
+        }
+        for (to, name) in [
+            (DistortTo::Panorama, "output=cylindrical:"),
+            (DistortTo::Equirect, "output=e:"),
+            (DistortTo::Fisheye, "output=fisheye:"),
+            (DistortTo::Planet, "output=sg:"),
+        ] {
+            let mut lens = sky_lens();
+            lens.to = to;
+            j.lens = Some(lens);
+            let args = build_args(&j, "libx264", true, 3840, 2160, 30.0, None);
+            assert!(value_after(&args, "-vf").unwrap().contains(name));
+        }
+    }
+
+    #[test]
+    fn a_normal_source_gets_a_black_edge_and_the_field_that_covers_it() {
+        let mut j = job(QualityPreset::Balanced);
+        let mut lens = sky_lens();
+        lens.from = DistortFrom::Normal;
+        lens.in_h_fov = 90.0;
+        lens.in_v_fov = 90.0;
+        lens.to = DistortTo::Fisheye;
+        j.lens = Some(lens);
+        let args = build_args(&j, "libx264", true, 1000, 1000, 30.0, None);
+        let vf = value_after(&args, "-vf").unwrap();
+        // tan(45) * 1004 / 1000 is 1.004: 2 atan of that is 90.229 degrees.
+        assert!(vf.starts_with("pad=iw+4:ih+4:2:2:black,v360=input=flat:ih_fov=90.229:iv_fov=90.229:output=fisheye:"), "{vf}");
+        assert!(!vf.contains("geq"), "{vf}");
+    }
+
+    #[test]
+    fn a_360_source_goes_straight_in_and_a_rise_renders_taller_then_cuts() {
+        let mut j = job(QualityPreset::Balanced);
+        let mut lens = sky_lens();
+        lens.from = DistortFrom::Equirect;
+        lens.render_height = 1700;
+        lens.crop_y = 0;
+        j.lens = Some(lens);
+        let args = build_args(&j, "libx264", true, 3840, 1920, 30.0, None);
+        let vf = value_after(&args, "-vf").unwrap();
+        assert!(vf.starts_with("v360=input=e:output=flat:"), "{vf}");
+        assert!(!vf.contains("v_offset"), "{vf}");
+        assert!(vf.contains(&format!(":w={}:h=1700:interp=cubic,crop={}:{}:0:0,", lens.width, lens.width, lens.height)), "{vf}");
+        // A crop past the rendered rows is held inside them.
+        lens.crop_y = 9999;
+        j.lens = Some(lens);
+        let args = build_args(&j, "libx264", true, 3840, 1920, 30.0, None);
+        let vf = value_after(&args, "-vf").unwrap();
+        assert!(vf.contains(&format!("crop={}:{}:0:{},", lens.width, lens.height, 1700 - lens.height)), "{vf}");
+        // No taller render, no cut.
+        lens.render_height = 0;
+        j.lens = Some(lens);
+        let args = build_args(&j, "libx264", true, 3840, 1920, 30.0, None);
+        let vf = value_after(&args, "-vf").unwrap();
+        assert!(!vf.contains("crop="), "{vf}");
+    }
+
+    #[test]
+    fn a_gif_takes_the_distortion_too() {
+        let mut j = job(QualityPreset::Balanced);
+        j.format = ExportFormat::Gif;
+        j.output = "out.gif".to_string();
+        j.lens = Some(sky_lens());
+        let args = build_args(&j, "libx264", true, 3840, 2160, 30.0, None);
+        let graph = value_after(&args, "-filter_complex").unwrap();
+        assert!(graph.starts_with("crop=1610:1610:1114:260,format=yuva420p[lenssq]"), "{graph}");
+    }
+
+    #[test]
+    fn a_lens_job_reads_from_the_ui_names() {
+        let job: ExportJob = serde_json::from_value(serde_json::json!({
+            "input": "in.mp4", "output": "out.mp4", "inPoint": 0.0, "outPoint": 1.0,
+            "speed": 1.0, "crop": null, "mute": false, "reverse": false, "normalize": false,
+            "volume": 1.0, "format": "mp4", "quality": "balanced", "targetMb": null,
+            "lossless": false, "outputHeight": null, "videoKbps": null,
+            "lens": { "from": "normal", "cx": 1.0, "cy": 2.0, "r": 3.0, "lensFov": 180.0,
+                      "projection": "equisolid", "inHFov": 80.0, "inVFov": 50.0, "to": "planet",
+                      "yaw": 1.0, "pitch": 2.0, "roll": 3.0, "hFov": 70.0, "vFov": 40.0,
+                      "width": 640, "height": 360 }
+        }))
+        .unwrap();
+        let lens = job.lens.unwrap();
+        assert_eq!(lens.from, DistortFrom::Normal);
+        assert_eq!(lens.to, DistortTo::Planet);
+        assert_eq!(lens.projection, LensProjection::Equisolid);
+        assert_eq!((lens.width, lens.height), (640, 360));
     }
 
     // -- crop ---------------------------------------------------------------

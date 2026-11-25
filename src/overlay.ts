@@ -13,6 +13,8 @@
  */
 
 import { frameGeometry } from './crop';
+import { lensOutputSize } from './lens';
+import { currentLens, lensCanvas, showsFlatView } from './lensview';
 import { KEYED_IDS, activeAt, blurPixels, cssFilterFor, dialAt, effectKeys, hasEffect, rgba } from './effects';
 import { currentTime, onTime, videoElement } from './player';
 import { blockSize, clampRegion, sourceBounds, stateAt, withEdit } from './redact';
@@ -301,6 +303,11 @@ function renderRedactions(): void {
 
 /** The frame the export redacts: the crop when there is one, in turned source pixels. */
 function cutSize(): { x: number; y: number; w: number; h: number } {
+  const lens = currentLens();
+  if (lens) {
+    const out = lensOutputSize(lens, frameWidth(edit));
+    return { x: 0, y: 0, w: out.w, h: out.h };
+  }
   return edit.crop ?? { x: 0, y: 0, w: frameWidth(edit), h: frameHeight(edit) };
 }
 
@@ -374,11 +381,16 @@ function drawPixelate(
   // transform is: flips act on the turned picture.
   toWork(wctx);
   wctx.filter = grade || 'none';
-  wctx.translate(-cut.x, -cut.y);
-  wctx.translate(frameWidth(edit) / 2, frameHeight(edit) / 2);
-  wctx.scale(flipH ? -1 : 1, flipV ? -1 : 1);
-  wctx.rotate((rotate * Math.PI) / 180);
-  wctx.drawImage(video, -media.width / 2, -media.height / 2, media.width, media.height);
+  if (showsFlatView()) {
+    // The flat view is already turned and reprojected: it is the cut frame itself.
+    wctx.drawImage(lensCanvas(), 0, 0, cut.w, cut.h);
+  } else {
+    wctx.translate(-cut.x, -cut.y);
+    wctx.translate(frameWidth(edit) / 2, frameHeight(edit) / 2);
+    wctx.scale(flipH ? -1 : 1, flipV ? -1 : 1);
+    wctx.rotate((rotate * Math.PI) / 180);
+    wctx.drawImage(video, -media.width / 2, -media.height / 2, media.width, media.height);
+  }
   wctx.filter = 'none';
 
   for (const { item: before, state } of earlier) {

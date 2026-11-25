@@ -9,7 +9,7 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager};
 
 use crate::export_output::{validate_destination, PendingOutput};
-use crate::ffmpeg::{self, Effects, ExportFormat, ExportJob, QualityPreset};
+use crate::ffmpeg::{self, DistortFrom, DistortTo, Effects, ExportFormat, ExportJob, QualityPreset};
 use crate::ramp;
 use crate::settings::EncoderPreference;
 use crate::{AppState, ExportSlot};
@@ -636,6 +636,31 @@ fn validate(job: &ExportJob) -> Result<(), String> {
         }
     }
 
+    if let Some(lens) = job.lens {
+        let finite = [
+            lens.cx, lens.cy, lens.r, lens.lens_fov, lens.in_h_fov, lens.in_v_fov, lens.yaw, lens.pitch,
+            lens.roll, lens.h_fov, lens.v_fov,
+        ]
+        .iter()
+        .all(|v| v.is_finite());
+        if !finite {
+            return Err("The Distortion settings are not usable.".to_string());
+        }
+        if lens.from == DistortFrom::Fisheye && (lens.r < 1.0 || !(1.0..=360.0).contains(&lens.lens_fov)) {
+            return Err("The fisheye lens circle is not usable.".to_string());
+        }
+        if lens.from == DistortFrom::Normal
+            && (!(1.0..180.0).contains(&lens.in_h_fov) || !(1.0..180.0).contains(&lens.in_v_fov))
+        {
+            return Err("The source's field must be between 1 and 179 degrees.".to_string());
+        }
+        // A normal view's tangent plane cannot reach 180 degrees; the curved views go round.
+        let most = if lens.to == DistortTo::Normal { 179.9 } else { 360.0 };
+        if !(1.0..=most).contains(&lens.h_fov) || !(1.0..=most).contains(&lens.v_fov) {
+            return Err("The Distortion view's field is out of range.".to_string());
+        }
+    }
+
     Ok(())
 }
 
@@ -958,6 +983,7 @@ mod tests {
             ramp: Vec::new(),
             orientation: ffmpeg::Orientation::default(),
             crop: None,
+            lens: None,
             mute: false,
             reverse: false,
             normalize: false,

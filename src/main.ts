@@ -30,10 +30,11 @@ import { appendClips, byFileName, isPlain, MAX_CLIPS, timelineKey, toPieces } fr
 import type { MediaInfo } from './types';
 import { initTimeline } from './timeline';
 import { initCrop } from './crop';
+import { initLensView } from './lensview';
 import { initKeyLane } from './keylane';
 import { initRampLane } from './ramplane';
 import { initOverlay } from './overlay';
-import { initEffectsPanel } from './effectspanel';
+import { initEffectsPanel, isEffectRowOpen } from './effectspanel';
 import { describe, hideBanner, initControls, showBanner, showFfmpegBanner, showToast } from './controls';
 import { initShortcuts } from './shortcuts';
 import { initFocusRelease } from './focus';
@@ -84,6 +85,7 @@ function boot(): void {
   initTimeline();
   initClipLane({ addClips: () => void addViaDialog() });
   initCrop();
+  initLensView(() => isEffectRowOpen('distortion'));
   initRampLane();
   initKeyLane();
   // After crop: the overlays are placed on the crop rectangle when there is one.

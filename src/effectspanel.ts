@@ -37,14 +37,30 @@ import {
   selectedRedaction,
   updateRedaction,
 } from './redactedit';
-import { edit, patchEdit, patchUi, subscribe, ui } from './state';
-import { isTurned } from './types';
+import { edit, patchEdit, patchUi, refresh, subscribe, ui } from './state';
+import {
+  DISTORT_FROM,
+  DISTORT_TO,
+  LENS_FOV_MAX,
+  LENS_FOV_MIN,
+  LENS_PROJECTIONS,
+  LENS_SIZES,
+  SOURCE_FOV_MAX,
+  SOURCE_FOV_MIN,
+  fovRange,
+  lensOutputSize,
+  maxLensField,
+  viewRise,
+} from './lens';
+import { circleUnfitted, fittedCircle, isFitting, movedCircle, setFitting, setLens } from './lensview';
+import { frameWidth, isTurned } from './types';
 import type {
   EffectId,
   EffectSettings,
   KeyedEffectId,
   Orientation,
   RedactItem,
+  LensState,
   TextAnchorX,
   TextAnchorY,
 } from './types';
@@ -60,6 +76,11 @@ let countLabel!: HTMLElement;
 /** More than one row can be open: they are short, and comparing two dials is the usual reason
  *  to open a second one. */
 const expanded = new Set<EffectId>();
+
+/** Whether an effect's row is open, for the stage's own controls of that effect. */
+export function isEffectRowOpen(id: EffectId): boolean {
+  return expanded.has(id);
+}
 
 /** Every control registers how to refresh itself, so render() never rebuilds the DOM. */
 const updaters: (() => void)[] = [];
@@ -159,7 +180,14 @@ function chip(name: string, title: string, run: () => void): HTMLButtonElement {
 function setOrientation(patch: Partial<Orientation>): void {
   const orientation = { ...edit.orientation, ...patch };
   const swapped = isTurned(orientation) !== isTurned(edit.orientation);
-  patchEdit({ orientation, ...(swapped && edit.crop ? { crop: null } : {}) });
+  patchEdit({
+    orientation,
+    ...(swapped && edit.crop ? { crop: null } : {}),
+    // The lens circle stays on the same part of the picture.
+    ...(edit.effects.settings.distortion.r > 0
+      ? { effects: withSetting(edit.effects, 'distortion', movedCircle(edit.effects.settings.distortion, edit.orientation, orientation)) }
+      : {}),
+  });
 }
 
 /* --- Rows --- */
@@ -184,7 +212,12 @@ function buildRow(id: EffectId): HTMLElement {
   box.addEventListener('change', () => {
     // Switching an effect on is nearly always followed by reaching for its dial.
     if (box.checked) expanded.add(id);
-    patchEdit({ effects: withSwitch(edit.effects, id, box.checked) });
+    let effects = withSwitch(edit.effects, id, box.checked);
+    // A lens circle starts as the round picture found in the frame on show, once there is one.
+    if (id === 'distortion' && box.checked && circleUnfitted(effects.settings.distortion, edit.orientation)) {
+      effects = withSetting(effects, 'distortion', fittedCircle(edit.orientation));
+    }
+    patchEdit({ effects });
   });
 
   const opener = document.createElement('button');
@@ -203,7 +236,8 @@ function buildRow(id: EffectId): HTMLElement {
   opener.addEventListener('click', () => {
     if (expanded.has(id)) expanded.delete(id);
     else expanded.add(id);
-    render();
+    // Through the state's listeners: an open Distortion row hands the picture its controls.
+    refresh();
   });
 
   head.append(label, opener);
@@ -238,6 +272,8 @@ function buildRow(id: EffectId): HTMLElement {
 
 function buildBody(id: EffectId): HTMLElement[] {
   switch (id) {
+    case 'distortion':
+      return buildDistortionBody();
     case 'brightness':
       return [multiplier('Amount', 'brightness')];
     case 'contrast':
@@ -276,6 +312,220 @@ function buildBody(id: EffectId): HTMLElement[] {
     case 'text':
       return buildTextBody();
   }
+}
+
+/* --- Distortion --- */
+
+const ASPECTS: { label: string; value: number }[] = [
+  { label: '16:9', value: 16 / 9 },
+  { label: '4:3', value: 4 / 3 },
+  { label: '1:1', value: 1 },
+  { label: '9:16', value: 9 / 16 },
+];
+
+function lens(): LensState {
+  return edit.effects.settings.distortion;
+}
+
+function chipGroup<T>(name: string, options: { label: string; value: T }[], pick: (value: T) => void, current: () => T): HTMLElement {
+  const group = document.createElement('div');
+  group.className = 'chips fx-modes';
+  group.setAttribute('role', 'group');
+  group.setAttribute('aria-label', name);
+  const chips = options.map((option) => {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'chip';
+    button.textContent = option.label;
+    button.addEventListener('click', () => pick(option.value));
+    group.append(button);
+    return { button, option };
+  });
+  updaters.push(() => {
+    for (const { button, option } of chips) {
+      const on = option.value === current();
+      button.classList.toggle('active', on);
+      button.setAttribute('aria-pressed', String(on));
+    }
+  });
+  return group;
+}
+
+function selectOf(name: string, options: { label: string; value: string }[], pick: (value: string) => void, current: () => string): HTMLSelectElement {
+  const select = document.createElement('select');
+  select.setAttribute('aria-label', name);
+  select.title = name;
+  select.replaceChildren(...options.map((o) => new Option(o.label, o.value)));
+  select.addEventListener('change', () => pick(select.value));
+  updaters.push(() => {
+    if (select.value !== current()) select.value = current();
+  });
+  return select;
+}
+
+function buildDistortionBody(): HTMLElement[] {
+  const from = chipGroup('Source', DISTORT_FROM, (value) => {
+    // Each source reads the aim differently, so the view starts over looking straight ahead.
+    setLens({ from: value, pan: 0, tilt: 0, roll: 0 });
+  }, () => lens().from);
+
+  const projection = selectOf(
+    'Lens type. Most fisheye and all-sky lenses are equidistant.',
+    LENS_PROJECTIONS,
+    (value) => {
+      const projection = value as LensState['projection'];
+      setLens({ projection, lensFov: Math.min(maxLensField(projection), lens().lensFov) });
+    },
+    () => lens().projection,
+  );
+  const facing = selectOf(
+    'Which way the camera points. Up keeps the sky above the horizon, for an all-sky camera.',
+    [
+      { label: 'Camera faces up', value: 'up' },
+      { label: 'Camera faces forward', value: 'forward' },
+    ],
+    (value) => setLens({ facing: value === 'forward' ? 'forward' : 'up', pan: 0, tilt: 0, roll: 0 }),
+    () => lens().facing,
+  );
+  const fit = document.createElement('button');
+  fit.type = 'button';
+  fit.className = 'btn';
+  fit.textContent = 'Fit lens circle';
+  fit.title = 'Show the source picture, and drag the ring onto the edge of the round picture';
+  fit.addEventListener('click', () => setFitting(!isFitting()));
+  updaters.push(() => {
+    const on = isFitting();
+    fit.classList.toggle('active', on);
+    fit.setAttribute('aria-pressed', String(on));
+  });
+  const fisheyeLine = document.createElement('div');
+  fisheyeLine.className = 'fx-line fx-fill';
+  fisheyeLine.append(projection, facing);
+  const lensField = slider({
+    label: 'Lens field',
+    min: LENS_FOV_MIN,
+    max: LENS_FOV_MAX,
+    step: 1,
+    read: () => lens().lensFov,
+    show: (v) => `${Math.round(v)}°`,
+    write: (v) => setLens({ lensFov: Math.min(maxLensField(lens().projection), v) }),
+  });
+  const fitLine = document.createElement('div');
+  fitLine.className = 'fx-line';
+  fitLine.append(fit);
+
+  const sourceField = slider({
+    label: 'Source field',
+    min: SOURCE_FOV_MIN,
+    max: SOURCE_FOV_MAX,
+    step: 1,
+    read: () => lens().sourceFov,
+    show: (v) => `${Math.round(v)}°`,
+    write: (v) => setLens({ sourceFov: v }),
+  });
+
+  const to = selectOf(
+    'Output view',
+    DISTORT_TO,
+    (value) => {
+      const next = value as LensState['to'];
+      const range = fovRange(next);
+      setLens({ to: next, fov: Math.min(range.max, Math.max(range.min, lens().fov)) });
+    },
+    () => lens().to,
+  );
+  const toLine = labelled('Into', to);
+  to.classList.add('fx-wide');
+
+  const field = slider({
+    label: 'Field',
+    min: 5,
+    max: 360,
+    step: 1,
+    read: () => lens().fov,
+    show: (v) => `${Math.round(v)}°`,
+    write: (v) => {
+      const range = fovRange(lens().to);
+      setLens({ fov: Math.min(range.max, Math.max(range.min, v)) });
+    },
+  });
+  const turn = slider({
+    label: 'Turn',
+    min: -180,
+    max: 180,
+    step: 1,
+    read: () => lens().roll,
+    show: (v) => `${Math.round(v)}°`,
+    write: (v) => setLens({ roll: v }),
+    snap: 0,
+  });
+  const rise = slider({
+    label: 'Rise',
+    min: -1,
+    max: 1,
+    step: 0.01,
+    read: () => viewRise(lens()),
+    show: (v) => `${v > 0 ? '+' : ''}${Math.round(v * 100)}%`,
+    write: (v) => setLens({ rise: viewRise({ ...lens(), rise: v }) }),
+    snap: 0,
+  });
+  rise.title = 'Moves the frame up or down without tilting it, so upright things stay upright.';
+  const fill = slider({
+    label: 'Fill',
+    min: 0,
+    max: 1,
+    step: 0.01,
+    read: () => lens().fill || 0,
+    show: (v) => `${Math.round(v * 100)}%`,
+    write: (v) => setLens({ fill: v }),
+    snap: 0,
+  });
+  fill.title = 'Stretches the picture over the part the lens never saw, so less of the view is black.';
+
+  const aspect = chipGroup('Shape', ASPECTS, (value) => setLens({ aspect: value }), () => lens().aspect);
+  const size = document.createElement('select');
+  size.setAttribute('aria-label', 'Output size');
+  size.title = 'Output size';
+  const detail = new Option('Source detail', '');
+  size.replaceChildren(detail, ...LENS_SIZES.map((s) => new Option(`${s}p`, String(s))));
+  size.addEventListener('change', () => setLens({ size: size.value === '' ? null : Number(size.value) }));
+  const outLine = document.createElement('div');
+  outLine.className = 'fx-line fx-fill';
+  size.classList.add('fx-wide');
+  outLine.append(aspect);
+
+  updaters.push(() => {
+    const l = lens();
+    const fisheye = l.from === 'fisheye';
+    fisheyeLine.hidden = !fisheye;
+    lensField.hidden = !fisheye;
+    fitLine.hidden = !fisheye;
+    sourceField.hidden = l.from !== 'normal';
+    fill.hidden = !fisheye;
+    const riseInput = rise.querySelector('input');
+    if (riseInput) {
+      const most = viewRise({ ...l, rise: 1 });
+      riseInput.min = String(-most);
+      riseInput.max = String(most);
+      riseInput.disabled = most === 0;
+      if (most > 0) riseInput.step = String(most / 100);
+      if (document.activeElement !== riseInput) riseInput.value = String(viewRise(l));
+    }
+    const lensInput = lensField.querySelector('input');
+    if (lensInput) lensInput.max = String(maxLensField(l.projection));
+    const range = fovRange(l.to);
+    const input = field.querySelector('input');
+    if (input) {
+      input.min = String(range.min);
+      input.max = String(range.max);
+    }
+    const native = lensOutputSize({ ...l, size: null }, frameWidth(edit));
+    detail.textContent = `Source detail (${native.w} x ${native.h})`;
+    const value = l.size === null ? '' : String(l.size);
+    if (size.value !== value) size.value = value;
+  });
+
+  return [from, fisheyeLine, lensField, fitLine, sourceField, toLine, field, turn, rise, fill, outLine, size];
 }
 
 function buildRedactBody(): HTMLElement[] {
@@ -569,6 +819,8 @@ interface SliderSpec {
   read: () => number;
   show: (value: number) => string;
   write: (value: number) => void;
+  /** A value a dragged thumb settles on when it comes near. */
+  snap?: number;
 }
 
 function slider(spec: SliderSpec, followsPlayhead = false): HTMLElement {
@@ -589,7 +841,21 @@ function slider(spec: SliderSpec, followsPlayhead = false): HTMLElement {
   const value = document.createElement('span');
   value.className = 'fx-value';
 
-  input.addEventListener('input', () => spec.write(Number(input.value)));
+  // Only a dragged thumb snaps: an arrow key's one step from the snap point must not undo itself.
+  let dragging = false;
+  input.addEventListener('pointerdown', () => (dragging = true));
+  for (const type of ['pointerup', 'pointercancel']) window.addEventListener(type, () => (dragging = false));
+  input.addEventListener('keydown', () => (dragging = false));
+  input.addEventListener('input', () => {
+    let v = Number(input.value);
+    // A detent about three pixels of thumb travel wide each side, whatever the slider's length.
+    const zone = (Number(input.max) - Number(input.min)) * (input.clientWidth > 0 ? 3 / input.clientWidth : 0.02);
+    if (dragging && spec.snap !== undefined && Math.abs(v - spec.snap) <= zone) {
+      v = spec.snap;
+      input.value = String(v);
+    }
+    spec.write(v);
+  });
 
   row.append(label, input, value);
   const update = () => {

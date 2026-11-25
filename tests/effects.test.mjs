@@ -27,7 +27,14 @@ async function load(name, links = {}) {
 async function modules() {
   const redact = await load('redact');
   const valuekeys = await load('valuekeys');
-  const effects = await load('effects', { './redact': { ...redact }, './valuekeys': { ...valuekeys } });
+  const ramp = await load('ramp');
+  const types = await load('types', { './ramp': { ...ramp } });
+  const lens = await load('lens', { './types': { ...types } });
+  const effects = await load('effects', {
+    './redact': { ...redact },
+    './valuekeys': { ...valuekeys },
+    './lens': { ...lens },
+  });
   return { redact, valuekeys, fx: effects };
 }
 

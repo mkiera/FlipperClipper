@@ -205,6 +205,7 @@ export interface EffectSettings {
   /** The keyframes animate the opacity and whether the text shows. */
   text: TextOverlay & { keys: ValueKey[] };
   redact: { items: RedactItem[] };
+  distortion: LensState;
 }
 
 export type EffectId = keyof EffectSettings;
@@ -214,6 +215,69 @@ export type EffectId = keyof EffectSettings;
 export interface EffectsState {
   on: Record<EffectId, boolean>;
   settings: EffectSettings;
+}
+
+export type LensProjection = 'equidistant' | 'equisolid' | 'stereographic' | 'orthographic';
+
+/** What the source picture is. */
+export type DistortFrom = 'fisheye' | 'normal' | 'equirect';
+/** What the export draws. 'planet' is the stereographic projection. */
+export type DistortTo = 'normal' | 'panorama' | 'equirect' | 'fisheye' | 'planet';
+
+/** The Distortion effect: the source reprojected into another view. Frame pixels are turned. */
+export interface LensState {
+  from: DistortFrom;
+  /** The fisheye's lens circle. Its radius is where rays lensFov / 2 off the axis land. */
+  cx: number;
+  cy: number;
+  r: number;
+  /** Degrees across the whole circle. */
+  lensFov: number;
+  projection: LensProjection;
+  /** 'up' frames the view with the sky above it, the way an all-sky camera is read. */
+  facing: 'up' | 'forward';
+  /** A normal source's horizontal field, degrees. */
+  sourceFov: number;
+  to: DistortTo;
+  /** Degrees. See viewRotation in lens.ts. */
+  pan: number;
+  tilt: number;
+  roll: number;
+  /** The view's horizontal field, degrees. */
+  fov: number;
+  /** The view's frame shifted up (positive) or down, in half-heights, without tilting. */
+  rise: number;
+  /** 0 to 1: how far a fisheye's picture is stretched over the part of the sphere its lens never saw. */
+  fill: number;
+  /** Width over height. */
+  aspect: number;
+  /** The output's short edge, or null for the detail the source holds at the view's centre. */
+  size: number | null;
+}
+
+/** The Distortion effect as the export takes it: ready for v360. */
+export interface LensJob {
+  from: DistortFrom;
+  cx: number;
+  cy: number;
+  r: number;
+  lensFov: number;
+  projection: LensProjection;
+  /** A normal source's field, degrees. */
+  inHFov: number;
+  inVFov: number;
+  to: DistortTo;
+  yaw: number;
+  pitch: number;
+  roll: number;
+  hFov: number;
+  /** The field of the rendered view, which is taller than the output when it has a rise. */
+  vFov: number;
+  width: number;
+  height: number;
+  /** Rows v360 renders, and the first of them the output keeps: how a rise is made. */
+  renderHeight: number;
+  cropY: number;
 }
 
 /** One point on the speed curve: a multiplier on the speed slider, at a moment on the source
@@ -259,6 +323,8 @@ export interface ExportJob {
   /** Applied at the head of the chain, so the crop rectangle is in the turned frame. */
   orientation: Orientation;
   crop: Rect | null;
+  /** The Distortion effect. It replaces the crop. */
+  lens: LensJob | null;
   mute: boolean;
   reverse: boolean;
   /** EBU R128 loudness normalisation. Runs before volume, which trims from the level it sets. */
@@ -462,8 +528,76 @@ export function defaultFormatFor(inputPath: string): VideoFormat {
   }
 }
 
+const LENS_MAX_EDGE = 8192;
+const LENS_RAD = Math.PI / 180;
+
+/** Source pixels per radian where the view looks. `width` is the turned frame's width. */
+/** The widest lens field a projection can describe: orthographic stops at the side, and
+ *  stereographic runs off to infinity at 360. */
+export function maxLensField(projection: LensProjection): number {
+  return projection === 'orthographic' ? 180 : projection === 'stereographic' ? 300 : 360;
+}
+
+/** The lens field the camera model works with: the lens's own, held to what its projection can
+ *  describe, then widened by the fill toward the most that projection reaches. */
+export function filledLensField(lens: Pick<LensState, 'projection' | 'lensFov' | 'fill'>): number {
+  const most = maxLensField(lens.projection);
+  const own = Math.min(most, lens.lensFov);
+  return own + (most - own) * Math.max(0, Math.min(1, lens.fill || 0));
+}
+
+function sourceDensity(lens: LensState, width: number): number {
+  const half = (filledLensField(lens) * LENS_RAD) / 2;
+  switch (lens.from) {
+    case 'normal':
+      return width / 2 / Math.tan((lens.sourceFov * LENS_RAD) / 2);
+    case 'equirect':
+      return width / (2 * Math.PI);
+  }
+  switch (lens.projection) {
+    case 'equisolid':
+      return lens.r / (2 * Math.sin(half / 2));
+    case 'stereographic':
+      return lens.r / (2 * Math.tan(half / 2));
+    case 'orthographic':
+      return lens.r / Math.sin(Math.min(half, Math.PI / 2));
+    default:
+      return lens.r / half;
+  }
+}
+
+function evenEdge(n: number): number {
+  return Math.max(2, 2 * Math.round(n / 2));
+}
+
+/** The output frame: the source's own detail at the view's centre, or the short edge picked.
+ *  `width` is the turned frame's width. */
+export function lensOutputSize(lens: LensState, width: number): { w: number; h: number } {
+  const h = lens.fov * LENS_RAD;
+  // The output's width in units of its own centre's pixels per radian.
+  const span =
+    lens.to === 'normal' ? 2 * Math.tan(h / 2) : lens.to === 'planet' ? 4 * Math.tan(h / 4) : h;
+  let w: number, ht: number;
+  if (lens.size === null) {
+    w = span * sourceDensity(lens, width);
+    ht = w / lens.aspect;
+  } else if (lens.aspect >= 1) {
+    ht = lens.size;
+    w = ht * lens.aspect;
+  } else {
+    w = lens.size;
+    ht = w / lens.aspect;
+  }
+  const shrink = Math.min(1, LENS_MAX_EDGE / Math.max(w, ht));
+  return { w: evenEdge(Math.max(16, w * shrink)), h: evenEdge(Math.max(16, ht * shrink)) };
+}
+
 /** The smaller dimension of the frame after crop; null with no media. */
 export function shortEdge(state: EditState): number | null {
+  if (state.effects.on.distortion) {
+    const size = lensOutputSize(state.effects.settings.distortion, frameWidth(state));
+    return Math.min(size.w, size.h);
+  }
   const width = state.crop?.w ?? state.media?.width ?? null;
   const height = state.crop?.h ?? state.media?.height ?? null;
   return width === null || height === null ? null : Math.min(width, height);

@@ -2,6 +2,7 @@ import { edit, patchEdit, patchUi, subscribe, ui } from './state';
 import { frameHeight, frameWidth, isTurned } from './types';
 import { videoElement } from './player';
 import type { Rect } from './types';
+import { lensFrameBox, showsFlatView } from './lensview';
 
 interface Box {
   left: number;
@@ -90,7 +91,7 @@ export function isCropping(): boolean {
 }
 
 export function enterCrop(): void {
-  if (!edit.media || ui.cropping) return;
+  if (!edit.media || ui.cropping || edit.effects.on.distortion) return;
   working = edit.crop ? { ...edit.crop } : fullFrame();
   aspect = null;
   markActiveChip();
@@ -142,6 +143,9 @@ export interface FrameGeometry {
 
 /** Null while there is no media, or before the element has been laid out. */
 export function frameGeometry(host: HTMLElement): FrameGeometry | null {
+  // The flat view replaces the frame: the overlays sit on it, measured in its output pixels.
+  if (showsFlatView()) return lensFrameBox(host);
+
   const box = contentBox(host);
   if (!box) return null;
 
@@ -206,7 +210,7 @@ function buildMark(): void {
 
 function drawMark(): void {
   const crop = edit.crop;
-  const show = crop !== null && edit.media !== null && !ui.cropping;
+  const show = crop !== null && edit.media !== null && !ui.cropping && !edit.effects.on.distortion;
   // Unhidden before measuring: display:none reports a zero rect.
   markLayer.hidden = !show;
   if (!crop || !show) return;
@@ -267,7 +271,7 @@ function coversFrame(r: Rect): boolean {
 // Letterbox math uses videoWidth/videoHeight - ffprobe's stored dimensions ignore sample
 // aspect, so on anamorphic footage every crop comes out offset. The rect itself stays in
 // frameWidth(edit)/height, which is the space ffmpeg's crop filter takes.
-function contentBox(host: HTMLElement): Box | null {
+export function contentBox(host: HTMLElement): Box | null {
   const media = edit.media;
   if (!media || frameWidth(edit) <= 0 || frameHeight(edit) <= 0) return null;
 
